@@ -1,0 +1,110 @@
+{
+  "name": "stuff-diver",
+  "version": "0.4.2",
+  "description": "Dive deep into your disk — treemap, pie chart & duplicate finder",
+  "author": {
+    "name": "Stuff Diver",
+    "email": "info@stuffdiver.com"
+  },
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder",
+    "build:mac": "electron-builder --mac --arm64 --x64",
+    "build:win": "electron-builder --win --arm64 --x64",
+    "build:linux": "electron-builder --linux --arm64 --x64"
+  },
+  "build": {
+    "appId": "com.stuffdiver.app",
+    "productName": "Stuff Diver",
+    "directories": {
+      "output": "dist"
+    },
+    "icon": "build/icon.png",
+    "publish": {
+      "provider": "github",
+      "owner": "cryptopoly",
+      "repo": "StuffDiver"
+    },
+    "afterSign": "scripts/notarize.js",
+    "mac": {
+      "icon": "build/icon.icns",
+      "artifactName": "Stuff-Diver-${version}-${arch}.${ext}",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
+      ],
+      "category": "public.app-category.utilities",
+      "entitlements": "entitlements.mac.plist",
+      "entitlementsInherit": "entitlements.mac.plist",
+      "extendInfo": {
+        "NSDesktopFolderUsageDescription": "Stuff Diver needs access to scan folder sizes and find duplicates.",
+        "NSDocumentsFolderUsageDescription": "Stuff Diver needs access to scan folder sizes and find duplicates.",
+        "NSDownloadsFolderUsageDescription": "Stuff Diver needs access to scan folder sizes and find duplicates."
+      }
+    },
+    "win": {
+      "icon": "build/icon.png",
+      "artifactName": "Stuff-Diver-Setup-${version}.${ext}",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
+      ]
+    },
+    "linux": {
+      "artifactName": "Stuff-Diver-${version}-${arch}.${ext}",
+      "target": [
+        {
+          "target": "AppImage",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        },
+        {
+          "target": "deb",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
+      ],
+      "category": "Utility"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "index.html",
+      "styles.css",
+      "renderer.js",
+      "logo.png"
+    ]
+  },
+  "devDependencies": {
+    "@electron/notarize": "^3.1.1",
+    "electron": "^35.1.2",
+    "electron-builder": "^26.0.12"
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.3"
+  }
+}

@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data:">
+  <title>Stuff Diver</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header>
+    <div class="header-row header-row-1">
+      <div class="header-left">
+        <div class="brand">
+          <img class="logo-img" src="logo.png" alt="Stuff Diver">
+          <h1>Stuff Diver</h1>
+        </div>
+        <button id="select-folder">Select Folder</button>
+        <span id="folder-path"></span>
+      </div>
+      <div class="header-right">
+        <span id="app-version" class="app-version"></span>
+        <div class="toolbar-dropdown-wrap">
+          <button id="tools-btn" class="settings-btn" title="Tools">&#128736;</button>
+          <div id="tools-dropdown" class="toolbar-dropdown hidden">
+            <button data-tool="cleanup">&#128230; Smart Cleanup</button>
+            <button data-tool="forecast">&#128200; Storage Forecast</button>
+            <button data-tool="monitor">&#128065; Watch Folder</button>
+          </div>
+        </div>
+        <button id="help-btn" class="settings-btn" title="Help Guide">?</button>
+        <button id="settings-btn" class="settings-btn" title="Settings">&#9881;</button>
+        <button id="theme-toggle" class="theme-toggle-btn" title="Toggle light/dark mode">
+          <span class="theme-icon-dark">&#9790;</span>
+          <span class="theme-icon-light">&#9728;</span>
+        </button>
+      </div>
+    </div>
+    <div class="header-row header-row-2">
+      <div class="toolbar-group">
+        <span class="toolbar-label">View</span>
+        <div class="view-toggle">
+          <button id="view-treemap">Treemap</button>
+          <button id="view-rings" class="active">Rings</button>
+          <button id="view-pie">Pie Chart</button>
+          <button id="view-bubblemap">Bubbles</button>
+          <button id="view-table">Table</button>
+          <button id="view-histogram">Histogram</button>
+          <button id="view-timeline">Timeline</button>
+        </div>
+      </div>
+      <div class="toolbar-sep"></div>
+      <div class="toolbar-group">
+        <span class="toolbar-label">Colour</span>
+        <div class="color-toggle">
+          <button id="color-age" class="active">Age</button>
+          <button id="color-type">Type</button>
+          <button id="color-folder">Folder</button>
+        </div>
+      </div>
+      <div class="toolbar-sep"></div>
+      <div class="toolbar-group">
+        <select id="cloud-filter" class="cloud-filter-select" title="Filter by storage location">
+          <option value="all">All Files</option>
+          <option value="local">Local Only</option>
+          <option value="online">Online Only</option>
+        </select>
+      </div>
+      <div class="toolbar-sep"></div>
+      <div class="toolbar-group toolbar-actions">
+        <button id="view-duplicates" class="dup-toggle">Find Duplicates</button>
+        <div class="toolbar-dropdown-wrap">
+          <button id="btn-export" class="export-btn">Export &#9662;</button>
+          <div id="export-dropdown" class="toolbar-dropdown hidden">
+            <button data-export="csv">Export CSV</button>
+            <button data-export="html">Export HTML Report</button>
+            <button data-export="tags">Export Tags Report</button>
+          </div>
+        </div>
+        <button id="btn-compare" class="export-btn">Compare Scans</button>
+        <button id="btn-filter" class="export-btn">Filter</button>
+      </div>
+    </div>
+  </header>
+
+  <div id="stats" class="hidden"></div>
+  <div id="stats-summary" class="hidden"></div>
+  <div id="filter-bar" class="hidden"></div>
+  <div id="bubble-breadcrumb" class="hidden">
+    <span id="breadcrumb-trail"></span>
+  </div>
+
+  <!-- Update banner -->
+  <div id="update-banner" class="hidden">
+    <span id="update-banner-text"></span>
+    <button id="update-banner-details">View Details</button>
+    <button id="update-banner-dismiss" class="update-dismiss">&times;</button>
+  </div>
+
+  <!-- Settings modal -->
+  <div id="settings-overlay" class="modal-overlay hidden">
+    <div class="settings-modal">
+      <div class="settings-header">
+        <h2>Settings</h2>
+        <button id="settings-close" class="settings-close-btn">&times;</button>
+      </div>
+      <div class="settings-body">
+        <div class="settings-section">
+          <label class="settings-label">App Version</label>
+          <span id="settings-version" class="settings-value"></span>
+        </div>
+        <div class="settings-section">
+          <button id="settings-check-update" class="settings-btn-primary">Check for Updates</button>
+          <span id="settings-update-status" class="settings-update-status"></span>
+        </div>
+        <div id="settings-update-result" class="settings-update-result hidden">
+          <div id="settings-update-version" class="settings-update-version"></div>
+          <div id="settings-update-notes" class="settings-update-notes"></div>
+          <div id="settings-download-progress" class="settings-download-progress hidden">
+            <div class="progress-bar-track">
+              <div id="settings-progress-fill" class="progress-bar-fill"></div>
+            </div>
+            <span id="settings-progress-text" class="progress-text">0%</span>
+          </div>
+          <button id="settings-download-btn" class="settings-btn-download">Download &amp; Install Update</button>
+          <button id="settings-install-btn" class="settings-btn-install hidden">Restart &amp; Install Now</button>
+        </div>
+        <div class="settings-section settings-save-row">
+          <button id="settings-save" class="settings-btn-primary">Save Settings</button>
+          <span id="settings-save-status" class="settings-save-status"></span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <main>
+    <div id="folder-panel" class="hidden">
+      <div class="folder-header">
+        <span class="fh-name">Folder</span>
+        <button id="folder-sort-toggle" class="folder-sort-btn" title="Toggle sort: Size / Name">&#8693;</button>
+        <span class="fh-size">Size</span>
+        <span class="fh-count">Contents</span>
+        <span class="fh-date">Modified</span>
+      </div>
+      <div id="folder-tree"></div>
+    </div>
+    <div id="visualization">
+      <div id="treemap-breadcrumb" class="treemap-breadcrumb hidden"></div>
+      <div class="empty-state" id="empty-state-wrap">
+        <img class="logo-img-large" src="logo.png" alt="Stuff Diver">
+        <h2 class="hero-tagline">Watch your disk space come alive</h2>
+        <div class="hero-demo">
+          <div class="hero-block" style="top:0;left:0;width:55%;height:60%;background:#34d399;animation-delay:0.2s"></div>
+          <div class="hero-block" style="top:0;left:56%;width:44%;height:35%;background:#f87171;animation-delay:0.5s"></div>
+          <div class="hero-block" style="top:36%;left:56%;width:22%;height:64%;background:#60a5fa;animation-delay:0.8s"></div>
+          <div class="hero-block" style="top:36%;left:79%;width:21%;height:34%;background:#a78bfa;animation-delay:1.1s"></div>
+          <div class="hero-block" style="top:61%;left:0;width:30%;height:39%;background:#fbbf24;animation-delay:1.4s"></div>
+          <div class="hero-block" style="top:61%;left:31%;width:25%;height:39%;background:#c084fc;animation-delay:1.7s"></div>
+          <div class="hero-block" style="top:71%;left:79%;width:21%;height:29%;background:#22d3ee;animation-delay:2.0s"></div>
+          <div class="hero-block" style="top:71%;left:57%;width:21%;height:29%;background:#fb7185;animation-delay:2.3s"></div>
+        </div>
+        <button id="empty-state-btn" class="empty-state-cta">&#128194; Select Folder</button>
+        <p class="empty-hint">or drag & drop a folder anywhere</p>
+        <div class="hero-features">
+          <div class="hero-feature">
+            <span class="hero-feature-icon">&#9889;</span>
+            <span class="hero-feature-text">Live animated scans</span>
+          </div>
+          <div class="hero-feature">
+            <span class="hero-feature-icon">&#128269;</span>
+            <span class="hero-feature-text">Find duplicates instantly</span>
+          </div>
+          <div class="hero-feature">
+            <span class="hero-feature-icon">&#128465;</span>
+            <span class="hero-feature-text">Smart cleanup tools</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <!-- Collector panel (deletion staging area) -->
+  <div id="collector-panel" class="hidden">
+    <div class="collector-header">
+      <span class="collector-title">🗑 Collector</span>
+      <span id="collector-count">0 items</span>
+      <span id="collector-size">0 B</span>
+      <div class="collector-actions">
+        <button id="collector-clear" class="collector-btn-clear">Clear</button>
+        <button id="collector-delete" class="collector-btn-delete">Delete All</button>
+      </div>
+    </div>
+    <div id="collector-list"></div>
+  </div>
+
+  <div id="detail-panel">
+    <div class="detail-bar">
+      <div class="detail-info">
+        <span id="detail-name"></span>
+        <span id="detail-path"></span>
+        <span id="detail-size"></span>
+      </div>
+      <div class="detail-actions">
+        <button id="action-open">Open</button>
+        <button id="action-preview">Quick Look</button>
+        <button id="action-show">Show in Finder</button>
+        <button id="action-collect" class="action-collect">Add to Collector</button>
+        <div class="toolbar-dropdown-wrap">
+          <button id="action-tag" class="action-tag">Tag &#9662;</button>
+          <div id="tag-dropdown" class="toolbar-dropdown hidden">
+            <button data-tag="keep">&#128994; Keep</button>
+            <button data-tag="reviewed">&#128309; Reviewed</button>
+            <button data-tag="delete">&#128308; Delete</button>
+          </div>
+        </div>
+        <button id="detail-expand" class="detail-expand-btn" title="Toggle preview">&#9650;</button>
+      </div>
+    </div>
+    <div id="detail-preview" class="detail-preview hidden">
+      <div id="preview-content"></div>
+    </div>
+  </div>
+
+  <div id="loading" class="hidden">
+    <div class="loading-logo-wrap">
+      <img class="logo-img-loading" src="logo.png" alt="Stuff Diver">
+    </div>
+    <div id="scan-progress-bar" class="scan-progress-bar">
+      <div id="scan-progress-fill" class="scan-progress-fill"></div>
+    </div>
+    <p id="loading-text">Diving in...</p>
+  </div>
+
+  <div id="tooltip"></div>
+
+  <!-- Context menu -->
+  <div id="context-menu" class="context-menu hidden">
+    <button data-action="open">&#8599; Open</button>
+    <button data-action="preview">&#128269; Quick Look</button>
+    <button data-action="finder">&#128194; Show in Finder</button>
+    <div class="ctx-separator"></div>
+    <button data-action="collect">&#128465; Add to Collector</button>
+    <button data-action="copypath">&#128203; Copy Path</button>
+    <button data-action="copysize">&#128203; Copy Size</button>
+    <div class="ctx-separator"></div>
+    <button data-action="tag-keep">&#128994; Tag: Keep</button>
+    <button data-action="tag-reviewed">&#128309; Tag: Reviewed</button>
+    <button data-action="tag-delete">&#128308; Tag: Delete</button>
+  </div>
+
+  <!-- Cleanup modal -->
+  <div id="cleanup-overlay" class="modal-overlay hidden">
+    <div class="cleanup-modal">
+      <div class="settings-header">
+        <h2>&#128230; Smart Cleanup</h2>
+        <button id="cleanup-close" class="settings-close-btn">&times;</button>
+      </div>
+      <div id="cleanup-body" class="settings-body"></div>
+    </div>
+  </div>
+
+  <!-- Forecast modal -->
+  <div id="forecast-overlay" class="modal-overlay hidden">
+    <div class="forecast-modal">
+      <div class="settings-header">
+        <h2>&#128200; Storage Forecast</h2>
+        <button id="forecast-close" class="settings-close-btn">&times;</button>
+      </div>
+      <div id="forecast-body" class="settings-body">
+        <canvas id="forecast-chart"></canvas>
+        <div id="forecast-summary"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Locate-by-Type modal -->
+  <div id="locate-overlay" class="modal-overlay hidden">
+    <div class="locate-modal">
+      <div class="settings-header">
+        <h2 id="locate-title">Locate</h2>
+        <button id="locate-close" class="settings-close-btn">&times;</button>
+      </div>
+      <div id="locate-body" class="settings-body"></div>
+    </div>
+  </div>
+
+  <!-- Watch Folder modal -->
+  <div id="monitor-overlay" class="modal-overlay hidden">
+    <div class="monitor-modal">
+      <div class="settings-header">
+        <h2>&#128065; Watch Folder</h2>
+        <button id="monitor-close" class="settings-close-btn">&times;</button>
+      </div>
+      <div class="settings-body">
+        <div class="settings-section">
+          <label class="settings-label">Monitored Folder</label>
+          <div class="monitor-folder-row">
+            <span id="monitor-folder-path" class="monitor-path-text">None selected</span>
+            <button id="monitor-select-folder" class="settings-btn-primary">Select</button>
+          </div>
+        </div>
+        <div class="settings-section">
+          <label class="settings-label">Check Interval</label>
+          <select id="monitor-interval" class="settings-input">
+            <option value="21600000">Every 6 hours</option>
+            <option value="86400000" selected>Daily</option>
+            <option value="604800000">Weekly</option>
+          </select>
+        </div>
+        <div class="settings-section">
+          <label class="settings-toggle-row">
+            <input type="checkbox" id="monitor-enabled">
+            <span>Enable background monitoring</span>
+          </label>
+          <p class="monitor-hint">Get system notifications when your folder grows significantly. App stays in system tray when minimised.</p>
+        </div>
+        <div class="settings-section settings-save-row">
+          <button id="monitor-save" class="settings-btn-primary">Save</button>
+          <span id="monitor-status" class="settings-save-status"></span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Help Guide modal -->
+  <div id="help-overlay" class="modal-overlay hidden">
+    <div class="help-modal">
+      <div class="help-modal-header">
+        <div>
+          <h2>How to use Stuff Diver</h2>
+          <span class="help-subtitle">Disk space visualisation, analysis, and cleanup</span>
+        </div>
+        <button id="help-close" class="settings-close-btn">&times;</button>
+      </div>
+      <div class="help-search-wrap">
+        <input id="help-search" type="text" placeholder="Search views, tools, export, shortcuts..." autocomplete="off">
+        <span id="help-section-count" class="help-section-count"></span>
+      </div>
+      <div id="help-body" class="help-body"></div>
+    </div>
+  </div>
+
+  <script src="renderer.js"></script>
+</body>
+</html>
