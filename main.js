@@ -74,23 +74,35 @@ ipcMain.handle('scan-folder', async (event, folderPath) => {
   }
 
   function propagate(node) {
+    if (!node || !node.children) return;
     for (const child of Object.values(node.children)) {
       propagate(child);
       node.size += child.size;
       node.fileCount += child.fileCount;
       if (child.mtime > node.mtime) node.mtime = child.mtime;
-      // Merge extension sizes up
-      for (const [ext, sz] of Object.entries(child.extSizes)) {
-        node.extSizes[ext] = (node.extSizes[ext] || 0) + sz;
+      if (child.extSizes) {
+        for (const [ext, sz] of Object.entries(child.extSizes)) {
+          node.extSizes[ext] = (node.extSizes[ext] || 0) + sz;
+        }
       }
     }
-    // Compute dominant extension
     let maxExt = null, maxSz = 0;
-    for (const [ext, sz] of Object.entries(node.extSizes)) {
-      if (sz > maxSz) { maxSz = sz; maxExt = ext; }
+    if (node.extSizes) {
+      for (const [ext, sz] of Object.entries(node.extSizes)) {
+        if (sz > maxSz) { maxSz = sz; maxExt = ext; }
+      }
     }
     node.dominantExt = maxExt;
-    delete node.extSizes; // no longer needed, keep payload small
+  }
+
+  function cleanupTree(node) {
+    if (!node) return;
+    delete node.extSizes;
+    if (node.children) {
+      for (const child of Object.values(node.children)) {
+        cleanupTree(child);
+      }
+    }
   }
 
   async function walk(dir, depth) {
@@ -140,7 +152,12 @@ ipcMain.handle('scan-folder', async (event, folderPath) => {
   }
 
   await walk(folderPath, 0);
-  propagate(folderTree);
+  try {
+    propagate(folderTree);
+    cleanupTree(folderTree);
+  } catch (e) {
+    console.error('Tree build error:', e.stack || e);
+  }
 
   files.sort((a, b) => b.size - a.size);
   return { files: files.slice(0, 500), totalFiles: files.length, totalSize: files.reduce((s, f) => s + f.size, 0), skippedDirs: skipped, folderTree };

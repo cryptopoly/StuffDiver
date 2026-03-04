@@ -84,24 +84,24 @@ h1 {
   gap: 10px;
 }
 
-#color-mode {
-  padding: 5px 8px;
-  background: #0f0f1a;
-  color: #ccc;
+.dup-toggle {
+  padding: 6px 14px;
+  background: transparent;
+  color: #888;
   border: 1px solid #2a2a4a;
   border-radius: 6px;
   font-size: 12px;
   cursor: pointer;
-  outline: none;
 }
 
-#color-mode:hover {
+.dup-toggle:hover {
   border-color: #3a3a5a;
+  color: #ccc;
 }
 
-#color-mode option {
-  background: #1a1a2e;
-  color: #ccc;
+.dup-toggle.active {
+  background: #2a2a4a;
+  color: #e0e0e0;
 }
 
 .view-toggle {
@@ -701,6 +701,33 @@ main {
 .bubble-label-hint {
   fill: rgba(255, 255, 255, 0.4);
   text-anchor: middle;
+  pointer-events: none;
+}
+
+/* Rings chart (sunburst) */
+
+.rings-container {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.rings-arc {
+  cursor: pointer;
+  transition: filter 0.12s;
+}
+
+.rings-arc:hover {
+  filter: brightness(1.3);
+}
+
+.rings-center {
+  transition: fill 0.15s;
+}
+
+.rings-center-label {
   pointer-events: none;
 }
 

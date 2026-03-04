@@ -34,11 +34,12 @@
   let displayFiles = [];
   let selectedFile = null;
   let viewMode = 'treemap';
+  let lastChartMode = 'treemap';
   let totalFiles = 0;
   let totalSize = 0;
   let skippedDirs = 0;
   let duplicateResults = null; // null = not scanned, [] = scanned
-  let colorMode = 'type'; // 'type' | 'folder' | 'age'
+  let colorMode = 'type';
   let folderTree = null;       // hierarchical tree from scan
   let bubblePath = [];         // current drill-down path segments
   let bubbleCurrentNode = null; // current tree node being displayed
@@ -47,7 +48,7 @@
   let viz, detailPanel, detailName, detailPath, detailSize;
   let actionOpen, actionPreview, actionShow;
   let tooltip, loading, loadingText, statsEl;
-  let btnSelectFolder, btnTreemap, btnPie, btnBubblemap, btnDuplicates, folderPathEl, colorModeSelect;
+  let btnSelectFolder, btnTreemap, btnPie, btnBubblemap, btnRings, btnDuplicates, folderPathEl;
   let bubbleBreadcrumb, breadcrumbTrail;
 
   // === Utilities ===
@@ -686,11 +687,12 @@
     }
     bubbleCurrentNode = node;
     updateBreadcrumb();
-    renderBubbleMap();
+    if (viewMode === 'rings') renderRingsChart();
+    else renderBubbleMap();
   }
 
   function updateBreadcrumb() {
-    if (viewMode !== 'bubblemap' || bubblePath.length === 0) {
+    if ((viewMode !== 'bubblemap' && viewMode !== 'rings') || bubblePath.length === 0) {
       bubbleBreadcrumb.classList.add('hidden');
       return;
     }
@@ -908,10 +910,284 @@
     updateBreadcrumb();
   }
 
+  // === Rendering: Rings Chart (Sunburst) ===
+
+  function renderRingsChart() {
+    viz.innerHTML = '';
+
+    if (!folderTree) {
+      renderEmpty('Select a folder to dive into');
+      return;
+    }
+
+    if (!bubbleCurrentNode) bubbleCurrentNode = folderTree;
+    const rootNode = bubbleCurrentNode;
+
+    const w = viz.clientWidth;
+    const h = viz.clientHeight;
+    if (w < 10 || h < 10) return;
+
+    const cx = w / 2;
+    const cy = h / 2;
+    const maxRadius = Math.min(w, h) * 0.45;
+    const MAX_DEPTH = 5;
+    const MIN_ANGLE = 0.008; // ~0.46 degrees
+    const RING_GAP = 1.5;
+
+    const centerRadius = maxRadius * 0.20;
+    const ringWidth = (maxRadius - centerRadius) / MAX_DEPTH;
+
+    // Build arc data recursively
+    const arcs = [];
+
+    function buildArcs(node, depth, startAngle, endAngle) {
+      if (depth > MAX_DEPTH) return;
+      if (!node.children) return;
+
+      const children = Object.values(node.children)
+        .filter(c => c.size > 0)
+        .sort((a, b) => b.size - a.size);
+
+      if (!children.length) return;
+
+      let currentAngle = startAngle;
+
+      for (const child of children) {
+        const childSpan = (child.size / node.size) * (endAngle - startAngle);
+        if (childSpan < MIN_ANGLE) continue;
+
+        const childStart = currentAngle;
+        const childEnd = currentAngle + childSpan;
+        const innerR = centerRadius + (depth - 1) * ringWidth + RING_GAP;
+        const outerR = centerRadius + depth * ringWidth - RING_GAP;
+
+        arcs.push({
+          node: child,
+          depth,
+          startAngle: childStart,
+          endAngle: childEnd,
+          innerR,
+          outerR
+        });
+
+        buildArcs(child, depth + 1, childStart, childEnd);
+        currentAngle = childEnd;
+      }
+    }
+
+    buildArcs(rootNode, 1, 0, Math.PI * 2);
+
+    // SVG
+    const ns = 'http://www.w3.org/2000/svg';
+    const svg = document.createElementNS(ns, 'svg');
+    svg.setAttribute('width', w);
+    svg.setAttribute('height', h);
+    svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+
+    // Text shadow filter
+    const defs = document.createElementNS(ns, 'defs');
+    const filter = document.createElementNS(ns, 'filter');
+    filter.setAttribute('id', 'rings-shadow');
+    filter.setAttribute('x', '-20%');
+    filter.setAttribute('y', '-20%');
+    filter.setAttribute('width', '140%');
+    filter.setAttribute('height', '140%');
+    const shadow = document.createElementNS(ns, 'feDropShadow');
+    shadow.setAttribute('dx', '0');
+    shadow.setAttribute('dy', '1');
+    shadow.setAttribute('stdDeviation', '1.5');
+    shadow.setAttribute('flood-color', '#000');
+    shadow.setAttribute('flood-opacity', '0.85');
+    filter.appendChild(shadow);
+    defs.appendChild(filter);
+    svg.appendChild(defs);
+
+    // Center circle (click to go up)
+    const centerGroup = document.createElementNS(ns, 'g');
+    centerGroup.style.cursor = bubblePath.length > 0 ? 'zoom-out' : 'default';
+
+    const centerCircle = document.createElementNS(ns, 'circle');
+    centerCircle.setAttribute('cx', cx);
+    centerCircle.setAttribute('cy', cy);
+    centerCircle.setAttribute('r', centerRadius);
+    centerCircle.setAttribute('fill', '#1a1a2e');
+    centerCircle.setAttribute('stroke', '#2a2a4a');
+    centerCircle.setAttribute('stroke-width', '2');
+    centerCircle.classList.add('rings-center');
+    centerGroup.appendChild(centerCircle);
+
+    // Center label: folder name
+    const centerName = document.createElementNS(ns, 'text');
+    centerName.setAttribute('x', cx);
+    centerName.setAttribute('y', cy - 6);
+    centerName.setAttribute('text-anchor', 'middle');
+    centerName.setAttribute('dominant-baseline', 'central');
+    centerName.setAttribute('fill', '#e0e0e0');
+    centerName.setAttribute('font-size', Math.min(13, centerRadius / 4));
+    centerName.setAttribute('font-weight', '600');
+    centerName.setAttribute('filter', 'url(#rings-shadow)');
+    centerName.classList.add('rings-center-label');
+    const maxCenterChars = Math.floor(centerRadius * 2 / 8);
+    const rootName = rootNode.name || '(root)';
+    centerName.textContent = rootName.length > maxCenterChars
+      ? rootName.substring(0, maxCenterChars - 1) + '\u2026'
+      : rootName;
+    centerGroup.appendChild(centerName);
+
+    // Center sub-label: total size
+    const centerSize = document.createElementNS(ns, 'text');
+    centerSize.setAttribute('x', cx);
+    centerSize.setAttribute('y', cy + 10);
+    centerSize.setAttribute('text-anchor', 'middle');
+    centerSize.setAttribute('dominant-baseline', 'central');
+    centerSize.setAttribute('fill', '#00b4d8');
+    centerSize.setAttribute('font-size', Math.min(11, centerRadius / 5));
+    centerSize.setAttribute('font-weight', '600');
+    centerSize.setAttribute('filter', 'url(#rings-shadow)');
+    centerSize.textContent = formatSize(rootNode.size);
+    centerGroup.appendChild(centerSize);
+
+    // Hint: click to go up
+    if (bubblePath.length > 0) {
+      const upHint = document.createElementNS(ns, 'text');
+      upHint.setAttribute('x', cx);
+      upHint.setAttribute('y', cy + 24);
+      upHint.setAttribute('text-anchor', 'middle');
+      upHint.setAttribute('dominant-baseline', 'central');
+      upHint.setAttribute('fill', 'rgba(255,255,255,0.35)');
+      upHint.setAttribute('font-size', Math.min(9, centerRadius / 6));
+      upHint.setAttribute('filter', 'url(#rings-shadow)');
+      upHint.textContent = '\u2191 click to go up';
+      centerGroup.appendChild(upHint);
+    }
+
+    centerGroup.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (bubblePath.length > 0) navigateBubble(bubblePath.slice(0, -1));
+    });
+    centerGroup.addEventListener('mouseenter', (e) => {
+      if (bubblePath.length > 0) centerCircle.setAttribute('fill', '#222240');
+      showBubbleTooltip(e, {
+        name: rootNode.name || '(root)',
+        path: rootNode.path || '',
+        size: rootNode.size,
+        fileCount: rootNode.fileCount
+      });
+    });
+    centerGroup.addEventListener('mousemove', moveTooltip);
+    centerGroup.addEventListener('mouseleave', () => {
+      centerCircle.setAttribute('fill', '#1a1a2e');
+      hideTooltip();
+    });
+
+    svg.appendChild(centerGroup);
+
+    // Arc path helper
+    function arcPath(startAngle, endAngle, innerR, outerR) {
+      const a1 = startAngle - Math.PI / 2;
+      const a2 = endAngle - Math.PI / 2;
+
+      const x1i = cx + innerR * Math.cos(a1);
+      const y1i = cy + innerR * Math.sin(a1);
+      const x2i = cx + innerR * Math.cos(a2);
+      const y2i = cy + innerR * Math.sin(a2);
+      const x1o = cx + outerR * Math.cos(a1);
+      const y1o = cy + outerR * Math.sin(a1);
+      const x2o = cx + outerR * Math.cos(a2);
+      const y2o = cy + outerR * Math.sin(a2);
+
+      const largeArc = (endAngle - startAngle) > Math.PI ? 1 : 0;
+
+      return [
+        `M ${x1i} ${y1i}`,
+        `A ${innerR} ${innerR} 0 ${largeArc} 1 ${x2i} ${y2i}`,
+        `L ${x2o} ${y2o}`,
+        `A ${outerR} ${outerR} 0 ${largeArc} 0 ${x1o} ${y1o}`,
+        'Z'
+      ].join(' ');
+    }
+
+    // Render arcs
+    for (const arc of arcs) {
+      const path = document.createElementNS(ns, 'path');
+      path.setAttribute('d', arcPath(arc.startAngle, arc.endAngle, arc.innerR, arc.outerR));
+      path.setAttribute('fill', getBubbleColor({ ...arc.node, isFolder: true }));
+      path.setAttribute('stroke', '#0f0f1a');
+      path.setAttribute('stroke-width', '0.5');
+      path.classList.add('rings-arc');
+
+      path.addEventListener('mouseenter', (e) => {
+        showBubbleTooltip(e, arc.node);
+      });
+      path.addEventListener('mousemove', moveTooltip);
+      path.addEventListener('mouseleave', hideTooltip);
+
+      path.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (arc.node.children && Object.keys(arc.node.children).length > 0) {
+          navigateBubble(arc.node.path.split('/'));
+        }
+      });
+
+      svg.appendChild(path);
+    }
+
+    // Arc labels for large enough segments (depth 1-2 only)
+    for (const arc of arcs) {
+      if (arc.depth > 2) continue;
+
+      const angularSpan = arc.endAngle - arc.startAngle;
+      const midAngle = (arc.startAngle + arc.endAngle) / 2 - Math.PI / 2;
+      const midR = (arc.innerR + arc.outerR) / 2;
+      const arcLen = angularSpan * midR;
+
+      if (arcLen < 40 || (arc.outerR - arc.innerR) < 16) continue;
+
+      const tx = cx + midR * Math.cos(midAngle);
+      const ty = cy + midR * Math.sin(midAngle);
+
+      const fontSize = Math.min(11, Math.max(8, (arc.outerR - arc.innerR) / 3));
+      const maxChars = Math.floor(arcLen / (fontSize * 0.55));
+
+      const label = document.createElementNS(ns, 'text');
+      label.setAttribute('x', tx);
+      label.setAttribute('y', ty);
+      label.setAttribute('text-anchor', 'middle');
+      label.setAttribute('dominant-baseline', 'central');
+      label.setAttribute('fill', '#fff');
+      label.setAttribute('font-size', fontSize);
+      label.setAttribute('font-weight', '600');
+      label.setAttribute('filter', 'url(#rings-shadow)');
+      label.setAttribute('pointer-events', 'none');
+      const name = arc.node.name;
+      label.textContent = name.length > maxChars
+        ? name.substring(0, maxChars - 1) + '\u2026'
+        : name;
+
+      svg.appendChild(label);
+    }
+
+    // Click SVG background to go up
+    svg.addEventListener('click', (e) => {
+      if (e.target === svg) {
+        if (bubblePath.length > 0) {
+          navigateBubble(bubblePath.slice(0, -1));
+        }
+      }
+    });
+
+    const container = document.createElement('div');
+    container.className = 'rings-container';
+    container.appendChild(svg);
+    viz.appendChild(container);
+
+    updateBreadcrumb();
+  }
+
   // === Rendering: Common ===
 
   function renderVisualization() {
-    if (viewMode !== 'bubblemap') {
+    if (viewMode !== 'bubblemap' && viewMode !== 'rings') {
       bubbleBreadcrumb.classList.add('hidden');
     }
     if (viewMode === 'duplicates') {
@@ -920,6 +1196,10 @@
     }
     if (viewMode === 'bubblemap') {
       renderBubbleMap();
+      return;
+    }
+    if (viewMode === 'rings') {
+      renderRingsChart();
       return;
     }
     if (!displayFiles.length) return;
@@ -1014,6 +1294,7 @@
       updateStats();
       renderVisualization();
     } catch (err) {
+      console.error('Scan error:', err);
       renderEmpty('Error scanning folder');
     } finally {
       loading.classList.add('hidden');
@@ -1021,15 +1302,22 @@
   }
 
   function setViewMode(mode) {
-    viewMode = mode;
-    btnTreemap.classList.toggle('active', mode === 'treemap');
-    btnPie.classList.toggle('active', mode === 'pie');
-    btnBubblemap.classList.toggle('active', mode === 'bubblemap');
-    btnDuplicates.classList.toggle('active', mode === 'duplicates');
     if (mode === 'duplicates') {
+      // Toggle duplicates as a separate feature
+      viewMode = viewMode === 'duplicates' ? lastChartMode : 'duplicates';
+    } else {
+      lastChartMode = mode;
+      viewMode = mode;
+    }
+    btnTreemap.classList.toggle('active', viewMode === 'treemap');
+    btnPie.classList.toggle('active', viewMode === 'pie');
+    btnBubblemap.classList.toggle('active', viewMode === 'bubblemap');
+    btnRings.classList.toggle('active', viewMode === 'rings');
+    btnDuplicates.classList.toggle('active', viewMode === 'duplicates');
+    if (viewMode === 'duplicates') {
       detailPanel.classList.remove('visible');
     }
-    if (mode === 'bubblemap' && !bubbleCurrentNode && folderTree) {
+    if ((viewMode === 'bubblemap' || viewMode === 'rings') && !bubbleCurrentNode && folderTree) {
       bubblePath = [];
       bubbleCurrentNode = folderTree;
     }
@@ -1056,7 +1344,7 @@
     btnPie = document.getElementById('view-pie');
     btnBubblemap = document.getElementById('view-bubblemap');
     btnDuplicates = document.getElementById('view-duplicates');
-    colorModeSelect = document.getElementById('color-mode');
+    btnRings = document.getElementById('view-rings');
     folderPathEl = document.getElementById('folder-path');
     bubbleBreadcrumb = document.getElementById('bubble-breadcrumb');
     breadcrumbTrail = document.getElementById('breadcrumb-trail');
@@ -1070,11 +1358,8 @@
     btnTreemap.addEventListener('click', () => setViewMode('treemap'));
     btnPie.addEventListener('click', () => setViewMode('pie'));
     btnBubblemap.addEventListener('click', () => setViewMode('bubblemap'));
+    btnRings.addEventListener('click', () => setViewMode('rings'));
     btnDuplicates.addEventListener('click', () => setViewMode('duplicates'));
-    colorModeSelect.addEventListener('change', () => {
-      colorMode = colorModeSelect.value;
-      if (displayFiles.length) renderVisualization();
-    });
 
     actionOpen.addEventListener('click', () => { if (selectedFile) window.api.openFile(selectedFile.path); });
     actionPreview.addEventListener('click', () => { if (selectedFile) window.api.previewFile(selectedFile.path); });
@@ -1083,7 +1368,7 @@
     // Click outside to deselect (bubble map handles its own SVG clicks)
     viz.addEventListener('click', (e) => {
       if (e.target === viz) {
-        if (viewMode === 'bubblemap' && bubblePath.length > 0) {
+        if ((viewMode === 'bubblemap' || viewMode === 'rings') && bubblePath.length > 0) {
           navigateBubble(bubblePath.slice(0, -1));
         } else {
           selectedFile = null;
@@ -1095,7 +1380,7 @@
 
     // Keyboard: Escape/Backspace to go up in bubble view
     document.addEventListener('keydown', (e) => {
-      if (viewMode === 'bubblemap' && bubblePath.length > 0 &&
+      if ((viewMode === 'bubblemap' || viewMode === 'rings') && bubblePath.length > 0 &&
           (e.key === 'Escape' || e.key === 'Backspace')) {
         e.preventDefault();
         navigateBubble(bubblePath.slice(0, -1));
