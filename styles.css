@@ -161,13 +161,161 @@ main {
   flex: 1;
   overflow: hidden;
   position: relative;
-  padding: 6px;
+  display: flex;
+}
+
+#folder-panel {
+  width: 380px;
+  flex-shrink: 0;
+  overflow-y: auto;
+  border-right: 1px solid #2a2a4a;
+  background: #12122a;
+  display: flex;
+  flex-direction: column;
+}
+
+#folder-panel.hidden {
+  display: none;
+}
+
+.folder-header {
+  display: flex;
+  align-items: center;
+  padding: 6px 10px 6px 32px;
+  font-size: 11px;
+  color: #666;
+  font-weight: 600;
+  border-bottom: 1px solid #2a2a4a;
+  position: sticky;
+  top: 0;
+  background: #12122a;
+  z-index: 1;
+  flex-shrink: 0;
+}
+
+.fh-name {
+  flex: 1;
+  min-width: 0;
+}
+
+.fh-size {
+  width: 72px;
+  text-align: right;
+  flex-shrink: 0;
+}
+
+.fh-count {
+  width: 80px;
+  text-align: right;
+  flex-shrink: 0;
+}
+
+.fh-date {
+  width: 56px;
+  text-align: right;
+  flex-shrink: 0;
+}
+
+#folder-tree {
+  flex: 1;
+  overflow-y: auto;
+}
+
+/* Folder tree rows */
+
+.folder-row {
+  display: flex;
+  align-items: center;
+  padding: 5px 10px;
+  cursor: pointer;
+  font-size: 12px;
+  border-bottom: 1px solid rgba(255,255,255,0.03);
+}
+
+.folder-row:hover {
+  background: rgba(255,255,255,0.03);
+}
+
+.folder-row.active {
+  background: rgba(0, 180, 216, 0.1);
+}
+
+.folder-chevron {
+  width: 16px;
+  flex-shrink: 0;
+  font-size: 9px;
+  color: #555;
+  transition: transform 0.15s;
+  text-align: center;
+}
+
+.folder-item.expanded > .folder-row > .folder-chevron {
+  transform: rotate(90deg);
+}
+
+.folder-chevron.empty {
+  visibility: hidden;
+}
+
+.folder-pct {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 3px;
+  margin-right: 6px;
+  flex-shrink: 0;
+  min-width: 40px;
+  text-align: center;
+}
+
+.folder-row-name {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: #e0e0e0;
+  font-size: 13px;
+}
+
+.folder-row-size {
+  width: 72px;
+  text-align: right;
+  flex-shrink: 0;
+  color: #888;
+  font-size: 12px;
+}
+
+.folder-row-count {
+  width: 80px;
+  text-align: right;
+  flex-shrink: 0;
+  color: #666;
+  font-size: 11px;
+}
+
+.folder-row-date {
+  width: 56px;
+  text-align: right;
+  flex-shrink: 0;
+  color: #555;
+  font-size: 11px;
+}
+
+.folder-children {
+  display: none;
+}
+
+.folder-item.expanded > .folder-children {
+  display: block;
 }
 
 #visualization {
-  width: 100%;
+  flex: 1;
+  min-width: 0;
   height: 100%;
   position: relative;
+  padding: 6px;
 }
 
 /* Empty state */

@@ -45,13 +45,14 @@ ipcMain.handle('select-folder', async () => {
 });
 
 ipcMain.handle('scan-folder', async (event, folderPath) => {
+  console.log('[scan-folder] STARTED — new code loaded ✓', folderPath);
   const files = [];
   const seen = new Set();
   let count = 0;
   let skipped = 0;
 
   // Folder tree for bubble map — accumulates sizes during walk
-  const folderTree = { name: '(root)', size: 0, fileCount: 0, mtime: 0, children: {}, extSizes: {} };
+  const folderTree = { name: path.basename(folderPath), size: 0, fileCount: 0, mtime: 0, children: {}, extSizes: {} };
 
   function addToTree(relativePath, diskSize, ext, mtime) {
     const parts = relativePath.replace(/\\/g, '/').split('/');
@@ -152,15 +153,20 @@ ipcMain.handle('scan-folder', async (event, folderPath) => {
   }
 
   await walk(folderPath, 0);
+  console.log('[scan-folder] Walk done.', files.length, 'files found');
   try {
     propagate(folderTree);
+    console.log('[scan-folder] Propagate done');
     cleanupTree(folderTree);
+    console.log('[scan-folder] Cleanup done');
   } catch (e) {
-    console.error('Tree build error:', e.stack || e);
+    console.error('[scan-folder] Tree build error:', e.stack || e);
   }
 
   files.sort((a, b) => b.size - a.size);
-  return { files: files.slice(0, 500), totalFiles: files.length, totalSize: files.reduce((s, f) => s + f.size, 0), skippedDirs: skipped, folderTree };
+  const result = { files: files.slice(0, 500), totalFiles: files.length, totalSize: files.reduce((s, f) => s + f.size, 0), skippedDirs: skipped, folderTree };
+  console.log('[scan-folder] Returning result. Top files:', result.files.length, 'Tree children:', Object.keys(result.folderTree.children).length);
+  return result;
 });
 
 ipcMain.handle('find-duplicates', async (event, files) => {

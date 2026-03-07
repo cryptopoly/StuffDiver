@@ -50,6 +50,7 @@
   let tooltip, loading, loadingText, statsEl;
   let btnSelectFolder, btnTreemap, btnPie, btnBubblemap, btnRings, btnDuplicates, folderPathEl;
   let bubbleBreadcrumb, breadcrumbTrail;
+  let folderPanel, folderTreeEl;
 
   // === Utilities ===
 
@@ -59,6 +60,24 @@
     if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
     if (bytes < 1073741824) return (bytes / 1048576).toFixed(1) + ' MB';
     return (bytes / 1073741824).toFixed(2) + ' GB';
+  }
+
+  function formatRelativeDate(mtimeMs) {
+    if (!mtimeMs) return '';
+    const now = Date.now();
+    const diffMs = now - mtimeMs;
+    const mins = Math.floor(diffMs / 60000);
+    const hours = Math.floor(diffMs / 3600000);
+    const days = Math.floor(diffMs / 86400000);
+    if (days === 0) return 'Today';
+    if (days === 1) return '1 day';
+    if (days < 7) return days + ' days';
+    const weeks = Math.floor(days / 7);
+    if (weeks < 5) return weeks === 1 ? '1 week' : weeks + ' weeks';
+    const months = Math.floor(days / 30);
+    if (months < 12) return months === 1 ? '1 month' : months + ' months';
+    const years = Math.floor(days / 365);
+    return years === 1 ? '1 year' : years + ' years';
   }
 
   // macOS package/bundle extensions — used for display names
@@ -687,6 +706,7 @@
     }
     bubbleCurrentNode = node;
     updateBreadcrumb();
+    highlightFolderTree();
     if (viewMode === 'rings') renderRingsChart();
     else renderBubbleMap();
   }
@@ -1184,6 +1204,194 @@
     updateBreadcrumb();
   }
 
+  // === Rendering: Folder Tree Panel ===
+
+  function getPctColor(pct) {
+    // Gradient: small=blue, medium=green/yellow, large=orange/red
+    if (pct >= 25) return { bg: 'rgba(244,67,54,0.2)', fg: '#f44336' };
+    if (pct >= 15) return { bg: 'rgba(255,152,0,0.2)', fg: '#ff9800' };
+    if (pct >= 8) return { bg: 'rgba(255,193,7,0.2)', fg: '#ffc107' };
+    if (pct >= 3) return { bg: 'rgba(76,175,80,0.2)', fg: '#4caf50' };
+    return { bg: 'rgba(33,150,243,0.18)', fg: '#5c99d4' };
+  }
+
+  function renderFolderTree() {
+    if (!folderTreeEl || !folderTree) return;
+    folderTreeEl.innerHTML = '';
+
+    const parentSize = folderTree.size || 1;
+
+    // Root row
+    const rootItem = document.createElement('div');
+    rootItem.className = 'folder-item expanded';
+
+    const rootRow = document.createElement('div');
+    rootRow.className = 'folder-row' + (bubblePath.length === 0 ? ' active' : '');
+    rootRow.dataset.path = '';
+
+    const rootChevron = document.createElement('span');
+    rootChevron.className = 'folder-chevron';
+    rootChevron.textContent = '\u25B6';
+
+    const rootName = document.createElement('span');
+    rootName.className = 'folder-row-name';
+    rootName.textContent = folderTree.name || '(root)';
+
+    const rootSize = document.createElement('span');
+    rootSize.className = 'folder-row-size';
+    rootSize.textContent = formatSize(folderTree.size);
+
+    const rootCount = document.createElement('span');
+    rootCount.className = 'folder-row-count';
+    rootCount.textContent = folderTree.fileCount.toLocaleString() + ' items';
+
+    const rootDate = document.createElement('span');
+    rootDate.className = 'folder-row-date';
+    rootDate.textContent = formatRelativeDate(folderTree.mtime);
+
+    rootRow.appendChild(rootChevron);
+    rootRow.appendChild(rootName);
+    rootRow.appendChild(rootSize);
+    rootRow.appendChild(rootCount);
+    rootRow.appendChild(rootDate);
+
+    rootRow.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (e.target === rootChevron || e.target === rootChevron.parentElement) {
+        rootItem.classList.toggle('expanded');
+      } else {
+        if (viewMode !== 'bubblemap' && viewMode !== 'rings') {
+          lastChartMode = 'rings';
+          viewMode = 'rings';
+          btnTreemap.classList.remove('active');
+          btnPie.classList.remove('active');
+          btnRings.classList.add('active');
+        }
+        navigateBubble([]);
+      }
+    });
+
+    rootItem.appendChild(rootRow);
+
+    const rootChildren = document.createElement('div');
+    rootChildren.className = 'folder-children';
+    buildTreeNodes(folderTree, rootChildren, parentSize, 1);
+    rootItem.appendChild(rootChildren);
+
+    folderTreeEl.appendChild(rootItem);
+  }
+
+  function buildTreeNodes(parentNode, container, rootSize, depth) {
+    if (!parentNode.children) return;
+
+    const children = Object.values(parentNode.children)
+      .filter(c => c.size > 0)
+      .sort((a, b) => b.size - a.size);
+
+    for (const child of children) {
+      const hasChildren = child.children && Object.values(child.children).some(c => c.size > 0);
+      const pct = rootSize > 0 ? (child.size / rootSize) * 100 : 0;
+      const pctStr = pct >= 10 ? pct.toFixed(0) + '%' : pct.toFixed(1) + '%';
+      const colors = getPctColor(pct);
+
+      const item = document.createElement('div');
+      item.className = 'folder-item';
+
+      const row = document.createElement('div');
+      row.className = 'folder-row';
+      row.style.paddingLeft = (10 + depth * 18) + 'px';
+      row.dataset.path = child.path || '';
+
+      // Highlight if this is the active navigated folder
+      const currentPath = bubblePath.join('/');
+      if (child.path === currentPath) {
+        row.classList.add('active');
+      }
+
+      const chevron = document.createElement('span');
+      chevron.className = 'folder-chevron' + (hasChildren ? '' : ' empty');
+      chevron.textContent = '\u25B6';
+
+      const pctBadge = document.createElement('span');
+      pctBadge.className = 'folder-pct';
+      pctBadge.textContent = pctStr;
+      pctBadge.style.background = colors.bg;
+      pctBadge.style.color = colors.fg;
+
+      const name = document.createElement('span');
+      name.className = 'folder-row-name';
+      name.textContent = child.name;
+
+      const size = document.createElement('span');
+      size.className = 'folder-row-size';
+      size.textContent = formatSize(child.size);
+
+      const count = document.createElement('span');
+      count.className = 'folder-row-count';
+      count.textContent = child.fileCount.toLocaleString() + ' items';
+
+      const date = document.createElement('span');
+      date.className = 'folder-row-date';
+      date.textContent = formatRelativeDate(child.mtime);
+
+      row.appendChild(chevron);
+      row.appendChild(pctBadge);
+      row.appendChild(name);
+      row.appendChild(size);
+      row.appendChild(count);
+      row.appendChild(date);
+
+      row.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (hasChildren && (e.target === chevron)) {
+          item.classList.toggle('expanded');
+        } else if (child.path) {
+          // If in treemap/pie, switch to rings for folder exploration
+          if (viewMode !== 'bubblemap' && viewMode !== 'rings') {
+            lastChartMode = 'rings';
+            viewMode = 'rings';
+            btnTreemap.classList.remove('active');
+            btnPie.classList.remove('active');
+            btnRings.classList.add('active');
+          }
+          navigateBubble(child.path.split('/'));
+        }
+      });
+
+      item.appendChild(row);
+
+      if (hasChildren) {
+        const childContainer = document.createElement('div');
+        childContainer.className = 'folder-children';
+        buildTreeNodes(child, childContainer, rootSize, depth + 1);
+        item.appendChild(childContainer);
+      }
+
+      container.appendChild(item);
+    }
+  }
+
+  function highlightFolderTree() {
+    if (!folderTreeEl) return;
+    const currentPath = bubblePath.join('/');
+    const rows = folderTreeEl.querySelectorAll('.folder-row');
+    for (const row of rows) {
+      row.classList.toggle('active', row.dataset.path === currentPath);
+    }
+
+    // Auto-expand parents of active row
+    const activeRow = folderTreeEl.querySelector('.folder-row.active');
+    if (activeRow) {
+      let el = activeRow.closest('.folder-item');
+      while (el) {
+        el.classList.add('expanded');
+        el = el.parentElement?.closest('.folder-item');
+      }
+      // Scroll into view
+      activeRow.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }
+  }
+
   // === Rendering: Common ===
 
   function renderVisualization() {
@@ -1292,6 +1500,10 @@
       bubblePath = [];
       bubbleCurrentNode = folderTree;
       updateStats();
+      if (folderTree) {
+        folderPanel.classList.remove('hidden');
+        renderFolderTree();
+      }
       renderVisualization();
     } catch (err) {
       console.error('Scan error:', err);
@@ -1348,6 +1560,8 @@
     folderPathEl = document.getElementById('folder-path');
     bubbleBreadcrumb = document.getElementById('bubble-breadcrumb');
     breadcrumbTrail = document.getElementById('breadcrumb-trail');
+    folderPanel = document.getElementById('folder-panel');
+    folderTreeEl = document.getElementById('folder-tree');
 
     // Platform labels
     actionShow.textContent = getShowLabel();
