@@ -7,15 +7,15 @@
   const GAP = 2;
 
   const EXT_COLORS = {
-    image: '#4caf50',
-    video: '#f44336',
-    audio: '#ff9800',
-    document: '#2196f3',
-    code: '#c6a700',
-    archive: '#9c27b0',
-    data: '#00bcd4',
-    executable: '#e91e63',
-    default: '#607d8b'
+    image: '#34d399',
+    video: '#f87171',
+    audio: '#fbbf24',
+    document: '#60a5fa',
+    code: '#a78bfa',
+    archive: '#c084fc',
+    data: '#22d3ee',
+    executable: '#fb7185',
+    default: '#64748b'
   };
 
   const EXT_MAP = {
@@ -133,10 +133,10 @@
   // --- Color by folder ---
 
   const FOLDER_PALETTE = [
-    '#e6194b','#3cb44b','#4363d8','#f58231','#911eb4',
-    '#42d4f4','#f032e6','#bfef45','#fabed4','#469990',
-    '#dcbeff','#9A6324','#800000','#aaffc3','#808000',
-    '#000075','#e6beff','#aa6e28','#fffac8','#a9a9a9'
+    '#f87171','#34d399','#60a5fa','#fbbf24','#a78bfa',
+    '#22d3ee','#f472b6','#a3e635','#fb923c','#2dd4bf',
+    '#c084fc','#e879f9','#38bdf8','#facc15','#4ade80',
+    '#f97316','#818cf8','#fb7185','#a8a29e','#67e8f9'
   ];
 
   let folderColorMap = null;
@@ -150,7 +150,7 @@
 
   function getColorByFolder(file) {
     if (!folderColorMap) folderColorMap = buildFolderColorMap(displayFiles);
-    return folderColorMap.get(getTopFolder(file)) || '#607d8b';
+    return folderColorMap.get(getTopFolder(file)) || '#64748b';
   }
 
   // --- Color by age ---
@@ -170,7 +170,7 @@
 
   function getColorByAge(file) {
     if (!ageRange) ageRange = buildAgeRange(displayFiles);
-    if (!file.mtime || ageRange.max === ageRange.min) return '#607d8b';
+    if (!file.mtime || ageRange.max === ageRange.min) return '#64748b';
     const t = (file.mtime - ageRange.min) / (ageRange.max - ageRange.min);
     // Old = cool blue, recent = warm orange/red
     const hue = (1 - t) * 220 + t * 10; // 220 (blue) → 10 (red)
@@ -382,7 +382,7 @@
       const path = document.createElementNS(ns, 'path');
       path.setAttribute('d', d);
       path.setAttribute('fill', color);
-      path.setAttribute('stroke', '#0f0f1a');
+      path.setAttribute('stroke', '#080c14');
       path.setAttribute('stroke-width', '2');
       path.classList.add('pie-slice');
 
@@ -684,16 +684,16 @@
     if (colorMode === 'folder') {
       const topFolder = node.path ? node.path.split('/')[0] : node.name;
       if (!folderColorMap) folderColorMap = buildFolderColorMap(displayFiles);
-      return folderColorMap.get(topFolder) || '#607d8b';
+      return folderColorMap.get(topFolder) || '#64748b';
     }
     if (colorMode === 'age') {
       if (!ageRange) ageRange = buildAgeRange(displayFiles);
-      if (!node.mtime || ageRange.max === ageRange.min) return '#607d8b';
+      if (!node.mtime || ageRange.max === ageRange.min) return '#64748b';
       const t = (node.mtime - ageRange.min) / (ageRange.max - ageRange.min);
       const hue = (1 - t) * 220 + t * 10;
       return `hsl(${hue}, ${50 + t * 20}%, ${35 + t * 15}%)`;
     }
-    return '#607d8b';
+    return '#64748b';
   }
 
   function navigateBubble(pathSegments) {
@@ -1030,8 +1030,8 @@
     centerCircle.setAttribute('cx', cx);
     centerCircle.setAttribute('cy', cy);
     centerCircle.setAttribute('r', centerRadius);
-    centerCircle.setAttribute('fill', '#1a1a2e');
-    centerCircle.setAttribute('stroke', '#2a2a4a');
+    centerCircle.setAttribute('fill', '#0e1525');
+    centerCircle.setAttribute('stroke', 'rgba(0, 210, 255, 0.15)');
     centerCircle.setAttribute('stroke-width', '2');
     centerCircle.classList.add('rings-center');
     centerGroup.appendChild(centerCircle);
@@ -1060,7 +1060,7 @@
     centerSize.setAttribute('y', cy + 10);
     centerSize.setAttribute('text-anchor', 'middle');
     centerSize.setAttribute('dominant-baseline', 'central');
-    centerSize.setAttribute('fill', '#00b4d8');
+    centerSize.setAttribute('fill', '#00d2ff');
     centerSize.setAttribute('font-size', Math.min(11, centerRadius / 5));
     centerSize.setAttribute('font-weight', '600');
     centerSize.setAttribute('filter', 'url(#rings-shadow)');
@@ -1096,7 +1096,7 @@
     });
     centerGroup.addEventListener('mousemove', moveTooltip);
     centerGroup.addEventListener('mouseleave', () => {
-      centerCircle.setAttribute('fill', '#1a1a2e');
+      centerCircle.setAttribute('fill', '#0e1525');
       hideTooltip();
     });
 
@@ -1132,7 +1132,7 @@
       const path = document.createElementNS(ns, 'path');
       path.setAttribute('d', arcPath(arc.startAngle, arc.endAngle, arc.innerR, arc.outerR));
       path.setAttribute('fill', getBubbleColor({ ...arc.node, isFolder: true }));
-      path.setAttribute('stroke', '#0f0f1a');
+      path.setAttribute('stroke', '#080c14');
       path.setAttribute('stroke-width', '0.5');
       path.classList.add('rings-arc');
 
