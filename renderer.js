@@ -52,6 +52,8 @@
   let btnColorAge, btnColorType, btnColorFolder;
   let btnTable;
   let tableSortCol = 'size';
+  let pieOffset = 0;
+  let selectedFolderPath = null; // null = show all, string = folder prefix filter
   let tableSortAsc = false;
   let filterTypes = null; // null = all types, Set = selected types
   let filterMinSize = 0;
@@ -253,6 +255,7 @@
 
   function applyFilters() {
     displayFiles = allFiles.filter(f => {
+      if (selectedFolderPath && !f.relativePath.startsWith(selectedFolderPath + '/') && f.relativePath !== selectedFolderPath) return false;
       if (filterMinSize > 0 && f.size < filterMinSize) return false;
       if (filterTypes) {
         const cat = getFileCategory(f.ext);
@@ -262,8 +265,28 @@
     });
     folderColorMap = null;
     ageRange = null;
+    pieOffset = 0;
     updateStats();
     renderVisualization();
+  }
+
+  function selectFolder(folderPath) {
+    selectedFolderPath = folderPath;
+    // Also navigate bubble/rings into this folder
+    if (folderPath) {
+      const segments = folderPath.split('/');
+      bubblePath = segments;
+      let node = folderTree;
+      for (const seg of segments) {
+        if (node.children && node.children[seg]) node = node.children[seg];
+      }
+      bubbleCurrentNode = node;
+    } else {
+      bubblePath = [];
+      bubbleCurrentNode = folderTree;
+    }
+    highlightFolderTree();
+    applyFilters();
   }
 
   function buildFilterBar() {
@@ -474,11 +497,18 @@
     const cx = w / 2;
     const cy = h / 2;
 
-    const topFiles = files.slice(0, MAX_PIE);
-    const otherSize = files.slice(MAX_PIE).reduce((s, f) => s + f.size, 0);
+    const start = pieOffset;
+    const end = pieOffset + MAX_PIE;
+    const topFiles = files.slice(start, end);
+    const otherSize = files.slice(end).reduce((s, f) => s + f.size, 0);
+    const prevSize = files.slice(0, start).reduce((s, f) => s + f.size, 0);
     const items = [...topFiles];
     if (otherSize > 0) {
-      items.push({ name: `Other (${files.length - MAX_PIE} files)`, size: otherSize, ext: '', path: '', relativePath: '' });
+      const remaining = files.length - end;
+      items.push({ name: `Other (${remaining} files)`, size: otherSize, ext: '', path: '', relativePath: '', _isOther: true });
+    }
+    if (prevSize > 0) {
+      items.unshift({ name: `Back (${start} files)`, size: prevSize, ext: '', path: '', relativePath: '', _isBack: true });
     }
     const pieTotal = items.reduce((s, i) => s + i.size, 0);
 
@@ -493,8 +523,10 @@
     items.forEach((file, i) => {
       const sliceAngle = (file.size / pieTotal) * Math.PI * 2;
       const endAngle = startAngle + sliceAngle;
-      const isOther = !file.path;
-      const color = isOther ? '#8d6e99' : getBlockColor(file);
+      const isOther = file._isOther;
+      const isBack = file._isBack;
+      const isSpecial = isOther || isBack;
+      const color = isOther ? '#8d6e99' : isBack ? '#6e8d99' : getBlockColor(file);
 
       // Arc path
       const x1 = cx + radius * Math.cos(startAngle);
@@ -514,12 +546,16 @@
       const path = document.createElementNS(ns, 'path');
       path.setAttribute('d', d);
       path.setAttribute('fill', color);
-      path.setAttribute('stroke', '#080c14');
+      path.setAttribute('stroke', getComputedStyle(document.body).getPropertyValue('--chart-stroke').trim() || '#080c14');
       path.setAttribute('stroke-width', '2');
       path.classList.add('pie-slice');
 
-      path.addEventListener('click', () => { if (file.path) selectFile(file); });
-      path.addEventListener('mouseenter', (e) => { if (file.path) showTooltip(e, file); });
+      path.addEventListener('click', () => {
+        if (isOther) { pieOffset += MAX_PIE; renderPieChart(); }
+        else if (isBack) { pieOffset = Math.max(0, pieOffset - MAX_PIE); renderPieChart(); }
+        else if (file.path) selectFile(file);
+      });
+      path.addEventListener('mouseenter', (e) => { if (!isSpecial) showTooltip(e, file); });
       path.addEventListener('mousemove', moveTooltip);
       path.addEventListener('mouseleave', hideTooltip);
 
@@ -545,7 +581,13 @@
       item.appendChild(swatch);
       item.appendChild(nameSpan);
       item.appendChild(sizeSpan);
-      if (file.path) {
+      if (isOther) {
+        item.style.cursor = 'pointer';
+        item.addEventListener('click', () => { pieOffset += MAX_PIE; renderPieChart(); });
+      } else if (isBack) {
+        item.style.cursor = 'pointer';
+        item.addEventListener('click', () => { pieOffset = Math.max(0, pieOffset - MAX_PIE); renderPieChart(); });
+      } else if (file.path) {
         item.addEventListener('click', () => selectFile(file));
       }
       legend.appendChild(item);
@@ -949,10 +991,26 @@
       }
     }
     bubbleCurrentNode = node;
+    // Sync folder filter with bubble navigation
+    selectedFolderPath = pathSegments.length ? pathSegments.join('/') : null;
+    displayFiles = allFiles.filter(f => {
+      if (selectedFolderPath && !f.relativePath.startsWith(selectedFolderPath + '/') && f.relativePath !== selectedFolderPath) return false;
+      if (filterMinSize > 0 && f.size < filterMinSize) return false;
+      if (filterTypes) {
+        const cat = getFileCategory(f.ext);
+        if (!filterTypes.has(cat)) return false;
+      }
+      return true;
+    });
+    folderColorMap = null;
+    ageRange = null;
+    pieOffset = 0;
     updateBreadcrumb();
     highlightFolderTree();
+    updateStats();
     if (viewMode === 'rings') renderRingsChart();
-    else renderBubbleMap();
+    else if (viewMode === 'bubblemap') renderBubbleMap();
+    else renderVisualization();
   }
 
   function updateBreadcrumb() {
@@ -1193,12 +1251,12 @@
 
     const cx = w / 2;
     const cy = h / 2;
-    const maxRadius = Math.min(w, h) * 0.48;
+    const maxRadius = Math.min(w, h) * 0.49;
     const MAX_DEPTH = 5;
     const MIN_ANGLE = 0.008; // ~0.46 degrees
     const RING_GAP = 1.5;
 
-    const centerRadius = maxRadius * 0.20;
+    const centerRadius = maxRadius * 0.16;
     const ringWidth = (maxRadius - centerRadius) / MAX_DEPTH;
 
     // Build arc data recursively
@@ -1376,7 +1434,7 @@
       const path = document.createElementNS(ns, 'path');
       path.setAttribute('d', arcPath(arc.startAngle, arc.endAngle, arc.innerR, arc.outerR));
       path.setAttribute('fill', getBubbleColor({ ...arc.node, isFolder: true }));
-      path.setAttribute('stroke', '#080c14');
+      path.setAttribute('stroke', getComputedStyle(document.body).getPropertyValue('--chart-stroke').trim() || '#080c14');
       path.setAttribute('stroke-width', '0.5');
       path.classList.add('rings-arc');
 
@@ -1504,14 +1562,8 @@
       if (e.target === rootChevron || e.target === rootChevron.parentElement) {
         rootItem.classList.toggle('expanded');
       } else {
-        if (viewMode !== 'bubblemap' && viewMode !== 'rings') {
-          lastChartMode = 'rings';
-          viewMode = 'rings';
-          btnTreemap.classList.remove('active');
-          btnPie.classList.remove('active');
-          btnRings.classList.add('active');
-        }
-        navigateBubble([]);
+        // Clear folder filter — show all files
+        selectFolder(null);
       }
     });
 
@@ -1590,15 +1642,8 @@
         if (hasChildren && (e.target === chevron)) {
           item.classList.toggle('expanded');
         } else if (child.path) {
-          // If in treemap/pie, switch to rings for folder exploration
-          if (viewMode !== 'bubblemap' && viewMode !== 'rings') {
-            lastChartMode = 'rings';
-            viewMode = 'rings';
-            btnTreemap.classList.remove('active');
-            btnPie.classList.remove('active');
-            btnRings.classList.add('active');
-          }
-          navigateBubble(child.path.split('/'));
+          // Filter all views to this folder
+          selectFolder(child.path);
         }
       });
 
@@ -1617,7 +1662,7 @@
 
   function highlightFolderTree() {
     if (!folderTreeEl) return;
-    const currentPath = bubblePath.join('/');
+    const currentPath = selectedFolderPath || '';
     const rows = folderTreeEl.querySelectorAll('.folder-row');
     for (const row of rows) {
       row.classList.toggle('active', row.dataset.path === currentPath);
@@ -1827,6 +1872,8 @@
     ageRange = null;
     filterTypes = null;
     filterMinSize = 0;
+    pieOffset = 0;
+    selectedFolderPath = null;
     folderTree = result.folderTree || null;
     bubblePath = [];
     bubbleCurrentNode = folderTree;
@@ -2007,6 +2054,10 @@
     btnColorAge.addEventListener('click', () => setColorMode('age'));
     btnColorType.addEventListener('click', () => setColorMode('type'));
     btnColorFolder.addEventListener('click', () => setColorMode('folder'));
+    document.getElementById('theme-toggle').addEventListener('click', () => {
+      document.body.classList.toggle('light');
+      if (displayFiles.length) renderVisualization();
+    });
 
     actionOpen.addEventListener('click', () => { if (selectedFile) window.api.openFile(selectedFile.path); });
     actionPreview.addEventListener('click', () => { if (selectedFile) window.api.previewFile(selectedFile.path); });
