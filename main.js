@@ -45,7 +45,6 @@ ipcMain.handle('select-folder', async () => {
 });
 
 ipcMain.handle('scan-folder', async (event, folderPath) => {
-  console.log('[scan-folder] STARTED — new code loaded ✓', folderPath);
   const files = [];
   const seen = new Set();
   let count = 0;
@@ -153,20 +152,15 @@ ipcMain.handle('scan-folder', async (event, folderPath) => {
   }
 
   await walk(folderPath, 0);
-  console.log('[scan-folder] Walk done.', files.length, 'files found');
   try {
     propagate(folderTree);
-    console.log('[scan-folder] Propagate done');
     cleanupTree(folderTree);
-    console.log('[scan-folder] Cleanup done');
   } catch (e) {
-    console.error('[scan-folder] Tree build error:', e.stack || e);
+    // Tree build error — non-fatal, continue with flat file list
   }
 
   files.sort((a, b) => b.size - a.size);
-  const result = { files: files.slice(0, 500), totalFiles: files.length, totalSize: files.reduce((s, f) => s + f.size, 0), skippedDirs: skipped, folderTree };
-  console.log('[scan-folder] Returning result. Top files:', result.files.length, 'Tree children:', Object.keys(result.folderTree.children).length);
-  return result;
+  return { files: files.slice(0, 500), totalFiles: files.length, totalSize: files.reduce((s, f) => s + f.size, 0), skippedDirs: skipped, folderTree };
 });
 
 ipcMain.handle('find-duplicates', async (event, files) => {
@@ -314,5 +308,50 @@ ipcMain.handle('preview-file', async (event, filePath) => {
     exec(`qlmanage -p "${filePath.replace(/"/g, '\\"')}"`);
   } else {
     return shell.openPath(filePath);
+  }
+});
+
+// === Scan cache ===
+
+function getCacheDir() {
+  const dir = path.join(app.getPath('userData'), 'scan-cache');
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+function getCacheKey(folderPath) {
+  return crypto.createHash('md5').update(folderPath).digest('hex');
+}
+
+ipcMain.handle('load-cache', async (event, folderPath) => {
+  try {
+    const file = path.join(getCacheDir(), getCacheKey(folderPath) + '.json');
+    if (!fs.existsSync(file)) return null;
+    const raw = await fs.promises.readFile(file, 'utf8');
+    const cached = JSON.parse(raw);
+    return cached;
+  } catch (e) {
+    return null;
+  }
+});
+
+ipcMain.handle('save-cache', async (event, folderPath, result) => {
+  try {
+    const file = path.join(getCacheDir(), getCacheKey(folderPath) + '.json');
+    const data = { ...result, cachedAt: Date.now(), folderPath };
+    await fs.promises.writeFile(file, JSON.stringify(data));
+    return true;
+  } catch (e) {
+    return false;
+  }
+});
+
+ipcMain.handle('clear-cache', async (event, folderPath) => {
+  try {
+    const file = path.join(getCacheDir(), getCacheKey(folderPath) + '.json');
+    if (fs.existsSync(file)) await fs.promises.unlink(file);
+    return true;
+  } catch (e) {
+    return false;
   }
 });

@@ -2,66 +2,86 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data:">
   <title>Stuff Diver</title>
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
   <header>
-    <div class="header-left">
-      <div class="brand">
-        <!-- Inline SVG Logo: scuba diver mask + hard drive platter -->
-        <svg class="logo-svg" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <defs>
-            <linearGradient id="grad-mask" x1="8" y1="8" x2="56" y2="56" gradientUnits="userSpaceOnUse">
-              <stop offset="0%" stop-color="#00d2ff"/>
-              <stop offset="100%" stop-color="#7b5cff"/>
-            </linearGradient>
-            <linearGradient id="grad-visor" x1="18" y1="20" x2="46" y2="42" gradientUnits="userSpaceOnUse">
-              <stop offset="0%" stop-color="#0a1628"/>
-              <stop offset="100%" stop-color="#142040"/>
-            </linearGradient>
-            <linearGradient id="grad-platter" x1="24" y1="24" x2="40" y2="40" gradientUnits="userSpaceOnUse">
-              <stop offset="0%" stop-color="#00d2ff" stop-opacity="0.5"/>
-              <stop offset="100%" stop-color="#7b5cff" stop-opacity="0.3"/>
-            </linearGradient>
-          </defs>
-          <!-- Dive mask body -->
-          <rect x="8" y="12" width="48" height="36" rx="14" stroke="url(#grad-mask)" stroke-width="3" fill="none"/>
-          <!-- Visor / glass -->
-          <rect x="16" y="18" width="32" height="24" rx="8" fill="url(#grad-visor)" stroke="url(#grad-mask)" stroke-width="1.5" opacity="0.9"/>
-          <!-- Hard drive platter rings inside visor -->
-          <circle cx="32" cy="30" r="9" stroke="url(#grad-platter)" stroke-width="1.2" fill="none" opacity="0.7"/>
-          <circle cx="32" cy="30" r="5" stroke="url(#grad-platter)" stroke-width="1" fill="none" opacity="0.5"/>
-          <circle cx="32" cy="30" r="1.8" fill="#00d2ff" opacity="0.9"/>
-          <!-- Read/write arm -->
-          <line x1="33" y1="30" x2="41" y2="22" stroke="#00d2ff" stroke-width="1.2" stroke-linecap="round" opacity="0.6"/>
-          <!-- Snorkel tube -->
-          <path d="M52 16 Q58 16 58 10 Q58 4 52 4" stroke="url(#grad-mask)" stroke-width="2.5" stroke-linecap="round" fill="none"/>
-          <!-- Bubbles from snorkel -->
-          <circle cx="50" cy="2" r="1.5" fill="#00d2ff" opacity="0.5"/>
-          <circle cx="54" cy="5" r="1" fill="#7b5cff" opacity="0.4"/>
-          <circle cx="47" cy="4" r="0.8" fill="#00d2ff" opacity="0.3"/>
-          <!-- Strap -->
-          <line x1="8" y1="30" x2="3" y2="30" stroke="url(#grad-mask)" stroke-width="2" stroke-linecap="round" opacity="0.5"/>
-        </svg>
-        <h1>Stuff Diver</h1>
+    <div class="header-row header-row-1">
+      <div class="header-left">
+        <div class="brand">
+          <svg class="logo-svg" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <defs>
+              <linearGradient id="grad-mask" x1="8" y1="8" x2="56" y2="56" gradientUnits="userSpaceOnUse">
+                <stop offset="0%" stop-color="#00d2ff"/>
+                <stop offset="100%" stop-color="#7b5cff"/>
+              </linearGradient>
+              <linearGradient id="grad-visor" x1="18" y1="20" x2="46" y2="42" gradientUnits="userSpaceOnUse">
+                <stop offset="0%" stop-color="#0a1628"/>
+                <stop offset="100%" stop-color="#142040"/>
+              </linearGradient>
+              <linearGradient id="grad-platter" x1="24" y1="24" x2="40" y2="40" gradientUnits="userSpaceOnUse">
+                <stop offset="0%" stop-color="#00d2ff" stop-opacity="0.5"/>
+                <stop offset="100%" stop-color="#7b5cff" stop-opacity="0.3"/>
+              </linearGradient>
+            </defs>
+            <rect x="8" y="12" width="48" height="36" rx="14" stroke="url(#grad-mask)" stroke-width="3" fill="none"/>
+            <rect x="16" y="18" width="32" height="24" rx="8" fill="url(#grad-visor)" stroke="url(#grad-mask)" stroke-width="1.5" opacity="0.9"/>
+            <circle cx="32" cy="30" r="9" stroke="url(#grad-platter)" stroke-width="1.2" fill="none" opacity="0.7"/>
+            <circle cx="32" cy="30" r="5" stroke="url(#grad-platter)" stroke-width="1" fill="none" opacity="0.5"/>
+            <circle cx="32" cy="30" r="1.8" fill="#00d2ff" opacity="0.9"/>
+            <line x1="33" y1="30" x2="41" y2="22" stroke="#00d2ff" stroke-width="1.2" stroke-linecap="round" opacity="0.6"/>
+            <path d="M52 16 Q58 16 58 10 Q58 4 52 4" stroke="url(#grad-mask)" stroke-width="2.5" stroke-linecap="round" fill="none"/>
+            <circle cx="50" cy="2" r="1.5" fill="#00d2ff" opacity="0.5"/>
+            <circle cx="54" cy="5" r="1" fill="#7b5cff" opacity="0.4"/>
+            <circle cx="47" cy="4" r="0.8" fill="#00d2ff" opacity="0.3"/>
+            <line x1="8" y1="30" x2="3" y2="30" stroke="url(#grad-mask)" stroke-width="2" stroke-linecap="round" opacity="0.5"/>
+          </svg>
+          <h1>Stuff Diver</h1>
+        </div>
+        <button id="select-folder">Select Folder</button>
+        <span id="folder-path"></span>
       </div>
-      <button id="select-folder">Select Folder</button>
-      <span id="folder-path"></span>
+      <div class="header-right"></div>
     </div>
-    <div class="header-right">
-      <div class="view-toggle">
-        <button id="view-treemap" class="active">Treemap</button>
-        <button id="view-pie">Pie Chart</button>
-        <button id="view-bubblemap">Bubbles</button>
-        <button id="view-rings">Rings</button>
+    <div class="header-row header-row-2">
+      <div class="toolbar-group">
+        <span class="toolbar-label">Folders</span>
+        <div class="view-toggle">
+          <button id="view-treemap" class="active">Treemap</button>
+          <button id="view-rings">Rings</button>
+        </div>
       </div>
-      <button id="view-duplicates" class="dup-toggle">Find Duplicates</button>
+      <div class="toolbar-group">
+        <span class="toolbar-label">Files</span>
+        <div class="view-toggle">
+          <button id="view-pie">Pie Chart</button>
+          <button id="view-bubblemap">Bubbles</button>
+          <button id="view-table">Table</button>
+        </div>
+      </div>
+      <div class="toolbar-sep"></div>
+      <div class="toolbar-group">
+        <span class="toolbar-label">Colour</span>
+        <div class="color-toggle">
+          <button id="color-age" class="active">Age</button>
+          <button id="color-type">Type</button>
+          <button id="color-folder">Folder</button>
+        </div>
+      </div>
+      <div class="toolbar-sep"></div>
+      <div class="toolbar-group toolbar-actions">
+        <button id="view-duplicates" class="dup-toggle">Find Duplicates</button>
+        <button id="btn-export" class="export-btn">Export CSV</button>
+        <button id="btn-filter" class="export-btn">Filter</button>
+      </div>
     </div>
   </header>
 
   <div id="stats" class="hidden"></div>
+  <div id="stats-summary" class="hidden"></div>
+  <div id="filter-bar" class="hidden"></div>
   <div id="bubble-breadcrumb" class="hidden">
     <span id="breadcrumb-trail"></span>
   </div>

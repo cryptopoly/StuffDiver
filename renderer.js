@@ -39,7 +39,7 @@
   let totalSize = 0;
   let skippedDirs = 0;
   let duplicateResults = null; // null = not scanned, [] = scanned
-  let colorMode = 'type';
+  let colorMode = 'age';
   let folderTree = null;       // hierarchical tree from scan
   let bubblePath = [];         // current drill-down path segments
   let bubbleCurrentNode = null; // current tree node being displayed
@@ -49,6 +49,13 @@
   let actionOpen, actionPreview, actionShow;
   let tooltip, loading, loadingText, statsEl;
   let btnSelectFolder, btnTreemap, btnPie, btnBubblemap, btnRings, btnDuplicates, folderPathEl;
+  let btnColorAge, btnColorType, btnColorFolder;
+  let btnTable;
+  let tableSortCol = 'size';
+  let tableSortAsc = false;
+  let filterTypes = null; // null = all types, Set = selected types
+  let filterMinSize = 0;
+  let filterBarOpen = false;
   let bubbleBreadcrumb, breadcrumbTrail;
   let folderPanel, folderTreeEl;
 
@@ -113,6 +120,14 @@
   function getTopFolder(file) {
     const parts = file.relativePath.replace(/\\/g, '/').split('/');
     return parts.length > 1 ? parts[0] : '(root)';
+  }
+
+  function getFileCategory(ext) {
+    const e = (ext || '').replace('.', '').toLowerCase();
+    for (const [cat, exts] of Object.entries(EXT_MAP)) {
+      if (exts.includes(e)) return cat;
+    }
+    return e ? e : 'other';
   }
 
   // --- Color by type (improved: unknown exts get unique hashed colors) ---
@@ -195,6 +210,123 @@
 
   function getPreviewLabel() {
     return window.api.platform === 'darwin' ? 'Quick Look' : 'Preview';
+  }
+
+  // === Export ===
+
+  function exportCSV() {
+    if (!displayFiles.length) return;
+    const escape = (s) => '"' + String(s).replace(/"/g, '""') + '"';
+    const rows = ['Name,Path,Size (bytes),Size,Extension,Type,Modified'];
+    for (const f of displayFiles) {
+      const cat = getFileCategory(f.ext);
+      const date = f.mtime ? new Date(f.mtime).toISOString() : '';
+      rows.push([
+        escape(f.name),
+        escape(f.relativePath),
+        f.size,
+        escape(formatSize(f.size)),
+        escape((f.ext || '').replace('.', '')),
+        escape(cat.charAt(0).toUpperCase() + cat.slice(1)),
+        escape(date)
+      ].join(','));
+    }
+    const blob = new Blob([rows.join('\n')], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `stuffdiver-export-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  // === Filters ===
+
+  const SIZE_THRESHOLDS = [
+    { label: 'All sizes', value: 0 },
+    { label: '> 1 MB', value: 1048576 },
+    { label: '> 10 MB', value: 10485760 },
+    { label: '> 100 MB', value: 104857600 },
+    { label: '> 500 MB', value: 524288000 },
+    { label: '> 1 GB', value: 1073741824 }
+  ];
+
+  function applyFilters() {
+    displayFiles = allFiles.filter(f => {
+      if (filterMinSize > 0 && f.size < filterMinSize) return false;
+      if (filterTypes) {
+        const cat = getFileCategory(f.ext);
+        if (!filterTypes.has(cat)) return false;
+      }
+      return true;
+    });
+    folderColorMap = null;
+    ageRange = null;
+    updateStats();
+    renderVisualization();
+  }
+
+  function buildFilterBar() {
+    const filterBarEl = document.getElementById('filter-bar');
+    if (!filterBarOpen || !allFiles.length) {
+      filterBarEl.classList.add('hidden');
+      return;
+    }
+    filterBarEl.classList.remove('hidden');
+
+    // Collect all categories present
+    const cats = new Set();
+    for (const f of allFiles) cats.add(getFileCategory(f.ext));
+    const catList = [...cats].sort();
+
+    let html = '<div class="filter-types">';
+    for (const cat of catList) {
+      const active = !filterTypes || filterTypes.has(cat);
+      const color = EXT_COLORS[cat] || '#64748b';
+      const label = cat.charAt(0).toUpperCase() + cat.slice(1);
+      html += `<button class="filter-pill${active ? ' active' : ''}" data-cat="${cat}" style="--pill-color:${color}">${label}</button>`;
+    }
+    html += '</div>';
+
+    html += '<div class="filter-size"><select id="filter-size-select">';
+    for (const t of SIZE_THRESHOLDS) {
+      html += `<option value="${t.value}"${t.value === filterMinSize ? ' selected' : ''}>${t.label}</option>`;
+    }
+    html += '</select></div>';
+
+    html += '<button class="filter-reset-btn">Reset</button>';
+
+    filterBarEl.innerHTML = html;
+
+    // Wire events
+    filterBarEl.querySelectorAll('.filter-pill').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const cat = btn.dataset.cat;
+        if (!filterTypes) {
+          // Currently showing all — switch to only this category
+          filterTypes = new Set([cat]);
+        } else if (filterTypes.has(cat)) {
+          filterTypes.delete(cat);
+          if (filterTypes.size === 0) filterTypes = null; // back to all
+        } else {
+          filterTypes.add(cat);
+        }
+        applyFilters();
+        buildFilterBar();
+      });
+    });
+
+    document.getElementById('filter-size-select').addEventListener('change', (e) => {
+      filterMinSize = Number(e.target.value);
+      applyFilters();
+    });
+
+    filterBarEl.querySelector('.filter-reset-btn').addEventListener('click', () => {
+      filterTypes = null;
+      filterMinSize = 0;
+      applyFilters();
+      buildFilterBar();
+    });
   }
 
   // === Squarified Treemap ===
@@ -338,7 +470,7 @@
 
     const w = Math.floor(viz.clientWidth * 0.55);
     const h = viz.clientHeight;
-    const radius = Math.min(w, h) * 0.4;
+    const radius = Math.min(w, h) * 0.45;
     const cx = w / 2;
     const cy = h / 2;
 
@@ -423,6 +555,118 @@
     container.appendChild(svgWrap);
     container.appendChild(legend);
     viz.appendChild(container);
+  }
+
+  // === Rendering: Table ===
+
+  const TABLE_COLUMNS = [
+    { key: 'name', label: 'Name' },
+    { key: 'type', label: 'Type' },
+    { key: 'size', label: 'Size' },
+    { key: 'mtime', label: 'Modified' },
+    { key: 'path', label: 'Path' }
+  ];
+
+  function sortTableFiles(files) {
+    const sorted = [...files];
+    sorted.sort((a, b) => {
+      let va, vb;
+      switch (tableSortCol) {
+        case 'name': va = a.name.toLowerCase(); vb = b.name.toLowerCase(); break;
+        case 'type': va = getFileCategory(a.ext); vb = getFileCategory(b.ext); break;
+        case 'size': va = a.size; vb = b.size; break;
+        case 'mtime': va = a.mtime || 0; vb = b.mtime || 0; break;
+        case 'path': va = a.relativePath.toLowerCase(); vb = b.relativePath.toLowerCase(); break;
+        default: va = a.size; vb = b.size;
+      }
+      if (va < vb) return tableSortAsc ? -1 : 1;
+      if (va > vb) return tableSortAsc ? 1 : -1;
+      return 0;
+    });
+    return sorted;
+  }
+
+  function renderTable() {
+    viz.innerHTML = '';
+    const files = displayFiles.filter(f => f.size > 0);
+    if (!files.length) { renderEmpty('No files found'); return; }
+
+    const wrap = document.createElement('div');
+    wrap.className = 'table-wrap';
+
+    const table = document.createElement('table');
+    table.className = 'file-table';
+
+    // Header
+    const thead = document.createElement('thead');
+    const headerRow = document.createElement('tr');
+    TABLE_COLUMNS.forEach(col => {
+      const th = document.createElement('th');
+      th.textContent = col.label;
+      th.dataset.col = col.key;
+      if (tableSortCol === col.key) {
+        th.classList.add('sorted');
+        th.classList.add(tableSortAsc ? 'asc' : 'desc');
+      }
+      th.addEventListener('click', () => {
+        if (tableSortCol === col.key) {
+          tableSortAsc = !tableSortAsc;
+        } else {
+          tableSortCol = col.key;
+          tableSortAsc = col.key === 'name' || col.key === 'type' || col.key === 'path';
+        }
+        renderTable();
+      });
+      headerRow.appendChild(th);
+    });
+    thead.appendChild(headerRow);
+    table.appendChild(thead);
+
+    // Body
+    const tbody = document.createElement('tbody');
+    const sorted = sortTableFiles(files);
+
+    sorted.forEach(file => {
+      const tr = document.createElement('tr');
+      tr.style.borderLeft = `3px solid ${getBlockColor(file)}`;
+      if (selectedFile && selectedFile.path === file.path) {
+        tr.classList.add('selected');
+      }
+      tr.addEventListener('click', () => selectFile(file));
+
+      const tdName = document.createElement('td');
+      tdName.className = 'td-name';
+      tdName.textContent = file.name;
+
+      const tdType = document.createElement('td');
+      tdType.className = 'td-type';
+      const cat = getFileCategory(file.ext);
+      tdType.textContent = cat.charAt(0).toUpperCase() + cat.slice(1);
+
+      const tdSize = document.createElement('td');
+      tdSize.className = 'td-size';
+      tdSize.textContent = formatSize(file.size);
+
+      const tdMtime = document.createElement('td');
+      tdMtime.className = 'td-mtime';
+      tdMtime.textContent = formatRelativeDate(file.mtime);
+
+      const tdPath = document.createElement('td');
+      tdPath.className = 'td-path';
+      tdPath.textContent = file.relativePath;
+      tdPath.title = file.relativePath;
+
+      tr.appendChild(tdName);
+      tr.appendChild(tdType);
+      tr.appendChild(tdSize);
+      tr.appendChild(tdMtime);
+      tr.appendChild(tdPath);
+      tbody.appendChild(tr);
+    });
+
+    table.appendChild(tbody);
+    wrap.appendChild(table);
+    viz.appendChild(wrap);
   }
 
   // === Rendering: Duplicates ===
@@ -602,7 +846,7 @@
 
     // Radii proportional to sqrt(size) so area ~ size
     const totalSize = items.reduce((s, i) => s + i.size, 0);
-    const targetArea = 0.60 * width * height;
+    const targetArea = 0.70 * width * height;
     const scale = Math.sqrt(targetArea / (Math.PI * totalSize));
 
     const circles = items.map(item => ({
@@ -949,7 +1193,7 @@
 
     const cx = w / 2;
     const cy = h / 2;
-    const maxRadius = Math.min(w, h) * 0.45;
+    const maxRadius = Math.min(w, h) * 0.48;
     const MAX_DEPTH = 5;
     const MIN_ANGLE = 0.008; // ~0.46 degrees
     const RING_GAP = 1.5;
@@ -1411,7 +1655,9 @@
       return;
     }
     if (!displayFiles.length) return;
-    if (viewMode === 'treemap') {
+    if (viewMode === 'table') {
+      renderTable();
+    } else if (viewMode === 'treemap') {
       renderTreemap();
     } else {
       renderPieChart();
@@ -1422,14 +1668,105 @@
     viz.innerHTML = `<div class="empty-state"><p>${msg}</p></div>`;
   }
 
+  let statsSummaryEl;
+  let statsSummaryOpen = false;
+
   function updateStats() {
     statsEl.innerHTML = `
       <span>Files: <span class="stat-value">${totalFiles.toLocaleString()}</span></span>
       <span>Total size: <span class="stat-value">${formatSize(totalSize)}</span></span>
       <span>Showing top: <span class="stat-value">${Math.min(displayFiles.length, viewMode === 'treemap' ? MAX_TREEMAP : displayFiles.length).toLocaleString()}</span></span>
       ${skippedDirs ? `<span>Inaccessible: <span class="stat-value">${skippedDirs.toLocaleString()}</span></span>` : ''}
+      ${cacheTimestamp ? `<span class="cache-indicator">Cached: <span class="stat-value">${formatRelativeDate(cacheTimestamp)}</span></span>` : ''}
+      ${displayFiles.length ? '<button id="stats-toggle" class="stats-toggle-btn">' + (statsSummaryOpen ? 'Hide Summary' : 'Summary') + '</button>' : ''}
     `;
     statsEl.classList.remove('hidden');
+    const toggleBtn = document.getElementById('stats-toggle');
+    if (toggleBtn) {
+      toggleBtn.addEventListener('click', () => {
+        statsSummaryOpen = !statsSummaryOpen;
+        updateStatsSummary();
+        updateStats();
+      });
+    }
+    updateStatsSummary();
+  }
+
+  function updateStatsSummary() {
+    if (!statsSummaryEl) statsSummaryEl = document.getElementById('stats-summary');
+    if (!statsSummaryOpen || !displayFiles.length) {
+      statsSummaryEl.classList.add('hidden');
+      return;
+    }
+    statsSummaryEl.classList.remove('hidden');
+
+    // Type breakdown
+    const typeBuckets = {};
+    for (const f of displayFiles) {
+      const cat = getFileCategory(f.ext);
+      if (!typeBuckets[cat]) typeBuckets[cat] = { count: 0, size: 0 };
+      typeBuckets[cat].count++;
+      typeBuckets[cat].size += f.size;
+    }
+    const typeEntries = Object.entries(typeBuckets).sort((a, b) => b[1].size - a[1].size);
+    const maxTypeSize = typeEntries.length ? typeEntries[0][1].size : 1;
+
+    let typeHtml = typeEntries.slice(0, 8).map(([cat, data]) => {
+      const pct = (data.size / maxTypeSize) * 100;
+      const color = EXT_COLORS[cat] || '#64748b';
+      const label = cat.charAt(0).toUpperCase() + cat.slice(1);
+      return `<div class="summary-bar-row">
+        <span class="summary-bar-label">${label}</span>
+        <div class="summary-bar-track"><div class="summary-bar-fill" style="width:${pct}%;background:${color}"></div></div>
+        <span class="summary-bar-value">${formatSize(data.size)}</span>
+        <span class="summary-bar-count">${data.count}</span>
+      </div>`;
+    }).join('');
+
+    // Oldest / newest
+    let oldest = null, newest = null;
+    for (const f of displayFiles) {
+      if (!f.mtime) continue;
+      if (!oldest || f.mtime < oldest.mtime) oldest = f;
+      if (!newest || f.mtime > newest.mtime) newest = f;
+    }
+
+    // Average file size
+    const avgSize = displayFiles.length ? totalSize / totalFiles : 0;
+
+    // Largest folder
+    let largestFolder = null;
+    if (folderTree && folderTree.children) {
+      for (const child of Object.values(folderTree.children)) {
+        if (!largestFolder || child.size > largestFolder.size) largestFolder = child;
+      }
+    }
+
+    // Duplicate waste
+    let wasteHtml = '';
+    if (duplicateResults && duplicateResults.length) {
+      let totalWaste = 0;
+      for (const g of duplicateResults) {
+        totalWaste += g.wasted || 0;
+      }
+      if (totalWaste > 0) {
+        wasteHtml = `<div class="summary-stat"><span class="summary-stat-label">Duplicate waste</span><span class="summary-stat-value">${formatSize(totalWaste)}</span></div>`;
+      }
+    }
+
+    statsSummaryEl.innerHTML = `
+      <div class="summary-section">
+        <div class="summary-heading">Type Breakdown</div>
+        ${typeHtml}
+      </div>
+      <div class="summary-section summary-details">
+        <div class="summary-stat"><span class="summary-stat-label">Average file size</span><span class="summary-stat-value">${formatSize(avgSize)}</span></div>
+        ${oldest ? `<div class="summary-stat"><span class="summary-stat-label">Oldest file</span><span class="summary-stat-value" title="${oldest.name}">${formatRelativeDate(oldest.mtime)} &mdash; ${oldest.name.length > 30 ? oldest.name.slice(0, 30) + '...' : oldest.name}</span></div>` : ''}
+        ${newest ? `<div class="summary-stat"><span class="summary-stat-label">Newest file</span><span class="summary-stat-value" title="${newest.name}">${formatRelativeDate(newest.mtime)} &mdash; ${newest.name.length > 30 ? newest.name.slice(0, 30) + '...' : newest.name}</span></div>` : ''}
+        ${largestFolder ? `<div class="summary-stat"><span class="summary-stat-label">Largest folder</span><span class="summary-stat-value">${largestFolder.name}/ &mdash; ${formatSize(largestFolder.size)}</span></div>` : ''}
+        ${wasteHtml}
+      </div>
+    `;
   }
 
   function selectFile(file) {
@@ -1476,35 +1813,80 @@
 
   // === Actions ===
 
+  let currentFolder = null;
+  let cacheTimestamp = null;
+
+  function loadScanResult(result) {
+    allFiles = result.files;
+    displayFiles = allFiles;
+    totalFiles = result.totalFiles;
+    totalSize = result.totalSize;
+    skippedDirs = result.skippedDirs || 0;
+    duplicateResults = null;
+    folderColorMap = null;
+    ageRange = null;
+    filterTypes = null;
+    filterMinSize = 0;
+    folderTree = result.folderTree || null;
+    bubblePath = [];
+    bubbleCurrentNode = folderTree;
+    cacheTimestamp = result.cachedAt || null;
+    updateStats();
+    if (folderTree) {
+      folderPanel.classList.remove('hidden');
+      renderFolderTree();
+    }
+    renderVisualization();
+  }
+
   async function handleSelectFolder() {
     const folder = await window.api.selectFolder();
     if (!folder) return;
 
+    currentFolder = folder;
     folderPathEl.textContent = folder;
     selectedFile = null;
     detailPanel.classList.remove('visible');
+
+    // Check for cached scan
+    const cached = await window.api.loadCache(folder);
+    if (cached && cached.cachedAt) {
+      const ageMs = Date.now() - cached.cachedAt;
+      const ageHours = ageMs / 3600000;
+      if (ageHours < 24) {
+        // Show cache prompt
+        const ageText = ageHours < 1
+          ? Math.floor(ageMs / 60000) + ' min ago'
+          : Math.floor(ageHours) + 'h ago';
+        viz.innerHTML = `<div class="cache-prompt">
+          <p>Cached scan available (${ageText})</p>
+          <div class="cache-prompt-actions">
+            <button id="cache-use">Use Cached</button>
+            <button id="cache-rescan">Rescan</button>
+          </div>
+        </div>`;
+        document.getElementById('cache-use').addEventListener('click', () => {
+          loadScanResult(cached);
+        });
+        document.getElementById('cache-rescan').addEventListener('click', () => {
+          doFreshScan(folder);
+        });
+        return;
+      }
+    }
+
+    doFreshScan(folder);
+  }
+
+  async function doFreshScan(folder) {
     loading.classList.remove('hidden');
     loadingText.textContent = 'Diving in...';
 
     try {
       const result = await window.api.scanFolder(folder);
-      allFiles = result.files;
-      displayFiles = allFiles;
-      totalFiles = result.totalFiles;
-      totalSize = result.totalSize;
-      skippedDirs = result.skippedDirs || 0;
-      duplicateResults = null;
-      folderColorMap = null;
-      ageRange = null;
-      folderTree = result.folderTree || null;
-      bubblePath = [];
-      bubbleCurrentNode = folderTree;
-      updateStats();
-      if (folderTree) {
-        folderPanel.classList.remove('hidden');
-        renderFolderTree();
-      }
-      renderVisualization();
+      loadScanResult(result);
+      // Save to cache
+      window.api.saveCache(folder, result);
     } catch (err) {
       console.error('Scan error:', err);
       renderEmpty('Error scanning folder');
@@ -1525,6 +1907,7 @@
     btnPie.classList.toggle('active', viewMode === 'pie');
     btnBubblemap.classList.toggle('active', viewMode === 'bubblemap');
     btnRings.classList.toggle('active', viewMode === 'rings');
+    btnTable.classList.toggle('active', viewMode === 'table');
     btnDuplicates.classList.toggle('active', viewMode === 'duplicates');
     if (viewMode === 'duplicates') {
       detailPanel.classList.remove('visible');
@@ -1533,6 +1916,17 @@
       bubblePath = [];
       bubbleCurrentNode = folderTree;
     }
+    updateStats();
+    renderVisualization();
+  }
+
+  function setColorMode(mode) {
+    colorMode = mode;
+    folderColorMap = null;
+    ageRange = null;
+    btnColorAge.classList.toggle('active', mode === 'age');
+    btnColorType.classList.toggle('active', mode === 'type');
+    btnColorFolder.classList.toggle('active', mode === 'folder');
     renderVisualization();
   }
 
@@ -1557,11 +1951,40 @@
     btnBubblemap = document.getElementById('view-bubblemap');
     btnDuplicates = document.getElementById('view-duplicates');
     btnRings = document.getElementById('view-rings');
+    btnTable = document.getElementById('view-table');
+    btnColorAge = document.getElementById('color-age');
+    btnColorType = document.getElementById('color-type');
+    btnColorFolder = document.getElementById('color-folder');
     folderPathEl = document.getElementById('folder-path');
     bubbleBreadcrumb = document.getElementById('bubble-breadcrumb');
     breadcrumbTrail = document.getElementById('breadcrumb-trail');
     folderPanel = document.getElementById('folder-panel');
     folderTreeEl = document.getElementById('folder-tree');
+
+    // Resizable folder panel
+    const resizeHandle = document.createElement('div');
+    resizeHandle.className = 'folder-resize-handle';
+    folderPanel.appendChild(resizeHandle);
+    let resizing = false;
+    resizeHandle.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      resizing = true;
+      resizeHandle.classList.add('dragging');
+      const onMove = (e2) => {
+        if (!resizing) return;
+        const newWidth = Math.max(200, Math.min(600, e2.clientX));
+        folderPanel.style.width = newWidth + 'px';
+      };
+      const onUp = () => {
+        resizing = false;
+        resizeHandle.classList.remove('dragging');
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+        if (displayFiles.length) renderVisualization();
+      };
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    });
 
     // Platform labels
     actionShow.textContent = getShowLabel();
@@ -1573,7 +1996,17 @@
     btnPie.addEventListener('click', () => setViewMode('pie'));
     btnBubblemap.addEventListener('click', () => setViewMode('bubblemap'));
     btnRings.addEventListener('click', () => setViewMode('rings'));
+    btnTable.addEventListener('click', () => setViewMode('table'));
     btnDuplicates.addEventListener('click', () => setViewMode('duplicates'));
+    document.getElementById('btn-export').addEventListener('click', exportCSV);
+    document.getElementById('btn-filter').addEventListener('click', () => {
+      filterBarOpen = !filterBarOpen;
+      document.getElementById('btn-filter').classList.toggle('active', filterBarOpen);
+      buildFilterBar();
+    });
+    btnColorAge.addEventListener('click', () => setColorMode('age'));
+    btnColorType.addEventListener('click', () => setColorMode('type'));
+    btnColorFolder.addEventListener('click', () => setColorMode('folder'));
 
     actionOpen.addEventListener('click', () => { if (selectedFile) window.api.openFile(selectedFile.path); });
     actionPreview.addEventListener('click', () => { if (selectedFile) window.api.previewFile(selectedFile.path); });
