@@ -44,6 +44,8 @@
         <span id="folder-path"></span>
       </div>
       <div class="header-right">
+        <span id="app-version" class="app-version"></span>
+        <button id="settings-btn" class="settings-btn" title="Settings">&#9881;</button>
         <button id="theme-toggle" class="theme-toggle-btn" title="Toggle light/dark mode">
           <span class="theme-icon-dark">&#9790;</span>
           <span class="theme-icon-light">&#9728;</span>
@@ -84,6 +86,46 @@
   <div id="filter-bar" class="hidden"></div>
   <div id="bubble-breadcrumb" class="hidden">
     <span id="breadcrumb-trail"></span>
+  </div>
+
+  <!-- Update banner -->
+  <div id="update-banner" class="hidden">
+    <span id="update-banner-text"></span>
+    <button id="update-banner-details">View Details</button>
+    <button id="update-banner-dismiss" class="update-dismiss">&times;</button>
+  </div>
+
+  <!-- Settings modal -->
+  <div id="settings-overlay" class="modal-overlay hidden">
+    <div class="settings-modal">
+      <div class="settings-header">
+        <h2>Settings</h2>
+        <button id="settings-close" class="settings-close-btn">&times;</button>
+      </div>
+      <div class="settings-body">
+        <div class="settings-section">
+          <label class="settings-label">App Version</label>
+          <span id="settings-version" class="settings-value"></span>
+        </div>
+        <div class="settings-section">
+          <label class="settings-label" for="settings-update-url">Update Server URL</label>
+          <input id="settings-update-url" type="text" class="settings-input" placeholder="http://localhost:9090">
+        </div>
+        <div class="settings-section">
+          <button id="settings-check-update" class="settings-btn-primary">Check for Updates</button>
+          <span id="settings-update-status" class="settings-update-status"></span>
+        </div>
+        <div id="settings-update-result" class="settings-update-result hidden">
+          <div id="settings-update-version" class="settings-update-version"></div>
+          <div id="settings-update-notes" class="settings-update-notes"></div>
+          <button id="settings-download-btn" class="settings-btn-download">Download Update</button>
+        </div>
+        <div class="settings-section settings-save-row">
+          <button id="settings-save" class="settings-btn-primary">Save Settings</button>
+          <span id="settings-save-status" class="settings-save-status"></span>
+        </div>
+      </div>
+    </div>
   </div>
 
   <main>

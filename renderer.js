@@ -2294,6 +2294,116 @@
 
   // === Init ===
 
+  // === Settings & Update ===
+
+  let dismissedUpdateVersion = null;
+  let latestUpdateInfo = null;
+
+  async function initVersionLabel() {
+    const version = await window.api.getAppVersion();
+    const el = document.getElementById('app-version');
+    if (el) el.textContent = 'v' + version;
+  }
+
+  async function openSettings() {
+    const overlay = document.getElementById('settings-overlay');
+    overlay.classList.remove('hidden');
+    // Populate
+    const version = await window.api.getAppVersion();
+    document.getElementById('settings-version').textContent = 'v' + version;
+    const settings = await window.api.loadSettings();
+    document.getElementById('settings-update-url').value = settings.updateUrl || '';
+    document.getElementById('settings-update-status').textContent = '';
+    document.getElementById('settings-update-result').classList.add('hidden');
+    document.getElementById('settings-save-status').textContent = '';
+  }
+
+  function closeSettings() {
+    document.getElementById('settings-overlay').classList.add('hidden');
+  }
+
+  async function saveSettingsFromModal() {
+    const url = document.getElementById('settings-update-url').value.trim();
+    const result = await window.api.saveSettings({ updateUrl: url });
+    const statusEl = document.getElementById('settings-save-status');
+    statusEl.textContent = result ? 'Saved!' : 'Error saving';
+    statusEl.style.color = result ? '#4caf50' : '#f44336';
+    setTimeout(() => { statusEl.textContent = ''; }, 2000);
+  }
+
+  async function checkForUpdatesFromSettings() {
+    const statusEl = document.getElementById('settings-update-status');
+    const resultEl = document.getElementById('settings-update-result');
+    statusEl.textContent = 'Checking...';
+    statusEl.style.color = 'var(--text-muted)';
+    resultEl.classList.add('hidden');
+
+    // Save URL first in case user changed it
+    const url = document.getElementById('settings-update-url').value.trim();
+    if (url) await window.api.saveSettings({ updateUrl: url });
+
+    const result = await window.api.checkForUpdates();
+    if (result.available) {
+      statusEl.textContent = '';
+      resultEl.classList.remove('hidden');
+      document.getElementById('settings-update-version').textContent = 'New version available: v' + result.version;
+      document.getElementById('settings-update-notes').textContent = result.notes || '';
+      latestUpdateInfo = result;
+      // Also show banner
+      showUpdateBanner(result);
+    } else if (result.error) {
+      statusEl.textContent = 'Could not check: ' + result.error;
+      statusEl.style.color = '#f44336';
+    } else {
+      statusEl.textContent = 'You\'re up to date! (v' + (result.version || 'unknown') + ')';
+      statusEl.style.color = '#4caf50';
+    }
+  }
+
+  function showUpdateBanner(info) {
+    if (dismissedUpdateVersion === info.version) return;
+    const banner = document.getElementById('update-banner');
+    const text = document.getElementById('update-banner-text');
+    text.textContent = 'Update available: v' + info.version;
+    latestUpdateInfo = info;
+    banner.classList.remove('hidden');
+  }
+
+  function dismissUpdateBanner() {
+    const banner = document.getElementById('update-banner');
+    banner.classList.add('hidden');
+    if (latestUpdateInfo) dismissedUpdateVersion = latestUpdateInfo.version;
+  }
+
+  function openUpdateDetails() {
+    // Open settings modal to the update section
+    openSettings().then(() => {
+      if (latestUpdateInfo) {
+        const resultEl = document.getElementById('settings-update-result');
+        resultEl.classList.remove('hidden');
+        document.getElementById('settings-update-version').textContent = 'New version available: v' + latestUpdateInfo.version;
+        document.getElementById('settings-update-notes').textContent = latestUpdateInfo.notes || '';
+      }
+    });
+  }
+
+  function downloadUpdate() {
+    if (latestUpdateInfo && latestUpdateInfo.downloadUrl) {
+      window.api.openExternal(latestUpdateInfo.downloadUrl);
+    }
+  }
+
+  async function silentUpdateCheck() {
+    try {
+      const result = await window.api.checkForUpdates();
+      if (result.available) {
+        showUpdateBanner(result);
+      }
+    } catch (e) {
+      // Silent — don't bother user if offline
+    }
+  }
+
   function init() {
     viz = document.getElementById('visualization');
     detailPanel = document.getElementById('detail-panel');
@@ -2419,6 +2529,29 @@
     window.api.onDuplicateProgress((data) => {
       loadingText.textContent = `Hashing files... ${data.hashed} / ${data.total}`;
     });
+
+    // Settings & Update
+    initVersionLabel();
+    document.getElementById('settings-btn').addEventListener('click', openSettings);
+    document.getElementById('settings-close').addEventListener('click', closeSettings);
+    document.getElementById('settings-overlay').addEventListener('click', (e) => {
+      if (e.target.id === 'settings-overlay') closeSettings();
+    });
+    document.getElementById('settings-save').addEventListener('click', saveSettingsFromModal);
+    document.getElementById('settings-check-update').addEventListener('click', checkForUpdatesFromSettings);
+    document.getElementById('settings-download-btn').addEventListener('click', downloadUpdate);
+    document.getElementById('update-banner-details').addEventListener('click', openUpdateDetails);
+    document.getElementById('update-banner-dismiss').addEventListener('click', dismissUpdateBanner);
+
+    // Escape closes settings
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && !document.getElementById('settings-overlay').classList.contains('hidden')) {
+        closeSettings();
+      }
+    });
+
+    // Silent update check on launch
+    silentUpdateCheck();
   }
 
   window.addEventListener('DOMContentLoaded', init);

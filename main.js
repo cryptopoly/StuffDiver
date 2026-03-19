@@ -363,3 +363,97 @@ ipcMain.handle('clear-cache', async (event, folderPath) => {
     return false;
   }
 });
+
+// === Settings ===
+
+const DEFAULT_SETTINGS = {
+  updateUrl: 'http://localhost:9090'
+};
+
+function getSettingsPath() {
+  return path.join(app.getPath('userData'), 'settings.json');
+}
+
+function loadSettings() {
+  try {
+    const raw = fs.readFileSync(getSettingsPath(), 'utf8');
+    return { ...DEFAULT_SETTINGS, ...JSON.parse(raw) };
+  } catch (e) {
+    return { ...DEFAULT_SETTINGS };
+  }
+}
+
+function saveSettings(settings) {
+  fs.writeFileSync(getSettingsPath(), JSON.stringify(settings, null, 2));
+}
+
+ipcMain.handle('get-app-version', () => {
+  return app.getVersion();
+});
+
+ipcMain.handle('load-settings', () => {
+  return loadSettings();
+});
+
+ipcMain.handle('save-settings', (event, settings) => {
+  try {
+    saveSettings(settings);
+    return true;
+  } catch (e) {
+    return false;
+  }
+});
+
+// === Auto-update check ===
+
+function compareVersions(a, b) {
+  const pa = a.split('.').map(Number);
+  const pb = b.split('.').map(Number);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const na = pa[i] || 0;
+    const nb = pb[i] || 0;
+    if (na > nb) return 1;
+    if (na < nb) return -1;
+  }
+  return 0;
+}
+
+function getPlatformAssetKey() {
+  const plat = process.platform; // darwin, win32, linux
+  const arch = process.arch;     // arm64, x64
+  if (plat === 'darwin') return `mac-${arch}`;
+  if (plat === 'win32') return `win-${arch}`;
+  return `linux-${arch}`;
+}
+
+ipcMain.handle('check-for-updates', async () => {
+  const settings = loadSettings();
+  const url = settings.updateUrl.replace(/\/+$/, '') + '/latest.json';
+  try {
+    const { net } = require('electron');
+    const response = await net.fetch(url, { signal: AbortSignal.timeout(8000) });
+    if (!response.ok) return { available: false, error: 'Server returned ' + response.status };
+    const manifest = await response.json();
+    const currentVersion = app.getVersion();
+    const latestVersion = manifest.version;
+    if (compareVersions(latestVersion, currentVersion) > 0) {
+      const assetKey = getPlatformAssetKey();
+      const downloadUrl = manifest.assets && manifest.assets[assetKey]
+        ? manifest.assets[assetKey]
+        : null;
+      return {
+        available: true,
+        version: latestVersion,
+        notes: manifest.notes || '',
+        downloadUrl
+      };
+    }
+    return { available: false, version: latestVersion };
+  } catch (e) {
+    return { available: false, error: e.message || 'Could not connect' };
+  }
+});
+
+ipcMain.handle('open-external', (event, url) => {
+  shell.openExternal(url);
+});

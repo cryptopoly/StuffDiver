@@ -12,5 +12,11 @@ contextBridge.exposeInMainWorld('api', {
   clearCache: (folderPath) => ipcRenderer.invoke('clear-cache', folderPath),
   onScanProgress: (callback) => ipcRenderer.on('scan-progress', (_e, count) => callback(count)),
   onDuplicateProgress: (callback) => ipcRenderer.on('duplicate-progress', (_e, data) => callback(data)),
+  // Settings & updates
+  getAppVersion: () => ipcRenderer.invoke('get-app-version'),
+  loadSettings: () => ipcRenderer.invoke('load-settings'),
+  saveSettings: (settings) => ipcRenderer.invoke('save-settings', settings),
+  checkForUpdates: () => ipcRenderer.invoke('check-for-updates'),
+  openExternal: (url) => ipcRenderer.invoke('open-external', url),
   platform: process.platform
 });
