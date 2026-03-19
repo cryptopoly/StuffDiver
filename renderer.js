@@ -39,6 +39,10 @@
   let totalSize = 0;
   let skippedDirs = 0;
   let duplicateResults = null; // null = not scanned, [] = scanned
+  let dupFilterTiers = new Set(['gold', 'silver', 'bronze']); // which tiers to show
+  let dupSortBy = 'size'; // 'tier', 'files', 'size', 'wasted'
+  let dupSortAsc = false; // descending by default
+  let dupFolderFilter = null; // folder path prefix to filter duplicate groups
   let colorMode = 'age';
   let folderTree = null;       // hierarchical tree from scan
   let bubblePath = [];         // current drill-down path segments
@@ -729,8 +733,8 @@
       const prompt = document.createElement('div');
       prompt.className = 'dup-scan-prompt';
       prompt.innerHTML = `
-        <p>Scan the ${displayFiles.length} largest files for duplicates</p>
-        <p style="font-size:12px;color:#666">Compares file content using SHA-256 hashing</p>
+        <p>Scan all ${totalFiles.toLocaleString()} files for duplicates</p>
+        <p style="font-size:12px;color:var(--text-tertiary)">Compares file content using SHA-256 hashing</p>
       `;
       const btn = document.createElement('button');
       btn.className = 'dup-scan-btn';
@@ -749,29 +753,108 @@
     const container = document.createElement('div');
     container.className = 'dup-container';
 
-    // Summary
-    const goldCount = duplicateResults.filter(g => g.tier === 'gold').length;
-    const silverCount = duplicateResults.filter(g => g.tier === 'silver').length;
-    const bronzeCount = duplicateResults.filter(g => g.tier === 'bronze').length;
-    const totalWasted = duplicateResults.reduce((s, g) => s + g.wasted, 0);
-    const totalDupFiles = duplicateResults.reduce((s, g) => s + g.files.length, 0);
+    // Filter results by selected tiers and folder
+    const filteredResults = duplicateResults.filter(g => {
+      if (!dupFilterTiers.has(g.tier)) return false;
+      if (dupFolderFilter) {
+        return g.files.some(f => f.relativePath.startsWith(dupFolderFilter + '/') || f.relativePath.startsWith(dupFolderFilter + '\\'));
+      }
+      return true;
+    });
+
+    // Summary with clickable tier filter buttons
+    const allGoldCount = duplicateResults.filter(g => g.tier === 'gold').length;
+    const allSilverCount = duplicateResults.filter(g => g.tier === 'silver').length;
+    const allBronzeCount = duplicateResults.filter(g => g.tier === 'bronze').length;
+    const totalWasted = filteredResults.reduce((s, g) => s + g.wasted, 0);
+    const totalDupFiles = filteredResults.reduce((s, g) => s + g.files.length, 0);
 
     const summary = document.createElement('div');
     summary.className = 'dup-summary';
-    summary.innerHTML = `
-      <span>Groups: <span class="stat-value">${duplicateResults.length}</span></span>
-      <span>Files: <span class="stat-value">${totalDupFiles}</span></span>
-      <span>Wasted: <span class="stat-value" style="color:#f44336">${formatSize(totalWasted)}</span></span>
-      ${goldCount ? `<span><span class="dup-tier gold" style="display:inline-block;width:8px;height:8px;border-radius:50%;vertical-align:middle"></span> Exact: <span class="stat-value">${goldCount}</span></span>` : ''}
-      ${silverCount ? `<span><span class="dup-tier silver" style="display:inline-block;width:8px;height:8px;border-radius:50%;vertical-align:middle"></span> Likely: <span class="stat-value">${silverCount}</span></span>` : ''}
-      ${bronzeCount ? `<span><span class="dup-tier bronze" style="display:inline-block;width:8px;height:8px;border-radius:50%;vertical-align:middle"></span> Possible: <span class="stat-value">${bronzeCount}</span></span>` : ''}
-    `;
+
+    const statsSpan = document.createElement('span');
+    statsSpan.innerHTML = `Groups: <span class="stat-value">${filteredResults.length}</span>`;
+    summary.appendChild(statsSpan);
+
+    const filesSpan = document.createElement('span');
+    filesSpan.innerHTML = `Files: <span class="stat-value">${totalDupFiles}</span>`;
+    summary.appendChild(filesSpan);
+
+    const wastedSpan = document.createElement('span');
+    wastedSpan.innerHTML = `Wasted: <span class="stat-value" style="color:#f44336">${formatSize(totalWasted)}</span>`;
+    summary.appendChild(wastedSpan);
+
+    // Tier filter buttons
+    function makeTierBtn(tier, label, count) {
+      if (count === 0) return;
+      const btn = document.createElement('button');
+      btn.className = `dup-tier-filter ${tier}${dupFilterTiers.has(tier) ? ' active' : ''}`;
+      btn.innerHTML = `<span class="dup-tier ${tier}" style="display:inline-block;width:8px;height:8px;border-radius:50%;vertical-align:middle"></span> ${label}: ${count}`;
+      btn.addEventListener('click', () => {
+        if (dupFilterTiers.has(tier)) {
+          if (dupFilterTiers.size > 1) dupFilterTiers.delete(tier);
+        } else {
+          dupFilterTiers.add(tier);
+        }
+        renderDuplicates();
+      });
+      summary.appendChild(btn);
+    }
+    makeTierBtn('gold', 'Exact', allGoldCount);
+    makeTierBtn('silver', 'Likely', allSilverCount);
+    makeTierBtn('bronze', 'Possible', allBronzeCount);
+
     container.appendChild(summary);
+
+    // Sort controls
+    const sortBar = document.createElement('div');
+    sortBar.className = 'dup-sort-bar';
+    const sortLabel = document.createElement('span');
+    sortLabel.className = 'dup-sort-label';
+    sortLabel.textContent = 'Sort by:';
+    sortBar.appendChild(sortLabel);
+
+    const sortOptions = [
+      { key: 'tier', label: 'Tier' },
+      { key: 'files', label: 'Files' },
+      { key: 'size', label: 'Size' },
+      { key: 'wasted', label: 'Wasted' },
+    ];
+    for (const opt of sortOptions) {
+      const btn = document.createElement('button');
+      btn.className = `dup-sort-btn${dupSortBy === opt.key ? ' active' : ''}`;
+      const arrow = dupSortBy === opt.key ? (dupSortAsc ? ' ▲' : ' ▼') : '';
+      btn.textContent = opt.label + arrow;
+      btn.addEventListener('click', () => {
+        if (dupSortBy === opt.key) {
+          dupSortAsc = !dupSortAsc;
+        } else {
+          dupSortBy = opt.key;
+          dupSortAsc = false;
+        }
+        renderDuplicates();
+      });
+      sortBar.appendChild(btn);
+    }
+    container.appendChild(sortBar);
+
+    // Apply sorting
+    const tierOrder = { gold: 0, silver: 1, bronze: 2 };
+    const sortedResults = [...filteredResults].sort((a, b) => {
+      let cmp = 0;
+      if (dupSortBy === 'tier') cmp = tierOrder[a.tier] - tierOrder[b.tier];
+      else if (dupSortBy === 'files') cmp = a.files.length - b.files.length;
+      else if (dupSortBy === 'size') cmp = a.size - b.size;
+      else if (dupSortBy === 'wasted') cmp = a.wasted - b.wasted;
+      // For tier, ascending = Exact first (natural order); for others, descending = largest first
+      if (dupSortBy === 'tier') return dupSortAsc ? -cmp : cmp;
+      return dupSortAsc ? cmp : -cmp;
+    });
 
     const showLabel = getShowLabel();
     const previewLabel = getPreviewLabel();
 
-    for (const group of duplicateResults) {
+    for (const group of sortedResults) {
       const groupEl = document.createElement('div');
       groupEl.className = 'dup-group';
 
@@ -867,7 +950,9 @@
     loadingText.textContent = 'Hunting for duplicates...';
 
     try {
-      duplicateResults = await window.api.findDuplicates(allFiles);
+      dupFolderFilter = null;
+      duplicateResults = await window.api.findDuplicates();
+      renderDupFolderTree();
       renderDuplicates();
     } catch (err) {
       renderEmpty('Error finding duplicates');
@@ -1517,6 +1602,212 @@
     return { bg: 'rgba(33,150,243,0.18)', fg: '#5c99d4' };
   }
 
+  // Build a folder tree from duplicate file paths with dup group counts
+  function buildDupFolderTree() {
+    if (!duplicateResults || !duplicateResults.length) return null;
+    const root = { name: folderTree ? folderTree.name : '(root)', path: '', dupGroups: 0, dupFiles: 0, wasted: 0, children: {} };
+
+    for (const group of duplicateResults) {
+      // Track which folders this group touches
+      const touchedFolders = new Set();
+      for (const f of group.files) {
+        const parts = f.relativePath.replace(/\\/g, '/').split('/');
+        let node = root;
+        // Walk folder segments (skip the filename)
+        for (let i = 0; i < parts.length - 1; i++) {
+          const seg = parts[i];
+          const nodePath = parts.slice(0, i + 1).join('/');
+          if (!node.children[seg]) {
+            node.children[seg] = { name: seg, path: nodePath, dupGroups: 0, dupFiles: 0, wasted: 0, children: {} };
+          }
+          node = node.children[seg];
+          node.dupFiles++;
+          if (!touchedFolders.has(node.path)) {
+            touchedFolders.add(node.path);
+            node.dupGroups++;
+            node.wasted += group.wasted;
+          }
+        }
+        // Count root too
+        root.dupFiles++;
+      }
+      root.dupGroups++;
+      root.wasted += group.wasted;
+    }
+
+    // Prune empty branches
+    function prune(node) {
+      if (!node.children) return;
+      for (const [key, child] of Object.entries(node.children)) {
+        if (child.dupFiles === 0) {
+          delete node.children[key];
+        } else {
+          prune(child);
+        }
+      }
+    }
+    prune(root);
+    return root;
+  }
+
+  function renderDupFolderTree() {
+    if (!folderTreeEl) return;
+    const tree = buildDupFolderTree();
+    if (!tree) return;
+    folderTreeEl.innerHTML = '';
+
+    const rootItem = document.createElement('div');
+    rootItem.className = 'folder-item expanded';
+
+    const rootRow = document.createElement('div');
+    rootRow.className = 'folder-row' + (!dupFolderFilter ? ' active' : '');
+    rootRow.dataset.path = '';
+
+    const rootChevron = document.createElement('span');
+    rootChevron.className = 'folder-chevron';
+    rootChevron.textContent = '\u25B6';
+
+    const rootName = document.createElement('span');
+    rootName.className = 'folder-row-name';
+    rootName.textContent = tree.name || '(root)';
+
+    const rootGroups = document.createElement('span');
+    rootGroups.className = 'folder-row-size';
+    rootGroups.textContent = tree.dupGroups + ' groups';
+
+    const rootFiles = document.createElement('span');
+    rootFiles.className = 'folder-row-count';
+    rootFiles.textContent = tree.dupFiles + ' files';
+
+    const rootWasted = document.createElement('span');
+    rootWasted.className = 'folder-row-date';
+    rootWasted.style.color = tree.wasted > 0 ? '#f44336' : '';
+    rootWasted.textContent = tree.wasted > 0 ? formatSize(tree.wasted) + ' wasted' : '';
+
+    rootRow.appendChild(rootChevron);
+    rootRow.appendChild(rootName);
+    rootRow.appendChild(rootGroups);
+    rootRow.appendChild(rootFiles);
+    rootRow.appendChild(rootWasted);
+
+    rootRow.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (e.target === rootChevron || e.target === rootChevron.parentElement) {
+        rootItem.classList.toggle('expanded');
+      } else {
+        dupFolderFilter = null;
+        highlightDupFolderTree();
+        renderDuplicates();
+      }
+    });
+
+    rootItem.appendChild(rootRow);
+
+    const rootChildren = document.createElement('div');
+    rootChildren.className = 'folder-children';
+    buildDupTreeNodes(tree, rootChildren, 1);
+    rootItem.appendChild(rootChildren);
+
+    folderTreeEl.appendChild(rootItem);
+  }
+
+  function buildDupTreeNodes(parentNode, container, depth) {
+    if (!parentNode.children) return;
+
+    const children = Object.values(parentNode.children)
+      .sort((a, b) => b.wasted - a.wasted || b.dupGroups - a.dupGroups);
+
+    for (const child of children) {
+      const hasChildren = child.children && Object.keys(child.children).length > 0;
+
+      const item = document.createElement('div');
+      item.className = 'folder-item';
+
+      const row = document.createElement('div');
+      row.className = 'folder-row';
+      row.style.paddingLeft = (10 + depth * 18) + 'px';
+      row.dataset.path = child.path || '';
+
+      if (child.path === dupFolderFilter) {
+        row.classList.add('active');
+      }
+
+      const chevron = document.createElement('span');
+      chevron.className = 'folder-chevron' + (hasChildren ? '' : ' empty');
+      chevron.textContent = '\u25B6';
+
+      const countBadge = document.createElement('span');
+      countBadge.className = 'folder-pct';
+      countBadge.textContent = child.dupGroups.toString();
+      countBadge.style.background = 'rgba(244,67,54,0.2)';
+      countBadge.style.color = '#f44336';
+
+      const name = document.createElement('span');
+      name.className = 'folder-row-name';
+      name.textContent = child.name;
+
+      const groups = document.createElement('span');
+      groups.className = 'folder-row-size';
+      groups.textContent = child.dupGroups + ' groups';
+
+      const files = document.createElement('span');
+      files.className = 'folder-row-count';
+      files.textContent = child.dupFiles + ' files';
+
+      const wasted = document.createElement('span');
+      wasted.className = 'folder-row-date';
+      wasted.style.color = child.wasted > 0 ? '#f44336' : '';
+      wasted.textContent = child.wasted > 0 ? formatSize(child.wasted) + ' wasted' : '';
+
+      row.appendChild(chevron);
+      row.appendChild(countBadge);
+      row.appendChild(name);
+      row.appendChild(groups);
+      row.appendChild(files);
+      row.appendChild(wasted);
+
+      row.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (hasChildren && (e.target === chevron)) {
+          item.classList.toggle('expanded');
+        } else if (child.path) {
+          dupFolderFilter = child.path;
+          highlightDupFolderTree();
+          renderDuplicates();
+        }
+      });
+
+      item.appendChild(row);
+
+      if (hasChildren) {
+        const childContainer = document.createElement('div');
+        childContainer.className = 'folder-children';
+        buildDupTreeNodes(child, childContainer, depth + 1);
+        item.appendChild(childContainer);
+      }
+
+      container.appendChild(item);
+    }
+  }
+
+  function highlightDupFolderTree() {
+    if (!folderTreeEl) return;
+    const rows = folderTreeEl.querySelectorAll('.folder-row');
+    for (const row of rows) {
+      row.classList.toggle('active', row.dataset.path === (dupFolderFilter || ''));
+    }
+    // Auto-expand parents of active row
+    const activeRow = folderTreeEl.querySelector('.folder-row.active');
+    if (activeRow) {
+      let parent = activeRow.parentElement;
+      while (parent && parent !== folderTreeEl) {
+        if (parent.classList.contains('folder-item')) parent.classList.add('expanded');
+        parent = parent.parentElement;
+      }
+      activeRow.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }
+  }
+
   function renderFolderTree() {
     if (!folderTreeEl || !folderTree) return;
     folderTreeEl.innerHTML = '';
@@ -1868,6 +2159,10 @@
     totalSize = result.totalSize;
     skippedDirs = result.skippedDirs || 0;
     duplicateResults = null;
+    dupFilterTiers = new Set(['gold', 'silver', 'bronze']);
+    dupSortBy = 'size';
+    dupSortAsc = false;
+    dupFolderFilter = null;
     folderColorMap = null;
     ageRange = null;
     filterTypes = null;
@@ -1958,6 +2253,26 @@
     btnDuplicates.classList.toggle('active', viewMode === 'duplicates');
     if (viewMode === 'duplicates') {
       detailPanel.classList.remove('visible');
+      // Show duplicate-specific folder tree with updated header
+      const fhSize = document.querySelector('.fh-size');
+      const fhCount = document.querySelector('.fh-count');
+      const fhDate = document.querySelector('.fh-date');
+      if (fhSize) fhSize.textContent = 'Groups';
+      if (fhCount) fhCount.textContent = 'Files';
+      if (fhDate) fhDate.textContent = 'Wasted';
+      if (duplicateResults && duplicateResults.length) {
+        renderDupFolderTree();
+      }
+    } else {
+      // Restore normal folder tree and header
+      dupFolderFilter = null;
+      const fhSize = document.querySelector('.fh-size');
+      const fhCount = document.querySelector('.fh-count');
+      const fhDate = document.querySelector('.fh-date');
+      if (fhSize) fhSize.textContent = 'Size';
+      if (fhCount) fhCount.textContent = 'Contents';
+      if (fhDate) fhDate.textContent = 'Modified';
+      renderFolderTree();
     }
     if ((viewMode === 'bubblemap' || viewMode === 'rings') && !bubbleCurrentNode && folderTree) {
       bubblePath = [];

@@ -6,7 +6,7 @@ contextBridge.exposeInMainWorld('api', {
   openFile: (filePath) => ipcRenderer.invoke('open-file', filePath),
   showInFolder: (filePath) => ipcRenderer.invoke('show-in-folder', filePath),
   previewFile: (filePath) => ipcRenderer.invoke('preview-file', filePath),
-  findDuplicates: (files) => ipcRenderer.invoke('find-duplicates', files),
+  findDuplicates: () => ipcRenderer.invoke('find-duplicates'),
   loadCache: (folderPath) => ipcRenderer.invoke('load-cache', folderPath),
   saveCache: (folderPath, result) => ipcRenderer.invoke('save-cache', folderPath, result),
   clearCache: (folderPath) => ipcRenderer.invoke('clear-cache', folderPath),

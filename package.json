@@ -20,7 +20,14 @@
       "target": [
         { "target": "dmg", "arch": ["arm64", "x64"] }
       ],
-      "category": "public.app-category.utilities"
+      "category": "public.app-category.utilities",
+      "entitlements": "entitlements.mac.plist",
+      "entitlementsInherit": "entitlements.mac.plist",
+      "extendInfo": {
+        "NSDesktopFolderUsageDescription": "Stuff Diver needs access to scan folder sizes and find duplicates.",
+        "NSDocumentsFolderUsageDescription": "Stuff Diver needs access to scan folder sizes and find duplicates.",
+        "NSDownloadsFolderUsageDescription": "Stuff Diver needs access to scan folder sizes and find duplicates."
+      }
     },
     "win": {
       "target": [

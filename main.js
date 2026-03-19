@@ -4,6 +4,9 @@ const fs = require('fs');
 const crypto = require('crypto');
 const { exec } = require('child_process');
 
+// Set the app name so macOS permission dialogs show "Stuff Diver"
+app.setName('Stuff Diver');
+
 let mainWindow;
 
 function createWindow() {
@@ -33,6 +36,9 @@ app.on('window-all-closed', () => {
 app.on('activate', () => {
   if (BrowserWindow.getAllWindows().length === 0) createWindow();
 });
+
+// Full file list from last scan (kept in main process for duplicate detection)
+let lastScanAllFiles = [];
 
 // IPC Handlers
 
@@ -142,7 +148,7 @@ ipcMain.handle('scan-folder', async (event, folderPath) => {
           addToTree(rel, diskSize, ext, stat.mtimeMs);
           count++;
           if (count % 1000 === 0) {
-            event.sender.send('scan-progress', { count, skipped });
+            try { event.sender.send('scan-progress', { count, skipped }); } catch (e) { /* window closed */ }
           }
         } catch (e) {
           skipped++;
@@ -160,12 +166,14 @@ ipcMain.handle('scan-folder', async (event, folderPath) => {
   }
 
   files.sort((a, b) => b.size - a.size);
+  // Store full list for duplicate detection; only send top 500 to renderer for visualization
+  lastScanAllFiles = files;
   return { files: files.slice(0, 500), totalFiles: files.length, totalSize: files.reduce((s, f) => s + f.size, 0), skippedDirs: skipped, folderTree };
 });
 
-ipcMain.handle('find-duplicates', async (event, files) => {
+ipcMain.handle('find-duplicates', async (event) => {
   const MIN_SIZE = 4096;
-  const candidates = files.filter(f => f.size >= MIN_SIZE);
+  const candidates = lastScanAllFiles.filter(f => f.size >= MIN_SIZE);
 
   async function hashFile(filePath, maxBytes) {
     return new Promise((resolve, reject) => {
@@ -202,7 +210,7 @@ ipcMain.handle('find-duplicates', async (event, files) => {
       } catch (e) { /* skip unreadable */ }
       hashed++;
       if (hashed % 20 === 0) {
-        event.sender.send('duplicate-progress', { phase: 'hashing', hashed, total: totalToHash });
+        try { event.sender.send('duplicate-progress', { phase: 'hashing', hashed, total: totalToHash }); } catch (e) { /* window closed */ }
       }
     }
 

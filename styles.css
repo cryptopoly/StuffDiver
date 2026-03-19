@@ -71,7 +71,7 @@ body.light {
   --bg-panel: #e4e7ec;
   --bg-header-start: #ebedf2;
   --bg-header-end: #e2e5eb;
-  --bg-tooltip: rgba(50, 55, 70, 0.95);
+  --bg-tooltip: rgba(255, 255, 255, 0.97);
   --bg-hover: rgba(0, 0, 0, 0.04);
   --bg-active: linear-gradient(135deg, rgba(0, 160, 210, 0.15), rgba(100, 70, 220, 0.10));
 
@@ -1280,10 +1280,76 @@ main {
   padding: 8px 8px 12px;
   font-size: 12px;
   color: var(--text-muted);
+  align-items: center;
+  flex-wrap: wrap;
 }
 
 .dup-summary .stat-value {
   color: var(--text-secondary);
+  font-weight: 600;
+}
+
+.dup-tier-filter {
+  background: transparent;
+  border: 1px solid var(--border-medium);
+  border-radius: 12px;
+  padding: 3px 10px;
+  font-size: 11px;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 0.15s;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.dup-tier-filter:hover {
+  border-color: var(--text-secondary);
+}
+
+.dup-tier-filter.active {
+  border-color: var(--text-secondary);
+  color: var(--text-primary);
+  background: var(--bg-elevated);
+}
+
+.dup-tier-filter:not(.active) {
+  opacity: 0.45;
+}
+
+.dup-sort-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px 10px;
+  font-size: 11px;
+}
+
+.dup-sort-label {
+  color: var(--text-muted);
+  margin-right: 2px;
+}
+
+.dup-sort-btn {
+  background: transparent;
+  border: 1px solid var(--border-medium);
+  border-radius: 10px;
+  padding: 2px 10px;
+  font-size: 11px;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.dup-sort-btn:hover {
+  border-color: var(--text-secondary);
+  color: var(--text-secondary);
+}
+
+.dup-sort-btn.active {
+  border-color: var(--text-secondary);
+  color: var(--text-primary);
+  background: var(--bg-hover);
   font-weight: 600;
 }
 
@@ -1311,7 +1377,7 @@ main {
 }
 
 .dup-group-header:hover {
-  background: rgba(0, 210, 255, 0.03);
+  background: var(--bg-hover);
 }
 
 .dup-tier {
@@ -1380,11 +1446,11 @@ main {
 }
 
 .dup-file-row:not(:last-child) {
-  border-bottom: 1px solid rgba(255, 255, 255, 0.02);
+  border-bottom: 1px solid var(--border-light);
 }
 
 .dup-file-row:hover {
-  background: rgba(0, 210, 255, 0.03);
+  background: var(--bg-hover);
 }
 
 .dup-file-path {
@@ -1422,9 +1488,9 @@ main {
 }
 
 .dup-file-actions button:hover {
-  background: rgba(0, 210, 255, 0.08);
+  background: var(--border-accent);
   color: var(--text-bright);
-  border-color: rgba(0, 210, 255, 0.2);
+  border-color: var(--border-medium);
 }
 
 .dup-tier-label {
