@@ -167,11 +167,13 @@ header::after {
   flex-shrink: 0;
 }
 
-.brand .logo-svg {
-  width: 26px;
-  height: 26px;
+.brand .logo-svg,
+.brand .logo-img {
+  width: 28px;
+  height: 28px;
   flex-shrink: 0;
-  filter: drop-shadow(0 0 6px rgba(0, 210, 255, 0.3));
+  border-radius: 6px;
+  object-fit: contain;
 }
 
 .logo {
@@ -826,10 +828,12 @@ main {
   display: none; /* hide old raster logo */
 }
 
-.empty-state .logo-svg-large {
+.empty-state .logo-svg-large,
+.empty-state .logo-img-large {
   width: 120px;
   height: 120px;
   margin-bottom: 16px;
+  object-fit: contain;
   filter: drop-shadow(0 0 20px rgba(0, 210, 255, 0.15));
   animation: float 4s ease-in-out infinite;
 }
@@ -1210,10 +1214,13 @@ main {
   display: none; /* hide old raster logo */
 }
 
-.loading-logo-wrap .logo-svg-loading {
+.loading-logo-wrap .logo-svg-loading,
+.loading-logo-wrap .logo-img-loading {
   width: 80px;
   height: 80px;
   display: block;
+  object-fit: contain;
+  animation: float 2s ease-in-out infinite;
 }
 
 .loading-bubbles {
@@ -1893,6 +1900,62 @@ body.light .cache-prompt-actions button:first-child {
 
 .settings-btn-download:hover {
   opacity: 0.85;
+}
+
+.settings-btn-install {
+  padding: 10px 24px;
+  border-radius: 8px;
+  border: none;
+  background: linear-gradient(135deg, #00b4d8, #7b5cff);
+  color: #fff;
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: opacity 0.15s;
+  margin-top: 8px;
+}
+
+.settings-btn-install:hover {
+  opacity: 0.85;
+}
+
+.settings-btn-install.hidden,
+.settings-btn-download.hidden {
+  display: none;
+}
+
+.settings-download-progress {
+  margin: 10px 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.settings-download-progress.hidden {
+  display: none;
+}
+
+.progress-bar-track {
+  flex: 1;
+  height: 8px;
+  background: var(--bg-base);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.progress-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #00b4d8, #7b5cff);
+  border-radius: 4px;
+  transition: width 0.3s ease;
+  width: 0%;
+}
+
+.progress-text {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  min-width: 36px;
 }
 
 .settings-save-row {

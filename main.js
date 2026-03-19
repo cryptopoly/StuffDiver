@@ -16,6 +16,7 @@ function createWindow() {
     minWidth: 800,
     minHeight: 600,
     title: 'Stuff Diver',
+    icon: path.join(__dirname, 'logo.png'),
     backgroundColor: '#0f0f1a',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -27,7 +28,10 @@ function createWindow() {
   mainWindow.loadFile('index.html');
 }
 
-app.whenReady().then(createWindow);
+app.whenReady().then(() => {
+  createWindow();
+  setupAutoUpdater();
+});
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
@@ -404,54 +408,94 @@ ipcMain.handle('save-settings', (event, settings) => {
   }
 });
 
-// === Auto-update check ===
+// === Auto-update (electron-updater) ===
 
-function compareVersions(a, b) {
-  const pa = a.split('.').map(Number);
-  const pb = b.split('.').map(Number);
-  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
-    const na = pa[i] || 0;
-    const nb = pb[i] || 0;
-    if (na > nb) return 1;
-    if (na < nb) return -1;
-  }
-  return 0;
-}
+const { autoUpdater } = require('electron-updater');
 
-function getPlatformAssetKey() {
-  const plat = process.platform; // darwin, win32, linux
-  const arch = process.arch;     // arm64, x64
-  if (plat === 'darwin') return `mac-${arch}`;
-  if (plat === 'win32') return `win-${arch}`;
-  return `linux-${arch}`;
+// Disable auto-download — we want user to confirm first
+autoUpdater.autoDownload = false;
+autoUpdater.autoInstallOnAppQuit = true;
+
+function setupAutoUpdater() {
+  const settings = loadSettings();
+  const baseUrl = settings.updateUrl.replace(/\/+$/, '');
+
+  // Configure the update feed URL
+  autoUpdater.setFeedURL({
+    provider: 'generic',
+    url: baseUrl
+  });
+
+  // Forward events to renderer
+  autoUpdater.on('checking-for-update', () => {
+    if (mainWindow) mainWindow.webContents.send('update-status', { status: 'checking' });
+  });
+
+  autoUpdater.on('update-available', (info) => {
+    if (mainWindow) mainWindow.webContents.send('update-status', {
+      status: 'available',
+      version: info.version,
+      notes: info.releaseNotes || ''
+    });
+  });
+
+  autoUpdater.on('update-not-available', (info) => {
+    if (mainWindow) mainWindow.webContents.send('update-status', {
+      status: 'up-to-date',
+      version: info.version
+    });
+  });
+
+  autoUpdater.on('download-progress', (progress) => {
+    if (mainWindow) mainWindow.webContents.send('update-status', {
+      status: 'downloading',
+      percent: Math.round(progress.percent),
+      transferred: progress.transferred,
+      total: progress.total
+    });
+  });
+
+  autoUpdater.on('update-downloaded', (info) => {
+    if (mainWindow) mainWindow.webContents.send('update-status', {
+      status: 'ready',
+      version: info.version
+    });
+  });
+
+  autoUpdater.on('error', (err) => {
+    if (mainWindow) mainWindow.webContents.send('update-status', {
+      status: 'error',
+      error: err.message || 'Update error'
+    });
+  });
 }
 
 ipcMain.handle('check-for-updates', async () => {
-  const settings = loadSettings();
-  const url = settings.updateUrl.replace(/\/+$/, '') + '/latest.json';
   try {
-    const { net } = require('electron');
-    const response = await net.fetch(url, { signal: AbortSignal.timeout(8000) });
-    if (!response.ok) return { available: false, error: 'Server returned ' + response.status };
-    const manifest = await response.json();
-    const currentVersion = app.getVersion();
-    const latestVersion = manifest.version;
-    if (compareVersions(latestVersion, currentVersion) > 0) {
-      const assetKey = getPlatformAssetKey();
-      const downloadUrl = manifest.assets && manifest.assets[assetKey]
-        ? manifest.assets[assetKey]
-        : null;
-      return {
-        available: true,
-        version: latestVersion,
-        notes: manifest.notes || '',
-        downloadUrl
-      };
-    }
-    return { available: false, version: latestVersion };
+    // Re-read settings in case URL changed
+    const settings = loadSettings();
+    autoUpdater.setFeedURL({
+      provider: 'generic',
+      url: settings.updateUrl.replace(/\/+$/, '')
+    });
+    await autoUpdater.checkForUpdates();
+    return { ok: true };
   } catch (e) {
-    return { available: false, error: e.message || 'Could not connect' };
+    return { ok: false, error: e.message || 'Could not check for updates' };
   }
+});
+
+ipcMain.handle('download-update', async () => {
+  try {
+    await autoUpdater.downloadUpdate();
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e.message || 'Download failed' };
+  }
+});
+
+ipcMain.handle('install-update', () => {
+  autoUpdater.quitAndInstall(false, true);
 });
 
 ipcMain.handle('open-external', (event, url) => {

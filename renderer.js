@@ -2298,6 +2298,7 @@
 
   let dismissedUpdateVersion = null;
   let latestUpdateInfo = null;
+  let updateReady = false;
 
   async function initVersionLabel() {
     const version = await window.api.getAppVersion();
@@ -2308,14 +2309,26 @@
   async function openSettings() {
     const overlay = document.getElementById('settings-overlay');
     overlay.classList.remove('hidden');
-    // Populate
     const version = await window.api.getAppVersion();
     document.getElementById('settings-version').textContent = 'v' + version;
     const settings = await window.api.loadSettings();
     document.getElementById('settings-update-url').value = settings.updateUrl || '';
     document.getElementById('settings-update-status').textContent = '';
     document.getElementById('settings-update-result').classList.add('hidden');
+    document.getElementById('settings-download-progress').classList.add('hidden');
+    document.getElementById('settings-download-btn').classList.remove('hidden');
+    document.getElementById('settings-install-btn').classList.add('hidden');
     document.getElementById('settings-save-status').textContent = '';
+    // If update already detected, show it
+    if (latestUpdateInfo) {
+      document.getElementById('settings-update-result').classList.remove('hidden');
+      document.getElementById('settings-update-version').textContent = 'New version available: v' + latestUpdateInfo.version;
+      document.getElementById('settings-update-notes').textContent = latestUpdateInfo.notes || '';
+      if (updateReady) {
+        document.getElementById('settings-download-btn').classList.add('hidden');
+        document.getElementById('settings-install-btn').classList.remove('hidden');
+      }
+    }
   }
 
   function closeSettings() {
@@ -2343,20 +2356,78 @@
     if (url) await window.api.saveSettings({ updateUrl: url });
 
     const result = await window.api.checkForUpdates();
-    if (result.available) {
-      statusEl.textContent = '';
-      resultEl.classList.remove('hidden');
-      document.getElementById('settings-update-version').textContent = 'New version available: v' + result.version;
-      document.getElementById('settings-update-notes').textContent = result.notes || '';
-      latestUpdateInfo = result;
-      // Also show banner
-      showUpdateBanner(result);
-    } else if (result.error) {
+    if (result.error) {
       statusEl.textContent = 'Could not check: ' + result.error;
       statusEl.style.color = '#f44336';
-    } else {
-      statusEl.textContent = 'You\'re up to date! (v' + (result.version || 'unknown') + ')';
-      statusEl.style.color = '#4caf50';
+    }
+    // The rest is handled by onUpdateStatus events
+  }
+
+  function handleUpdateStatus(data) {
+    const statusEl = document.getElementById('settings-update-status');
+    const resultEl = document.getElementById('settings-update-result');
+    const progressEl = document.getElementById('settings-download-progress');
+    const progressFill = document.getElementById('settings-progress-fill');
+    const progressText = document.getElementById('settings-progress-text');
+    const downloadBtn = document.getElementById('settings-download-btn');
+    const installBtn = document.getElementById('settings-install-btn');
+
+    switch (data.status) {
+      case 'checking':
+        statusEl.textContent = 'Checking for updates...';
+        statusEl.style.color = 'var(--text-muted)';
+        break;
+
+      case 'available':
+        statusEl.textContent = '';
+        resultEl.classList.remove('hidden');
+        document.getElementById('settings-update-version').textContent = 'New version available: v' + data.version;
+        document.getElementById('settings-update-notes').textContent = data.notes || '';
+        downloadBtn.classList.remove('hidden');
+        installBtn.classList.add('hidden');
+        progressEl.classList.add('hidden');
+        latestUpdateInfo = data;
+        showUpdateBanner(data);
+        break;
+
+      case 'up-to-date':
+        statusEl.textContent = 'You\'re up to date! (v' + (data.version || 'unknown') + ')';
+        statusEl.style.color = '#4caf50';
+        break;
+
+      case 'downloading':
+        downloadBtn.classList.add('hidden');
+        progressEl.classList.remove('hidden');
+        progressFill.style.width = data.percent + '%';
+        progressText.textContent = data.percent + '%';
+        // Update banner text too
+        document.getElementById('update-banner-text').textContent =
+          'Downloading update... ' + data.percent + '%';
+        break;
+
+      case 'ready':
+        updateReady = true;
+        progressEl.classList.add('hidden');
+        downloadBtn.classList.add('hidden');
+        installBtn.classList.remove('hidden');
+        statusEl.textContent = 'Update downloaded — ready to install!';
+        statusEl.style.color = '#4caf50';
+        // Update banner
+        const banner = document.getElementById('update-banner');
+        const bannerText = document.getElementById('update-banner-text');
+        bannerText.textContent = 'Update v' + data.version + ' ready to install!';
+        const detailsBtn = document.getElementById('update-banner-details');
+        detailsBtn.textContent = 'Restart Now';
+        detailsBtn.onclick = () => window.api.installUpdate();
+        banner.classList.remove('hidden');
+        break;
+
+      case 'error':
+        statusEl.textContent = 'Update error: ' + data.error;
+        statusEl.style.color = '#f44336';
+        downloadBtn.classList.remove('hidden');
+        progressEl.classList.add('hidden');
+        break;
     }
   }
 
@@ -2365,6 +2436,9 @@
     const banner = document.getElementById('update-banner');
     const text = document.getElementById('update-banner-text');
     text.textContent = 'Update available: v' + info.version;
+    const detailsBtn = document.getElementById('update-banner-details');
+    detailsBtn.textContent = 'View Details';
+    detailsBtn.onclick = openUpdateDetails;
     latestUpdateInfo = info;
     banner.classList.remove('hidden');
   }
@@ -2376,29 +2450,26 @@
   }
 
   function openUpdateDetails() {
-    // Open settings modal to the update section
-    openSettings().then(() => {
-      if (latestUpdateInfo) {
-        const resultEl = document.getElementById('settings-update-result');
-        resultEl.classList.remove('hidden');
-        document.getElementById('settings-update-version').textContent = 'New version available: v' + latestUpdateInfo.version;
-        document.getElementById('settings-update-notes').textContent = latestUpdateInfo.notes || '';
-      }
-    });
+    openSettings();
   }
 
-  function downloadUpdate() {
-    if (latestUpdateInfo && latestUpdateInfo.downloadUrl) {
-      window.api.openExternal(latestUpdateInfo.downloadUrl);
-    }
+  async function startDownload() {
+    const downloadBtn = document.getElementById('settings-download-btn');
+    downloadBtn.classList.add('hidden');
+    document.getElementById('settings-download-progress').classList.remove('hidden');
+    document.getElementById('settings-progress-fill').style.width = '0%';
+    document.getElementById('settings-progress-text').textContent = '0%';
+    await window.api.downloadUpdate();
+  }
+
+  function installUpdate() {
+    window.api.installUpdate();
   }
 
   async function silentUpdateCheck() {
     try {
-      const result = await window.api.checkForUpdates();
-      if (result.available) {
-        showUpdateBanner(result);
-      }
+      await window.api.checkForUpdates();
+      // Results come via onUpdateStatus events
     } catch (e) {
       // Silent — don't bother user if offline
     }
@@ -2539,9 +2610,13 @@
     });
     document.getElementById('settings-save').addEventListener('click', saveSettingsFromModal);
     document.getElementById('settings-check-update').addEventListener('click', checkForUpdatesFromSettings);
-    document.getElementById('settings-download-btn').addEventListener('click', downloadUpdate);
+    document.getElementById('settings-download-btn').addEventListener('click', startDownload);
+    document.getElementById('settings-install-btn').addEventListener('click', installUpdate);
     document.getElementById('update-banner-details').addEventListener('click', openUpdateDetails);
     document.getElementById('update-banner-dismiss').addEventListener('click', dismissUpdateBanner);
+
+    // Listen for update status events from main process
+    window.api.onUpdateStatus(handleUpdateStatus);
 
     // Escape closes settings
     document.addEventListener('keydown', (e) => {

@@ -1,6 +1,6 @@
 {
   "name": "stuff-diver",
-  "version": "0.3.2",
+  "version": "0.3.6",
   "description": "Dive deep into your disk — treemap, pie chart & duplicate finder",
   "author": {
     "name": "Stuff Diver",
@@ -20,9 +20,21 @@
     "directories": {
       "output": "dist"
     },
+    "icon": "build/icon.png",
+    "afterSign": "scripts/notarize.js",
     "mac": {
+      "icon": "build/icon.icns",
+      "artifactName": "Stuff-Diver-${version}-${arch}.${ext}",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
       "target": [
-        { "target": "dmg", "arch": ["arm64", "x64"] }
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
       ],
       "category": "public.app-category.utilities",
       "entitlements": "entitlements.mac.plist",
@@ -34,14 +46,35 @@
       }
     },
     "win": {
+      "icon": "build/icon.png",
+      "artifactName": "Stuff-Diver-Setup-${version}.${ext}",
       "target": [
-        { "target": "nsis", "arch": ["arm64", "x64"] }
+        {
+          "target": "nsis",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
       ]
     },
     "linux": {
+      "artifactName": "Stuff-Diver-${version}-${arch}.${ext}",
       "target": [
-        { "target": "AppImage", "arch": ["arm64", "x64"] },
-        { "target": "deb", "arch": ["arm64", "x64"] }
+        {
+          "target": "AppImage",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        },
+        {
+          "target": "deb",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
       ],
       "category": "Utility"
     },
@@ -51,12 +84,15 @@
       "index.html",
       "styles.css",
       "renderer.js",
-      "logo.png",
-      "logo-icon.jpg"
+      "logo.png"
     ]
   },
   "devDependencies": {
+    "@electron/notarize": "^3.1.1",
     "electron": "^35.1.2",
     "electron-builder": "^26.0.12"
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.3"
   }
 }

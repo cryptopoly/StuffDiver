@@ -11,33 +11,7 @@
     <div class="header-row header-row-1">
       <div class="header-left">
         <div class="brand">
-          <svg class="logo-svg" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <defs>
-              <linearGradient id="grad-mask" x1="8" y1="8" x2="56" y2="56" gradientUnits="userSpaceOnUse">
-                <stop offset="0%" stop-color="#00d2ff"/>
-                <stop offset="100%" stop-color="#7b5cff"/>
-              </linearGradient>
-              <linearGradient id="grad-visor" x1="18" y1="20" x2="46" y2="42" gradientUnits="userSpaceOnUse">
-                <stop offset="0%" stop-color="#0a1628"/>
-                <stop offset="100%" stop-color="#142040"/>
-              </linearGradient>
-              <linearGradient id="grad-platter" x1="24" y1="24" x2="40" y2="40" gradientUnits="userSpaceOnUse">
-                <stop offset="0%" stop-color="#00d2ff" stop-opacity="0.5"/>
-                <stop offset="100%" stop-color="#7b5cff" stop-opacity="0.3"/>
-              </linearGradient>
-            </defs>
-            <rect x="8" y="12" width="48" height="36" rx="14" stroke="url(#grad-mask)" stroke-width="3" fill="none"/>
-            <rect x="16" y="18" width="32" height="24" rx="8" fill="url(#grad-visor)" stroke="url(#grad-mask)" stroke-width="1.5" opacity="0.9"/>
-            <circle cx="32" cy="30" r="9" stroke="url(#grad-platter)" stroke-width="1.2" fill="none" opacity="0.7"/>
-            <circle cx="32" cy="30" r="5" stroke="url(#grad-platter)" stroke-width="1" fill="none" opacity="0.5"/>
-            <circle cx="32" cy="30" r="1.8" fill="#00d2ff" opacity="0.9"/>
-            <line x1="33" y1="30" x2="41" y2="22" stroke="#00d2ff" stroke-width="1.2" stroke-linecap="round" opacity="0.6"/>
-            <path d="M52 16 Q58 16 58 10 Q58 4 52 4" stroke="url(#grad-mask)" stroke-width="2.5" stroke-linecap="round" fill="none"/>
-            <circle cx="50" cy="2" r="1.5" fill="#00d2ff" opacity="0.5"/>
-            <circle cx="54" cy="5" r="1" fill="#7b5cff" opacity="0.4"/>
-            <circle cx="47" cy="4" r="0.8" fill="#00d2ff" opacity="0.3"/>
-            <line x1="8" y1="30" x2="3" y2="30" stroke="url(#grad-mask)" stroke-width="2" stroke-linecap="round" opacity="0.5"/>
-          </svg>
+          <img class="logo-img" src="logo.png" alt="Stuff Diver">
           <h1>Stuff Diver</h1>
         </div>
         <button id="select-folder">Select Folder</button>
@@ -118,7 +92,14 @@
         <div id="settings-update-result" class="settings-update-result hidden">
           <div id="settings-update-version" class="settings-update-version"></div>
           <div id="settings-update-notes" class="settings-update-notes"></div>
-          <button id="settings-download-btn" class="settings-btn-download">Download Update</button>
+          <div id="settings-download-progress" class="settings-download-progress hidden">
+            <div class="progress-bar-track">
+              <div id="settings-progress-fill" class="progress-bar-fill"></div>
+            </div>
+            <span id="settings-progress-text" class="progress-text">0%</span>
+          </div>
+          <button id="settings-download-btn" class="settings-btn-download">Download &amp; Install Update</button>
+          <button id="settings-install-btn" class="settings-btn-install hidden">Restart &amp; Install Now</button>
         </div>
         <div class="settings-section settings-save-row">
           <button id="settings-save" class="settings-btn-primary">Save Settings</button>
@@ -140,34 +121,7 @@
     </div>
     <div id="visualization">
       <div class="empty-state">
-        <!-- Large logo for empty state -->
-        <svg class="logo-svg-large" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <defs>
-            <linearGradient id="grad-mask-lg" x1="8" y1="8" x2="56" y2="56" gradientUnits="userSpaceOnUse">
-              <stop offset="0%" stop-color="#00d2ff"/>
-              <stop offset="100%" stop-color="#7b5cff"/>
-            </linearGradient>
-            <linearGradient id="grad-visor-lg" x1="18" y1="20" x2="46" y2="42" gradientUnits="userSpaceOnUse">
-              <stop offset="0%" stop-color="#0a1628"/>
-              <stop offset="100%" stop-color="#142040"/>
-            </linearGradient>
-            <linearGradient id="grad-platter-lg" x1="24" y1="24" x2="40" y2="40" gradientUnits="userSpaceOnUse">
-              <stop offset="0%" stop-color="#00d2ff" stop-opacity="0.5"/>
-              <stop offset="100%" stop-color="#7b5cff" stop-opacity="0.3"/>
-            </linearGradient>
-          </defs>
-          <rect x="8" y="12" width="48" height="36" rx="14" stroke="url(#grad-mask-lg)" stroke-width="2.5" fill="none"/>
-          <rect x="16" y="18" width="32" height="24" rx="8" fill="url(#grad-visor-lg)" stroke="url(#grad-mask-lg)" stroke-width="1.5" opacity="0.9"/>
-          <circle cx="32" cy="30" r="9" stroke="url(#grad-platter-lg)" stroke-width="1.2" fill="none" opacity="0.7"/>
-          <circle cx="32" cy="30" r="5" stroke="url(#grad-platter-lg)" stroke-width="1" fill="none" opacity="0.5"/>
-          <circle cx="32" cy="30" r="1.8" fill="#00d2ff" opacity="0.9"/>
-          <line x1="33" y1="30" x2="41" y2="22" stroke="#00d2ff" stroke-width="1.2" stroke-linecap="round" opacity="0.6"/>
-          <path d="M52 16 Q58 16 58 10 Q58 4 52 4" stroke="url(#grad-mask-lg)" stroke-width="2.5" stroke-linecap="round" fill="none"/>
-          <circle cx="50" cy="2" r="1.5" fill="#00d2ff" opacity="0.5"/>
-          <circle cx="54" cy="5" r="1" fill="#7b5cff" opacity="0.4"/>
-          <circle cx="47" cy="4" r="0.8" fill="#00d2ff" opacity="0.3"/>
-          <line x1="8" y1="30" x2="3" y2="30" stroke="url(#grad-mask-lg)" stroke-width="2" stroke-linecap="round" opacity="0.5"/>
-        </svg>
+        <img class="logo-img-large" src="logo.png" alt="Stuff Diver">
         <p>Select a folder to dive into</p>
       </div>
     </div>
@@ -188,54 +142,7 @@
 
   <div id="loading" class="hidden">
     <div class="loading-logo-wrap">
-      <!-- Loading logo SVG -->
-      <svg class="logo-svg-loading" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
-        <defs>
-          <linearGradient id="grad-mask-ld" x1="8" y1="8" x2="56" y2="56" gradientUnits="userSpaceOnUse">
-            <stop offset="0%" stop-color="#00d2ff"/>
-            <stop offset="100%" stop-color="#7b5cff"/>
-          </linearGradient>
-          <linearGradient id="grad-visor-ld" x1="18" y1="20" x2="46" y2="42" gradientUnits="userSpaceOnUse">
-            <stop offset="0%" stop-color="#0a1628"/>
-            <stop offset="100%" stop-color="#142040"/>
-          </linearGradient>
-          <linearGradient id="grad-platter-ld" x1="24" y1="24" x2="40" y2="40" gradientUnits="userSpaceOnUse">
-            <stop offset="0%" stop-color="#00d2ff" stop-opacity="0.5"/>
-            <stop offset="100%" stop-color="#7b5cff" stop-opacity="0.3"/>
-          </linearGradient>
-        </defs>
-        <rect x="8" y="12" width="48" height="36" rx="14" stroke="url(#grad-mask-ld)" stroke-width="2.5" fill="none"/>
-        <rect x="16" y="18" width="32" height="24" rx="8" fill="url(#grad-visor-ld)" stroke="url(#grad-mask-ld)" stroke-width="1.5" opacity="0.9"/>
-        <circle cx="32" cy="30" r="9" stroke="url(#grad-platter-ld)" stroke-width="1.2" fill="none" opacity="0.7">
-          <animateTransform attributeName="transform" type="rotate" from="0 32 30" to="360 32 30" dur="3s" repeatCount="indefinite"/>
-        </circle>
-        <circle cx="32" cy="30" r="5" stroke="url(#grad-platter-ld)" stroke-width="1" fill="none" opacity="0.5">
-          <animateTransform attributeName="transform" type="rotate" from="0 32 30" to="-360 32 30" dur="2s" repeatCount="indefinite"/>
-        </circle>
-        <circle cx="32" cy="30" r="1.8" fill="#00d2ff" opacity="0.9"/>
-        <line x1="33" y1="30" x2="41" y2="22" stroke="#00d2ff" stroke-width="1.2" stroke-linecap="round" opacity="0.6"/>
-        <path d="M52 16 Q58 16 58 10 Q58 4 52 4" stroke="url(#grad-mask-ld)" stroke-width="2.5" stroke-linecap="round" fill="none"/>
-      </svg>
-      <svg class="loading-bubbles" viewBox="0 0 130 80" fill="none">
-        <circle cx="95" cy="72" r="3" fill="#00d2ff">
-          <animate attributeName="cy" from="72" to="-15" dur="2.2s" repeatCount="indefinite"/>
-          <animate attributeName="cx" from="95" to="102" dur="2.2s" repeatCount="indefinite"/>
-          <animate attributeName="opacity" values="0;0.65;0.5;0" keyTimes="0;0.1;0.7;1" dur="2.2s" repeatCount="indefinite"/>
-          <animate attributeName="r" from="2.5" to="6" dur="2.2s" repeatCount="indefinite"/>
-        </circle>
-        <circle cx="100" cy="72" r="2" fill="#7b5cff">
-          <animate attributeName="cy" from="72" to="0" dur="1.8s" begin="0.7s" repeatCount="indefinite"/>
-          <animate attributeName="cx" from="100" to="115" dur="1.8s" begin="0.7s" repeatCount="indefinite"/>
-          <animate attributeName="opacity" values="0;0.5;0.35;0" keyTimes="0;0.12;0.7;1" dur="1.8s" begin="0.7s" repeatCount="indefinite"/>
-          <animate attributeName="r" from="1.5" to="4.5" dur="1.8s" begin="0.7s" repeatCount="indefinite"/>
-        </circle>
-        <circle cx="92" cy="72" r="2.5" fill="#00d2ff">
-          <animate attributeName="cy" from="72" to="-20" dur="2.8s" begin="1.4s" repeatCount="indefinite"/>
-          <animate attributeName="cx" from="92" to="85" dur="2.8s" begin="1.4s" repeatCount="indefinite"/>
-          <animate attributeName="opacity" values="0;0.6;0.4;0" keyTimes="0;0.1;0.65;1" dur="2.8s" begin="1.4s" repeatCount="indefinite"/>
-          <animate attributeName="r" from="2" to="7" dur="2.8s" begin="1.4s" repeatCount="indefinite"/>
-        </circle>
-      </svg>
+      <img class="logo-img-loading" src="logo.png" alt="Stuff Diver">
     </div>
     <p id="loading-text">Diving in...</p>
   </div>
