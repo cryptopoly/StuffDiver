@@ -14,6 +14,8 @@
   <img src="https://img.shields.io/badge/electron-35-teal" alt="Electron">
   <img src="https://img.shields.io/badge/platforms-macOS%20%7C%20Windows%20%7C%20Linux-green" alt="Platforms">
   <img src="https://img.shields.io/badge/license-MIT-yellow" alt="License">
+  <br>
+  <a href="https://stuffdiver.com">🌐 stuffdiver.com</a>
 </p>
 
 ---
@@ -141,6 +143,15 @@ StuffDiver/
 ├── scripts/         # Notarisation and build scripts
 └── package.json
 ```
+
+## Support the Project
+
+Stuff Diver is built with passion and released for free. If you find it useful, consider supporting development:
+
+<p align="center">
+  <a href="https://buymeacoffee.com/cryptoraptor"><img src="https://img.shields.io/badge/Buy%20Me%20a%20Coffee-ffdd00?style=for-the-badge&logo=buy-me-a-coffee&logoColor=black" alt="Buy Me a Coffee"></a>
+  <a href="https://www.paypal.com/donate/?hosted_button_id=5VJ5KLNBQ9LRN"><img src="https://img.shields.io/badge/PayPal-00457C?style=for-the-badge&logo=paypal&logoColor=white" alt="PayPal"></a>
+</p>
 
 ## License
 

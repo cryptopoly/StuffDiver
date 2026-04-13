@@ -24,7 +24,8 @@
     "publish": {
       "provider": "github",
       "owner": "cryptopoly",
-      "repo": "StuffDiver"
+      "repo": "StuffDiver",
+      "releaseType": "release"
     },
     "afterSign": "scripts/notarize.js",
     "mac": {
