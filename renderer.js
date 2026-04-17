@@ -3854,6 +3854,10 @@
   let dismissedUpdateVersion = null;
   let latestUpdateInfo = null;
   let updateReady = false;
+  const SUPPORT_LINKS = Object.freeze({
+    buyMeACoffee: 'https://buymeacoffee.com/cryptoraptor',
+    paypal: 'https://www.paypal.com/donate/?hosted_button_id=YN9VHK856RZES'
+  });
 
   async function initVersionLabel() {
     const version = await window.api.getAppVersion();
@@ -4406,6 +4410,8 @@
     document.getElementById('settings-check-update').addEventListener('click', checkForUpdatesFromSettings);
     document.getElementById('settings-download-btn').addEventListener('click', startDownload);
     document.getElementById('settings-install-btn').addEventListener('click', installUpdate);
+    document.getElementById('settings-support-bmac').addEventListener('click', () => window.api.openExternal(SUPPORT_LINKS.buyMeACoffee));
+    document.getElementById('settings-support-paypal').addEventListener('click', () => window.api.openExternal(SUPPORT_LINKS.paypal));
     document.getElementById('update-banner-details').addEventListener('click', openUpdateDetails);
     document.getElementById('update-banner-dismiss').addEventListener('click', dismissUpdateBanner);
 

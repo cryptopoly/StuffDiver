@@ -146,11 +146,11 @@ StuffDiver/
 
 ## Support the Project
 
-Stuff Diver is built with passion and released for free. If you find it useful, consider supporting development:
+Stuff Diver is built with passion and released for free. If you find it useful, consider supporting development via the GitHub Sponsor button or directly here:
 
 <p align="center">
   <a href="https://buymeacoffee.com/cryptoraptor"><img src="https://img.shields.io/badge/Buy%20Me%20a%20Coffee-ffdd00?style=for-the-badge&logo=buy-me-a-coffee&logoColor=black" alt="Buy Me a Coffee"></a>
-  <a href="https://www.paypal.com/donate/?hosted_button_id=5VJ5KLNBQ9LRN"><img src="https://img.shields.io/badge/PayPal-00457C?style=for-the-badge&logo=paypal&logoColor=white" alt="PayPal"></a>
+  <a href="https://www.paypal.com/donate/?hosted_button_id=YN9VHK856RZES"><img src="https://img.shields.io/badge/PayPal-00457C?style=for-the-badge&logo=paypal&logoColor=white" alt="PayPal"></a>
 </p>
 
 ## License

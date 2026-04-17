@@ -2023,6 +2023,24 @@ body.light .cache-prompt-actions button:first-child {
   opacity: 0.85;
 }
 
+.settings-btn-secondary {
+  padding: 8px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--border-medium);
+  background: var(--bg-base);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s, transform 0.15s;
+}
+
+.settings-btn-secondary:hover {
+  background: var(--bg-hover);
+  border-color: rgba(0, 180, 216, 0.35);
+  transform: translateY(-1px);
+}
+
 .settings-update-status {
   font-size: 12px;
   color: var(--text-muted);
@@ -2130,6 +2148,43 @@ body.light .cache-prompt-actions button:first-child {
 .settings-save-row {
   border-top: 1px solid var(--border-light);
   padding-top: 16px;
+}
+
+.settings-support-section {
+  display: block;
+}
+
+.settings-support-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 100%;
+  padding: 14px 16px;
+  background: linear-gradient(135deg, rgba(0, 180, 216, 0.08), rgba(123, 92, 255, 0.08));
+  border: 1px solid var(--border-light);
+  border-radius: 12px;
+}
+
+.settings-support-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.settings-support-label {
+  min-width: 0;
+}
+
+.settings-support-text {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+.settings-support-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
 }
 
 .settings-save-status {
