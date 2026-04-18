@@ -3959,6 +3959,135 @@
     paypal: 'https://www.paypal.com/donate/?hosted_button_id=YN9VHK856RZES'
   });
 
+  function normalizeReleaseNoteText(value) {
+    return String(value || '').replace(/\s+/g, ' ').trim();
+  }
+
+  function parseReleaseNotes(notesHtml) {
+    const parsed = { summary: [], sections: [] };
+    if (!notesHtml || typeof notesHtml !== 'string') return parsed;
+
+    const doc = new DOMParser().parseFromString(`<div>${notesHtml}</div>`, 'text/html');
+    const root = doc.body.firstElementChild || doc.body;
+    let currentSection = null;
+
+    function beginSection(title) {
+      currentSection = { title: normalizeReleaseNoteText(title) || 'Details', items: [] };
+      parsed.sections.push(currentSection);
+      return currentSection;
+    }
+
+    function ensureSection() {
+      return currentSection || beginSection('Details');
+    }
+
+    function pushItem(text) {
+      const value = normalizeReleaseNoteText(text);
+      if (!value) return;
+      ensureSection().items.push(value);
+    }
+
+    for (const node of Array.from(root.children)) {
+      const tag = (node.tagName || '').toLowerCase();
+      if (tag === 'h1' || tag === 'h2' || tag === 'h3') {
+        beginSection(node.textContent);
+        continue;
+      }
+      if (tag === 'ul' || tag === 'ol') {
+        const items = Array.from(node.querySelectorAll(':scope > li'))
+          .map((item) => normalizeReleaseNoteText(item.textContent))
+          .filter(Boolean);
+        if (!items.length) continue;
+        ensureSection().items.push(...items);
+        continue;
+      }
+      if (tag === 'p') {
+        pushItem(node.textContent);
+      }
+    }
+
+    parsed.sections = parsed.sections.filter((section) => section.items.length > 0);
+    if (!parsed.sections.length) {
+      const fallback = normalizeReleaseNoteText(root.textContent);
+      if (fallback) {
+        parsed.sections.push({ title: 'Details', items: [fallback] });
+      }
+    }
+
+    const summarySection = parsed.sections.find((section) => /summary|highlights|what'?s new/i.test(section.title));
+    parsed.summary = summarySection
+      ? summarySection.items.slice(0, 4)
+      : parsed.sections.flatMap((section) => section.items).slice(0, 3);
+
+    return parsed;
+  }
+
+  function createReleaseNoteList(items, className) {
+    const list = document.createElement('ul');
+    list.className = className;
+    for (const item of items) {
+      const li = document.createElement('li');
+      li.textContent = item;
+      list.appendChild(li);
+    }
+    return list;
+  }
+
+  function renderUpdateNotes(info) {
+    const versionEl = document.getElementById('settings-update-version');
+    const summaryEl = document.getElementById('settings-update-summary');
+    const detailsEl = document.getElementById('settings-update-details');
+    const detailsLabelEl = document.getElementById('settings-update-details-label');
+    const notesEl = document.getElementById('settings-update-notes');
+    const parsed = parseReleaseNotes(info?.notes || '');
+
+    versionEl.textContent = 'New version available: v' + info.version;
+    summaryEl.textContent = '';
+    notesEl.textContent = '';
+    detailsEl.open = false;
+
+    if (parsed.summary.length) {
+      const label = document.createElement('div');
+      label.className = 'settings-update-summary-label';
+      label.textContent = 'Highlights';
+      summaryEl.appendChild(label);
+      summaryEl.appendChild(createReleaseNoteList(parsed.summary, 'settings-update-highlights'));
+      summaryEl.classList.remove('hidden');
+    } else {
+      summaryEl.classList.add('hidden');
+    }
+
+    let skippedSummarySection = false;
+    const detailSections = parsed.sections.filter((section) => {
+      if (!parsed.summary.length) return true;
+      if (!skippedSummarySection && /summary|highlights|what'?s new/i.test(section.title)) {
+        skippedSummarySection = true;
+        return false;
+      }
+      return true;
+    });
+
+    if (detailSections.length) {
+      detailsLabelEl.textContent = detailSections.some((section) => /commit/i.test(section.title))
+        ? 'Show release notes and commit history'
+        : 'Show release details';
+      for (const section of detailSections) {
+        const block = document.createElement('section');
+        block.className = 'settings-update-notes-section';
+
+        const heading = document.createElement('div');
+        heading.className = 'settings-update-notes-heading';
+        heading.textContent = section.title;
+        block.appendChild(heading);
+        block.appendChild(createReleaseNoteList(section.items, 'settings-update-note-list'));
+        notesEl.appendChild(block);
+      }
+      detailsEl.classList.remove('hidden');
+    } else {
+      detailsEl.classList.add('hidden');
+    }
+  }
+
   async function initVersionLabel() {
     const version = await window.api.getAppVersion();
     const el = document.getElementById('app-version');
@@ -3980,8 +4109,7 @@
     // If update already detected, show it
     if (latestUpdateInfo) {
       document.getElementById('settings-update-result').classList.remove('hidden');
-      document.getElementById('settings-update-version').textContent = 'New version available: v' + latestUpdateInfo.version;
-      document.getElementById('settings-update-notes').textContent = latestUpdateInfo.notes || '';
+      renderUpdateNotes(latestUpdateInfo);
       if (updateReady) {
         document.getElementById('settings-download-btn').classList.add('hidden');
         document.getElementById('settings-install-btn').classList.remove('hidden');
@@ -4034,8 +4162,7 @@
       case 'available':
         statusEl.textContent = '';
         resultEl.classList.remove('hidden');
-        document.getElementById('settings-update-version').textContent = 'New version available: v' + data.version;
-        document.getElementById('settings-update-notes').textContent = data.notes || '';
+        renderUpdateNotes(data);
         downloadBtn.classList.remove('hidden');
         installBtn.classList.add('hidden');
         progressEl.classList.add('hidden');
