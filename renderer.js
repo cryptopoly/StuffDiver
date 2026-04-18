@@ -316,14 +316,65 @@
     renderVisualization();
   }
 
+  function normalizeFolderPath(folderPath) {
+    if (!folderPath) return null;
+    const normalized = String(folderPath).replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+    return normalized || null;
+  }
+
+  function joinCurrentFolderPath(relativePath) {
+    if (!currentFolder) return null;
+    const rel = normalizeFolderPath(relativePath);
+    if (!rel) return currentFolder;
+    const sep = window.api.platform === 'win32' ? '\\' : '/';
+    const base = currentFolder.replace(/[\\/]+$/, '');
+    return base + sep + rel.split('/').join(sep);
+  }
+
+  function getFolderNode(folderPath) {
+    if (!folderTree) return null;
+    const normalized = normalizeFolderPath(folderPath);
+    if (!normalized) return folderTree;
+    let node = folderTree;
+    for (const seg of normalized.split('/')) {
+      if (!node.children || !node.children[seg]) return null;
+      node = node.children[seg];
+    }
+    return node;
+  }
+
+  function buildFileContextTarget(file) {
+    if (!file || !file.path) return null;
+    return {
+      kind: 'file',
+      path: file.path,
+      relativePath: file.relativePath || file.name,
+      size: effectiveSize(file),
+      file
+    };
+  }
+
+  function buildFolderContextTarget(folderPath) {
+    const node = getFolderNode(folderPath);
+    const path = joinCurrentFolderPath(folderPath);
+    if (!node || !path) return null;
+    return {
+      kind: 'folder',
+      path,
+      relativePath: normalizeFolderPath(folderPath) || '',
+      size: effectiveNodeSize(node),
+      node
+    };
+  }
+
   function selectFolder(folderPath) {
-    selectedFolderPath = folderPath;
+    selectedFolderPath = normalizeFolderPath(folderPath);
     selectedFile = null;
     selectedFiles = [];
     detailPanel.classList.remove('visible');
     // Also navigate bubble/rings into this folder
-    if (folderPath) {
-      const segments = folderPath.split('/');
+    if (selectedFolderPath) {
+      const segments = selectedFolderPath.split('/');
       ringsAnimDir = segments.length > bubblePath.length ? 'in' : segments.length < bubblePath.length ? 'out' : null;
       bubblePath = segments;
       let node = folderTree;
@@ -336,7 +387,6 @@
       bubblePath = [];
       bubbleCurrentNode = folderTree;
     }
-    highlightFolderTree();
     applyFilters();
   }
 
@@ -580,6 +630,7 @@
       path.setAttribute('stroke', getComputedStyle(document.body).getPropertyValue('--chart-stroke').trim() || '#080c14');
       path.setAttribute('stroke-width', '2');
       path.classList.add('pie-slice');
+      if (!isSpecial && file.path) path.dataset.filePath = file.path;
 
       path.addEventListener('click', () => {
         if (isOther) { pieOffset += MAX_PIE; renderPieChart(); }
@@ -596,6 +647,7 @@
       // Legend item
       const item = document.createElement('div');
       item.className = 'pie-legend-item' + (selectedFile && selectedFile.path === file.path ? ' selected' : '');
+      if (!isSpecial && file.path) item.dataset.filePath = file.path;
 
       const swatch = document.createElement('div');
       swatch.className = 'pie-legend-swatch';
@@ -949,6 +1001,7 @@
       for (const file of group.files) {
         const row = document.createElement('div');
         row.className = 'dup-file-row';
+        row.dataset.filePath = file.path;
 
         const pathSpan = document.createElement('span');
         pathSpan.className = 'dup-file-path';
@@ -1275,6 +1328,8 @@
 
     for (const circle of packed) {
       const g = document.createElementNS(ns, 'g');
+      if (circle.isFolder) g.dataset.folderPath = circle.path || '';
+      else if (circle.path) g.dataset.filePath = circle.path;
 
       const circ = document.createElementNS(ns, 'circle');
       circ.setAttribute('cx', circle.cx);
@@ -1282,6 +1337,8 @@
       circ.setAttribute('r', Math.max(circle.r, 0));
       circ.setAttribute('fill', getBubbleColor(circle));
       circ.classList.add('bubble-circle');
+      if (circle.isFolder) circ.dataset.folderPath = circle.path || '';
+      else if (circle.path) circ.dataset.filePath = circle.path;
       if (circle.isFolder) circ.classList.add('is-folder');
       if (selectedFile && !circle.isFolder && selectedFile.path === circle.path) {
         circ.classList.add('selected');
@@ -1465,6 +1522,7 @@
     // Center circle (click to go up)
     const centerGroup = document.createElementNS(ns, 'g');
     centerGroup.style.cursor = bubblePath.length > 0 ? 'zoom-out' : 'default';
+    centerGroup.dataset.folderPath = rootNode.path || bubblePath.join('/');
 
     const centerCircle = document.createElementNS(ns, 'circle');
     centerCircle.setAttribute('cx', cx);
@@ -1474,6 +1532,7 @@
     centerCircle.setAttribute('stroke', 'rgba(0, 210, 255, 0.15)');
     centerCircle.setAttribute('stroke-width', '2');
     centerCircle.classList.add('rings-center');
+    centerCircle.dataset.folderPath = rootNode.path || bubblePath.join('/');
     centerGroup.appendChild(centerCircle);
 
     // Center label: folder name
@@ -1575,6 +1634,7 @@
       path.setAttribute('stroke', getComputedStyle(document.body).getPropertyValue('--chart-stroke').trim() || '#080c14');
       path.setAttribute('stroke-width', '0.5');
       path.classList.add('rings-arc');
+      path.dataset.folderPath = arc.node.path || '';
 
       path.addEventListener('mouseenter', (e) => {
         showBubbleTooltip(e, arc.node);
@@ -1718,6 +1778,7 @@
     const rootRow = document.createElement('div');
     rootRow.className = 'folder-row' + (!dupFolderFilter ? ' active' : '');
     rootRow.dataset.path = '';
+    rootRow.dataset.folderPath = '';
 
     const rootChevron = document.createElement('span');
     rootChevron.className = 'folder-chevron';
@@ -1783,6 +1844,7 @@
       row.className = 'folder-row';
       row.style.paddingLeft = (10 + depth * 18) + 'px';
       row.dataset.path = child.path || '';
+      row.dataset.folderPath = child.path || '';
 
       if (child.path === dupFolderFilter) {
         row.classList.add('active');
@@ -1875,8 +1937,9 @@
     rootItem.className = 'folder-item expanded';
 
     const rootRow = document.createElement('div');
-    rootRow.className = 'folder-row' + (bubblePath.length === 0 ? ' active' : '');
+    rootRow.className = 'folder-row' + (!selectedFolderPath ? ' active' : '');
     rootRow.dataset.path = '';
+    rootRow.dataset.folderPath = '';
 
     const rootChevron = document.createElement('span');
     rootChevron.className = 'folder-chevron';
@@ -1922,6 +1985,7 @@
     rootItem.appendChild(rootChildren);
 
     folderTreeEl.appendChild(rootItem);
+    highlightFolderTree({ scroll: false });
   }
 
   function buildTreeNodes(parentNode, container, rootSize, depth) {
@@ -1948,9 +2012,10 @@
       row.className = 'folder-row';
       row.style.paddingLeft = (10 + depth * 18) + 'px';
       row.dataset.path = child.path || '';
+      row.dataset.folderPath = child.path || '';
 
       // Highlight if this is the active navigated folder
-      const currentPath = bubblePath.join('/');
+      const currentPath = selectedFolderPath || '';
       if (child.path === currentPath) {
         row.classList.add('active');
       }
@@ -2011,8 +2076,9 @@
     }
   }
 
-  function highlightFolderTree() {
+  function highlightFolderTree(options = {}) {
     if (!folderTreeEl) return;
+    const scroll = options.scroll !== false;
     const currentPath = selectedFolderPath || '';
     const rows = folderTreeEl.querySelectorAll('.folder-row');
     for (const row of rows) {
@@ -2028,7 +2094,7 @@
         el = el.parentElement?.closest('.folder-item');
       }
       // Scroll into view
-      activeRow.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+      if (scroll) activeRow.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
     }
   }
 
@@ -2396,9 +2462,7 @@
         closeLocatePanel();
         // Navigate folder tree to this folder
         if (folderPath && folderPath !== '(root)') {
-          selectedFolderPath = folderPath;
-          applyFilters();
-          renderFolderTree();
+          selectFolder(folderPath);
         }
       });
     });
@@ -3239,17 +3303,23 @@
 
   // === Feature: Right-Click Context Menu ===
 
-  let contextMenuFile = null;
+  let contextMenuTarget = null;
 
-  function showContextMenu(x, y, file) {
+  function showContextMenu(x, y, target) {
     const menu = document.getElementById('context-menu');
-    contextMenuFile = file;
+    contextMenuTarget = target;
 
     const finderBtn = menu.querySelector('[data-action="finder"]');
     if (finderBtn) {
       const platform = window.api.platform;
       const label = platform === 'darwin' ? 'Show in Finder' : platform === 'win32' ? 'Show in Explorer' : 'Show in Files';
       finderBtn.innerHTML = '&#128194; ' + label;
+    }
+    const previewBtn = menu.querySelector('[data-action="preview"]');
+    if (previewBtn) previewBtn.innerHTML = '&#128269; ' + getPreviewLabel();
+    for (const action of ['collect', 'tag-keep', 'tag-reviewed', 'tag-delete']) {
+      const btn = menu.querySelector(`[data-action="${action}"]`);
+      if (btn) btn.disabled = target.kind !== 'file';
     }
 
     menu.classList.remove('hidden');
@@ -3261,36 +3331,53 @@
 
   function hideContextMenu() {
     document.getElementById('context-menu').classList.add('hidden');
-    contextMenuFile = null;
+    contextMenuTarget = null;
   }
 
   function handleContextAction(action) {
-    if (!contextMenuFile) return;
+    if (!contextMenuTarget) return;
     switch (action) {
-      case 'open': window.api.openFile(contextMenuFile.path); break;
-      case 'preview': window.api.previewFile(contextMenuFile.path); break;
-      case 'finder': window.api.showInFolder(contextMenuFile.path); break;
-      case 'collect': addToCollector(contextMenuFile); break;
-      case 'copypath': navigator.clipboard.writeText(contextMenuFile.path); break;
-      case 'copysize': navigator.clipboard.writeText(formatSize(contextMenuFile.size)); break;
-      case 'tag-keep': toggleTag(contextMenuFile, 'keep'); break;
-      case 'tag-reviewed': toggleTag(contextMenuFile, 'reviewed'); break;
-      case 'tag-delete': toggleTag(contextMenuFile, 'delete'); break;
+      case 'open':
+        window.api.openFile(contextMenuTarget.path);
+        break;
+      case 'preview':
+        window.api.previewFile(contextMenuTarget.path);
+        break;
+      case 'finder':
+        window.api.showInFolder(contextMenuTarget.path);
+        break;
+      case 'collect':
+        if (contextMenuTarget.kind === 'file') addToCollector(contextMenuTarget.file);
+        break;
+      case 'copypath':
+        navigator.clipboard.writeText(contextMenuTarget.path);
+        break;
+      case 'copysize':
+        navigator.clipboard.writeText(formatSize(contextMenuTarget.size || 0));
+        break;
+      case 'tag-keep':
+        if (contextMenuTarget.kind === 'file') toggleTag(contextMenuTarget.file, 'keep');
+        break;
+      case 'tag-reviewed':
+        if (contextMenuTarget.kind === 'file') toggleTag(contextMenuTarget.file, 'reviewed');
+        break;
+      case 'tag-delete':
+        if (contextMenuTarget.kind === 'file') toggleTag(contextMenuTarget.file, 'delete');
+        break;
     }
     hideContextMenu();
   }
 
-  function findFileFromTarget(target) {
+  function findContextTarget(target) {
     let el = target;
-    while (el && el !== viz) {
+    while (el && el !== document.body) {
       if (el.dataset && el.dataset.filePath) {
-        return displayFiles.find(f => f.path === el.dataset.filePath) || allFiles.find(f => f.path === el.dataset.filePath) || null;
+        const file = displayFiles.find(f => f.path === el.dataset.filePath) || allFiles.find(f => f.path === el.dataset.filePath) || null;
+        if (file) return buildFileContextTarget(file);
       }
-      if (el.tagName === 'TR' && el.dataset && el.dataset.fileIdx) {
-        return displayFiles[parseInt(el.dataset.fileIdx)] || null;
-      }
-      if (el.classList && el.classList.contains('pie-legend-item') && el.dataset && el.dataset.fileIdx) {
-        return displayFiles[parseInt(el.dataset.fileIdx)] || null;
+      if (el.dataset && Object.prototype.hasOwnProperty.call(el.dataset, 'folderPath')) {
+        const folderTarget = buildFolderContextTarget(el.dataset.folderPath);
+        if (folderTarget) return folderTarget;
       }
       el = el.parentElement;
     }
@@ -4302,11 +4389,14 @@
     });
 
     // === Right-Click Context Menu ===
-    viz.addEventListener('contextmenu', (e) => {
+    const handleContextMenuRequest = (e) => {
       e.preventDefault();
-      const file = findFileFromTarget(e.target) || selectedFile;
-      if (file) showContextMenu(e.clientX, e.clientY, file);
-    });
+      const target = findContextTarget(e.target);
+      if (target) showContextMenu(e.clientX, e.clientY, target);
+      else hideContextMenu();
+    };
+    viz.addEventListener('contextmenu', handleContextMenuRequest);
+    folderTreeEl.addEventListener('contextmenu', handleContextMenuRequest);
 
     document.getElementById('context-menu').addEventListener('click', (e) => {
       const btn = e.target.closest('button[data-action]');
