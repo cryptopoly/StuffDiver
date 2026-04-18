@@ -13,7 +13,6 @@ app.setName('Stuff Diver');
 let mainWindow;
 let tray = null;
 let monitorTimer = null;
-let allowedFilePaths = new Set();
 let approvedFolderPaths = new Set();
 const APP_URL = pathToFileURL(path.join(__dirname, 'index.html')).href;
 const ALLOWED_EXTERNAL_HOSTS = new Set(['buymeacoffee.com', 'www.paypal.com', 'paypal.com']);
@@ -39,13 +38,7 @@ function handleTrusted(channel, handler) {
 }
 
 function setActiveFolderState(folderPath, files) {
-  const nextFiles = Array.isArray(files) ? files.slice() : [];
-  lastScanAllFiles = nextFiles;
-  allowedFilePaths = new Set(
-    nextFiles
-      .filter(file => file && typeof file.path === 'string' && file.path.length > 0)
-      .map(file => path.resolve(file.path))
-  );
+  lastScanAllFiles = Array.isArray(files) ? files.slice() : [];
 }
 
 function assertAllowedFilePath(filePath) {
@@ -53,10 +46,12 @@ function assertAllowedFilePath(filePath) {
     throw new Error('Invalid file path');
   }
   const resolved = path.resolve(filePath);
-  if (!allowedFilePaths.has(resolved)) {
-    throw new Error('Path is outside the current scan');
+  for (const root of approvedFolderPaths) {
+    if (resolved === root) return resolved;
+    const prefix = root.endsWith(path.sep) ? root : root + path.sep;
+    if (resolved.startsWith(prefix)) return resolved;
   }
-  return resolved;
+  throw new Error('Path is outside approved folders');
 }
 
 function assertDirectoryPath(folderPath) {
@@ -83,6 +78,44 @@ const MONITOR_INTERVAL_DEFAULT = 86400000;
 function clampMonitorInterval(intervalMs) {
   if (!Number.isFinite(intervalMs)) return MONITOR_INTERVAL_DEFAULT;
   return Math.max(MONITOR_INTERVAL_MIN, Math.min(intervalMs, MONITOR_INTERVAL_MAX));
+}
+
+// Paths that lead to SIP-protected, bind-mounted, or otherwise hostile trees
+// for a file-size scanner. We warn before scanning these because a naive walk
+// can produce millions of inaccessible entries and exhaust memory.
+const DANGEROUS_POSIX_ROOTS = [
+  '/System', '/Volumes', '/private', '/usr', '/bin', '/sbin',
+  '/dev', '/etc', '/var', '/tmp', '/cores', '/Library'
+];
+
+function isDangerousPath(folderPath) {
+  const resolved = path.resolve(folderPath);
+  if (process.platform === 'win32') {
+    if (/^[A-Za-z]:[\\/]?$/.test(resolved)) return true;
+    const lower = resolved.toLowerCase();
+    if (lower === 'c:\\windows' || lower.startsWith('c:\\windows\\')) return true;
+    if (lower === 'c:\\program files' || lower.startsWith('c:\\program files\\')) return true;
+    if (lower === 'c:\\program files (x86)' || lower.startsWith('c:\\program files (x86)\\')) return true;
+    return false;
+  }
+  if (resolved === '/') return true;
+  for (const root of DANGEROUS_POSIX_ROOTS) {
+    if (resolved === root || resolved.startsWith(root + '/')) return true;
+  }
+  return false;
+}
+
+async function confirmDangerousScan(folderPath) {
+  const result = await dialog.showMessageBox(mainWindow, {
+    type: 'warning',
+    buttons: ['Cancel', 'Scan Anyway'],
+    defaultId: 0,
+    cancelId: 0,
+    title: 'System Folder Warning',
+    message: 'This looks like a system folder.',
+    detail: `${folderPath}\n\nScanning system folders can include millions of files Stuff Diver cannot open, double-count via APFS firmlinks, and cause the app to run out of memory. Pick a subfolder (for example your Documents or Downloads) for faster, more useful results.`
+  });
+  return result.response === 1;
 }
 
 function approveFolderPath(folderPath) {
@@ -164,12 +197,19 @@ handleTrusted('select-folder', async () => {
     properties: ['openDirectory']
   });
   if (result.canceled) return null;
-  return approveFolderPath(result.filePaths[0]);
+  const picked = result.filePaths[0];
+  if (isDangerousPath(picked) && !(await confirmDangerousScan(picked))) return null;
+  return approveFolderPath(picked);
 });
 
 handleTrusted('approve-folder', async (event, folderPath) => {
   const resolved = assertDirectoryPath(folderPath);
   if (approvedFolderPaths.has(resolved)) return true;
+  if (isDangerousPath(resolved)) {
+    if (!(await confirmDangerousScan(resolved))) return false;
+    approveFolderPath(resolved);
+    return true;
+  }
   const result = await dialog.showMessageBox(mainWindow, {
     type: 'question',
     buttons: ['Cancel', 'Allow'],
@@ -186,9 +226,6 @@ handleTrusted('approve-folder', async (event, folderPath) => {
 
 handleTrusted('scan-folder', async (event, folderPath) => {
   folderPath = assertApprovedFolder(folderPath);
-  // Preserve the existing allowlist during the scan so previously-displayed
-  // files remain clickable. New files are added incrementally below, and the
-  // full list is replaced atomically when the scan completes.
   const files = [];
   const seen = new Set();
   let count = 0;
@@ -252,6 +289,43 @@ handleTrusted('scan-folder', async (event, folderPath) => {
     }
   }
 
+  // Caps the folder tree at TREE_NODE_CAP nodes by pruning the smallest
+  // folders. Parent aggregates (size, fileCount) are preserved, so the chart
+  // totals stay accurate — only drill-down detail into tiny folders is lost.
+  const TREE_NODE_CAP = 2000;
+
+  function countTreeNodes(node) {
+    let n = 1;
+    if (node.children) {
+      for (const c of Object.values(node.children)) n += countTreeNodes(c);
+    }
+    return n;
+  }
+
+  function pruneByMinSize(node, minSize) {
+    if (!node.children) return;
+    for (const key of Object.keys(node.children)) {
+      const child = node.children[key];
+      if (child.size < minSize) {
+        delete node.children[key];
+      } else {
+        pruneByMinSize(child, minSize);
+      }
+    }
+  }
+
+  function capTreeNodes(root) {
+    if (countTreeNodes(root) <= TREE_NODE_CAP) return;
+    const sizes = [];
+    (function collect(n) {
+      sizes.push(n.size);
+      if (n.children) for (const c of Object.values(n.children)) collect(c);
+    })(root);
+    sizes.sort((a, b) => b - a);
+    const threshold = sizes[Math.min(TREE_NODE_CAP - 1, sizes.length - 1)];
+    pruneByMinSize(root, threshold);
+  }
+
   let batchBuffer = [];
   let lastBatchTime = Date.now();
 
@@ -283,6 +357,17 @@ handleTrusted('scan-folder', async (event, folderPath) => {
       const fullPath = path.join(dir, entry.name);
 
       if (!isICloudPlaceholder && entry.isDirectory() && !entry.isSymbolicLink()) {
+        // Dedupe by dev:ino so APFS firmlinks / bind mounts don't walk the
+        // same tree twice (e.g. /System/Volumes/Data mirrors /).
+        try {
+          const dirStat = await fs.promises.stat(fullPath);
+          const dirId = `${dirStat.dev}:${dirStat.ino}`;
+          if (seen.has(dirId)) continue;
+          seen.add(dirId);
+        } catch (e) {
+          skipped++;
+          continue;
+        }
         await walk(fullPath, depth + 1);
       } else if (entry.isFile() || isICloudPlaceholder) {
         try {
@@ -331,7 +416,6 @@ handleTrusted('scan-folder', async (event, folderPath) => {
           };
           files.push(fileObj);
           batchBuffer.push(fileObj);
-          allowedFilePaths.add(path.resolve(virtualPath));
           addToTree(rel, diskSize, logicalSize || diskSize, ext, stat.mtimeMs);
           count++;
           if (batchBuffer.length >= 500 || (Date.now() - lastBatchTime) > 250) {
@@ -351,6 +435,7 @@ handleTrusted('scan-folder', async (event, folderPath) => {
   flushBatch(); // send any remaining files
   try {
     propagate(folderTree);
+    capTreeNodes(folderTree);
     cleanupTree(folderTree);
   } catch (e) {
     // Tree build error — non-fatal, continue with flat file list
