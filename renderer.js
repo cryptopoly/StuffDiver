@@ -1185,8 +1185,8 @@
   function showBubbleTooltip(e, item) {
     const sz = item.logicalSize != null ? effectiveNodeSize(item) : item.size;
     tooltip.innerHTML = `
-      <strong>${item.name}/</strong><br>
-      <span class="tip-path">${item.path || '(root)'}</span><br>
+      <strong>${escHtml(item.name)}/</strong><br>
+      <span class="tip-path">${escHtml(item.path || '(root)')}</span><br>
       <span class="tip-size">${formatSize(sz)}</span>
       <span class="tip-path"> \u00b7 ${item.fileCount} files</span><br>
       <span class="tip-path" style="font-size:10px">Click to explore</span>
@@ -2468,7 +2468,7 @@
     const netChange = totalAdded + totalGrown - totalRemoved - totalShrunk;
 
     let html = '<div class="compare-container">';
-    html += `<div class="compare-header"><h3>Scan Comparison</h3><span class="compare-date">Previous scan: ${cachedDate}</span></div>`;
+    html += `<div class="compare-header"><h3>Scan Comparison</h3><span class="compare-date">Previous scan: ${escHtml(cachedDate)}</span></div>`;
 
     // Summary cards
     html += '<div class="compare-summary">';
@@ -2486,8 +2486,10 @@
       h += '<div class="compare-list">';
       const shown = items.slice(0, 20);
       for (const f of shown) {
+        const safePath = escHtml(f.relativePath || f.name);
+        const safeName = escHtml(f.name);
         h += `<div class="compare-item">
-          <span class="compare-item-name" title="${f.relativePath || f.name}">${f.name}</span>
+          <span class="compare-item-name" title="${safePath}">${safeName}</span>
           ${showOldSize ? `<span class="compare-item-old">${formatSize(f.oldSize)}</span><span class="compare-arrow">→</span>` : ''}
           <span class="compare-item-size">${formatSize(f.size)}</span>
           <span class="compare-item-diff ${cssClass}">${cssClass.includes('add') || cssClass.includes('grow') ? '+' : '-'}${formatSize(f.diff)}</span>
@@ -3071,6 +3073,17 @@
       }
     }
     doFreshScan(folder);
+  }
+
+  async function confirmAndOpenFolder(folder) {
+    if (!folder) return;
+    try {
+      const approved = await window.api.approveFolder(folder);
+      if (approved) openFolderPath(folder);
+    } catch (e) {
+      const msg = (e && e.message) ? e.message.replace(/^Error invoking remote method '[^']+':\s*Error:\s*/, '') : 'Could not open folder';
+      renderEmpty(msg);
+    }
   }
 
   async function handleSelectFolder() {
@@ -4062,7 +4075,7 @@
       row.className = 'recent-row';
       const parts = folder.replace(/\\/g, '/').split('/');
       row.innerHTML = `<span class="recent-icon">&#128194;</span><span class="recent-name">${escHtml(parts[parts.length - 1])}</span><span class="recent-path">${escHtml(folder)}</span>`;
-      row.addEventListener('click', () => openFolderPath(folder));
+      row.addEventListener('click', () => { confirmAndOpenFolder(folder); });
       container.appendChild(row);
     }
 
@@ -4479,7 +4492,7 @@
       if (files.length > 0) {
         const droppedPath = files[0].path;
         // Only accept directories
-        openFolderPath(droppedPath);
+        confirmAndOpenFolder(droppedPath);
       }
     });
 

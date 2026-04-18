@@ -3,6 +3,7 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const { exec, execFile } = require('child_process');
+const { pathToFileURL } = require('url');
 const { promisify } = require('util');
 const execFileP = promisify(execFile);
 
@@ -12,6 +13,91 @@ app.setName('Stuff Diver');
 let mainWindow;
 let tray = null;
 let monitorTimer = null;
+let allowedFilePaths = new Set();
+let approvedFolderPaths = new Set();
+const APP_URL = pathToFileURL(path.join(__dirname, 'index.html')).href;
+const ALLOWED_EXTERNAL_HOSTS = new Set(['buymeacoffee.com', 'www.paypal.com', 'paypal.com']);
+
+function isTrustedSender(event) {
+  if (!mainWindow || mainWindow.isDestroyed()) return false;
+  if (BrowserWindow.fromWebContents(event.sender) !== mainWindow) return false;
+  const senderUrl = event.senderFrame?.url || event.sender.getURL();
+  return senderUrl === APP_URL;
+}
+
+function assertTrustedSender(event) {
+  if (!isTrustedSender(event)) {
+    throw new Error('Untrusted IPC sender');
+  }
+}
+
+function handleTrusted(channel, handler) {
+  ipcMain.handle(channel, async (event, ...args) => {
+    assertTrustedSender(event);
+    return handler(event, ...args);
+  });
+}
+
+function setActiveFolderState(folderPath, files) {
+  const nextFiles = Array.isArray(files) ? files.slice() : [];
+  lastScanAllFiles = nextFiles;
+  allowedFilePaths = new Set(
+    nextFiles
+      .filter(file => file && typeof file.path === 'string' && file.path.length > 0)
+      .map(file => path.resolve(file.path))
+  );
+}
+
+function assertAllowedFilePath(filePath) {
+  if (typeof filePath !== 'string' || filePath.length === 0) {
+    throw new Error('Invalid file path');
+  }
+  const resolved = path.resolve(filePath);
+  if (!allowedFilePaths.has(resolved)) {
+    throw new Error('Path is outside the current scan');
+  }
+  return resolved;
+}
+
+function assertDirectoryPath(folderPath) {
+  if (typeof folderPath !== 'string' || folderPath.length === 0) {
+    throw new Error('Invalid folder path');
+  }
+  const resolved = path.resolve(folderPath);
+  let stat;
+  try {
+    stat = fs.statSync(resolved);
+  } catch (e) {
+    throw new Error('Folder not found or inaccessible');
+  }
+  if (!stat.isDirectory()) {
+    throw new Error('Folder path must be a directory');
+  }
+  return resolved;
+}
+
+const MONITOR_INTERVAL_MIN = 3600000;
+const MONITOR_INTERVAL_MAX = 30 * 86400000;
+const MONITOR_INTERVAL_DEFAULT = 86400000;
+
+function clampMonitorInterval(intervalMs) {
+  if (!Number.isFinite(intervalMs)) return MONITOR_INTERVAL_DEFAULT;
+  return Math.max(MONITOR_INTERVAL_MIN, Math.min(intervalMs, MONITOR_INTERVAL_MAX));
+}
+
+function approveFolderPath(folderPath) {
+  const resolved = assertDirectoryPath(folderPath);
+  approvedFolderPaths.add(resolved);
+  return resolved;
+}
+
+function assertApprovedFolder(folderPath) {
+  const resolved = assertDirectoryPath(folderPath);
+  if (!approvedFolderPaths.has(resolved)) {
+    throw new Error('Folder access has not been approved');
+  }
+  return resolved;
+}
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -36,15 +122,26 @@ function createWindow() {
   }
 
   mainWindow.loadFile('index.html');
+  mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    if (url !== APP_URL) event.preventDefault();
+  });
 }
 
 app.whenReady().then(() => {
   createWindow();
   setupAutoUpdater();
-  // Auto-start folder monitor if enabled
+  // Auto-start folder monitor if enabled. The folder was explicitly approved
+  // by the user when the monitor was set up; re-approve in-memory so the
+  // monitor can run without prompting again on each app launch.
   const settings = loadSettings();
   if (settings.monitorEnabled && settings.monitorFolder) {
-    startMonitor();
+    try {
+      approveFolderPath(settings.monitorFolder);
+      startMonitor();
+    } catch (e) {
+      console.error('Could not resume monitor:', e.message);
+    }
   }
 });
 
@@ -62,15 +159,36 @@ let lastScanAllFiles = [];
 
 // IPC Handlers
 
-ipcMain.handle('select-folder', async () => {
+handleTrusted('select-folder', async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
     properties: ['openDirectory']
   });
   if (result.canceled) return null;
-  return result.filePaths[0];
+  return approveFolderPath(result.filePaths[0]);
 });
 
-ipcMain.handle('scan-folder', async (event, folderPath) => {
+handleTrusted('approve-folder', async (event, folderPath) => {
+  const resolved = assertDirectoryPath(folderPath);
+  if (approvedFolderPaths.has(resolved)) return true;
+  const result = await dialog.showMessageBox(mainWindow, {
+    type: 'question',
+    buttons: ['Cancel', 'Allow'],
+    defaultId: 1,
+    cancelId: 0,
+    title: 'Allow Folder Access',
+    message: 'Allow Stuff Diver to access this folder?',
+    detail: resolved
+  });
+  if (result.response !== 1) return false;
+  approveFolderPath(resolved);
+  return true;
+});
+
+handleTrusted('scan-folder', async (event, folderPath) => {
+  folderPath = assertApprovedFolder(folderPath);
+  // Preserve the existing allowlist during the scan so previously-displayed
+  // files remain clickable. New files are added incrementally below, and the
+  // full list is replaced atomically when the scan completes.
   const files = [];
   const seen = new Set();
   let count = 0;
@@ -213,6 +331,7 @@ ipcMain.handle('scan-folder', async (event, folderPath) => {
           };
           files.push(fileObj);
           batchBuffer.push(fileObj);
+          allowedFilePaths.add(path.resolve(virtualPath));
           addToTree(rel, diskSize, logicalSize || diskSize, ext, stat.mtimeMs);
           count++;
           if (batchBuffer.length >= 500 || (Date.now() - lastBatchTime) > 250) {
@@ -238,7 +357,7 @@ ipcMain.handle('scan-folder', async (event, folderPath) => {
   }
 
   // Store full list for duplicate detection
-  lastScanAllFiles = files;
+  setActiveFolderState(folderPath, files);
   // Send top 500 local files + top 500 cloud files (merged) so both filter modes have data
   const localFiles = files.filter(f => !f.cloudStatus).sort((a, b) => b.size - a.size).slice(0, 500);
   const cloudFiles = files.filter(f => f.cloudStatus === 'icloud-only').sort((a, b) => (b.logicalSize || 0) - (a.logicalSize || 0)).slice(0, 500);
@@ -255,7 +374,7 @@ ipcMain.handle('scan-folder', async (event, folderPath) => {
   return { files: mergedFiles, totalFiles: files.length, totalSize, totalLogicalSize, totalCloudLogicalSize, skippedDirs: skipped, folderTree, cloudOnlyCount };
 });
 
-ipcMain.handle('find-duplicates', async (event) => {
+handleTrusted('find-duplicates', async (event) => {
   const MIN_SIZE = 4096;
   const candidates = lastScanAllFiles.filter(f => f.size >= MIN_SIZE && f.cloudStatus !== 'icloud-only');
 
@@ -387,15 +506,18 @@ ipcMain.handle('find-duplicates', async (event) => {
   return results;
 });
 
-ipcMain.handle('open-file', async (event, filePath) => {
+handleTrusted('open-file', async (event, filePath) => {
+  filePath = assertAllowedFilePath(filePath);
   return shell.openPath(filePath);
 });
 
-ipcMain.handle('show-in-folder', (event, filePath) => {
+handleTrusted('show-in-folder', (event, filePath) => {
+  filePath = assertAllowedFilePath(filePath);
   shell.showItemInFolder(filePath);
 });
 
-ipcMain.handle('preview-file', async (event, filePath) => {
+handleTrusted('preview-file', async (event, filePath) => {
+  filePath = assertAllowedFilePath(filePath);
   if (process.platform === 'darwin') {
     execFile('qlmanage', ['-p', filePath], (err) => { /* non-fatal */ });
   } else {
@@ -405,13 +527,9 @@ ipcMain.handle('preview-file', async (event, filePath) => {
 
 // === File Preview ===
 
-ipcMain.handle('read-file-preview', async (event, filePath, maxBytes, asDataUrl) => {
+handleTrusted('read-file-preview', async (event, filePath, maxBytes, asDataUrl) => {
   try {
-    if (typeof filePath !== 'string' || filePath.length === 0) return null;
-    // Block reading from sensitive system paths
-    const resolved = path.resolve(filePath);
-    const blocked = ['/etc/', '/private/etc/', '/System/', '/usr/'];
-    if (blocked.some(b => resolved.startsWith(b))) return null;
+    filePath = assertAllowedFilePath(filePath);
     const stat = await fs.promises.stat(filePath);
     if (asDataUrl) {
       // For images/media, read entire file (up to maxBytes limit if set) and return as data URL
@@ -453,8 +571,9 @@ ipcMain.handle('read-file-preview', async (event, filePath, maxBytes, asDataUrl)
 
 // === Disk Space ===
 
-ipcMain.handle('get-disk-space', async (event, folderPath) => {
+handleTrusted('get-disk-space', async (event, folderPath) => {
   try {
+    folderPath = assertApprovedFolder(folderPath);
     if (process.platform === 'win32') {
       const drive = path.parse(folderPath).root.replace(/\\/g, '').slice(0, 2);
       if (!/^[A-Za-z]:$/.test(drive)) return null;
@@ -477,16 +596,15 @@ ipcMain.handle('get-disk-space', async (event, folderPath) => {
 
 // === Delete files (Collector) ===
 
-ipcMain.handle('delete-files', async (event, filePaths) => {
+handleTrusted('delete-files', async (event, filePaths) => {
   if (!Array.isArray(filePaths) || !filePaths.length) return { deleted: 0, deletedPaths: [] };
-  // Validate all paths are strings and block system directories
-  const blocked = ['/etc/', '/private/etc/', '/System/', '/usr/', '/bin/', '/sbin/'];
-  for (const fp of filePaths) {
-    if (typeof fp !== 'string') return { deleted: 0, deletedPaths: [] };
-    const resolved = path.resolve(fp);
-    if (blocked.some(b => resolved.startsWith(b))) {
-      return { deleted: 0, deletedPaths: [], error: 'Cannot delete system files' };
+  const safePaths = [];
+  try {
+    for (const fp of filePaths) {
+      safePaths.push(assertAllowedFilePath(fp));
     }
+  } catch (e) {
+    return { deleted: 0, deletedPaths: [], error: e.message || 'Invalid file path' };
   }
 
   const result = await dialog.showMessageBox(mainWindow, {
@@ -502,7 +620,7 @@ ipcMain.handle('delete-files', async (event, filePaths) => {
   if (result.response !== 1) return { deleted: 0, deletedPaths: [] };
 
   const deletedPaths = [];
-  for (const fp of filePaths) {
+  for (const fp of safePaths) {
     try {
       await shell.trashItem(fp);
       deletedPaths.push(fp);
@@ -525,20 +643,23 @@ function getCacheKey(folderPath) {
   return crypto.createHash('md5').update(folderPath).digest('hex');
 }
 
-ipcMain.handle('load-cache', async (event, folderPath) => {
+handleTrusted('load-cache', async (event, folderPath) => {
   try {
+    folderPath = assertApprovedFolder(folderPath);
     const file = path.join(getCacheDir(), getCacheKey(folderPath) + '.json');
     if (!fs.existsSync(file)) return null;
     const raw = await fs.promises.readFile(file, 'utf8');
     const cached = JSON.parse(raw);
+    setActiveFolderState(folderPath, Array.isArray(cached.files) ? cached.files : []);
     return cached;
   } catch (e) {
     return null;
   }
 });
 
-ipcMain.handle('save-cache', async (event, folderPath, result) => {
+handleTrusted('save-cache', async (event, folderPath, result) => {
   try {
+    folderPath = assertApprovedFolder(folderPath);
     const file = path.join(getCacheDir(), getCacheKey(folderPath) + '.json');
     const data = { ...result, cachedAt: Date.now(), folderPath };
     await fs.promises.writeFile(file, JSON.stringify(data));
@@ -548,8 +669,9 @@ ipcMain.handle('save-cache', async (event, folderPath, result) => {
   }
 });
 
-ipcMain.handle('clear-cache', async (event, folderPath) => {
+handleTrusted('clear-cache', async (event, folderPath) => {
   try {
+    folderPath = assertApprovedFolder(folderPath);
     const file = path.join(getCacheDir(), getCacheKey(folderPath) + '.json');
     if (fs.existsSync(file)) await fs.promises.unlink(file);
     return true;
@@ -566,8 +688,9 @@ function getTagsDir() {
   return dir;
 }
 
-ipcMain.handle('load-tags', async (event, folderPath) => {
+handleTrusted('load-tags', async (event, folderPath) => {
   try {
+    folderPath = assertApprovedFolder(folderPath);
     const file = path.join(getTagsDir(), getCacheKey(folderPath) + '.json');
     if (!fs.existsSync(file)) return {};
     const raw = await fs.promises.readFile(file, 'utf8');
@@ -578,8 +701,9 @@ ipcMain.handle('load-tags', async (event, folderPath) => {
   }
 });
 
-ipcMain.handle('save-tags', async (event, folderPath, tags) => {
+handleTrusted('save-tags', async (event, folderPath, tags) => {
   try {
+    folderPath = assertApprovedFolder(folderPath);
     const file = path.join(getTagsDir(), getCacheKey(folderPath) + '.json');
     await fs.promises.writeFile(file, JSON.stringify(tags));
     return true;
@@ -606,7 +730,7 @@ function loadSettings() {
   }
 }
 
-const ALLOWED_SETTINGS_KEYS = ['recentFolders', 'theme', 'monitorFolder', 'monitorInterval', 'monitorEnabled'];
+const ALLOWED_SETTINGS_KEYS = ['recentFolders', 'theme', 'monitorFolder', 'monitorInterval', 'monitorEnabled', 'lastViewMode'];
 
 function saveSettings(settings) {
   const existing = loadSettings();
@@ -618,15 +742,15 @@ function saveSettings(settings) {
   fs.writeFileSync(getSettingsPath(), JSON.stringify(merged, null, 2));
 }
 
-ipcMain.handle('get-app-version', () => {
+handleTrusted('get-app-version', () => {
   return app.getVersion();
 });
 
-ipcMain.handle('load-settings', () => {
+handleTrusted('load-settings', () => {
   return loadSettings();
 });
 
-ipcMain.handle('save-settings', (event, settings) => {
+handleTrusted('save-settings', (event, settings) => {
   try {
     saveSettings(settings);
     return true;
@@ -694,7 +818,7 @@ function setupAutoUpdater() {
   });
 }
 
-ipcMain.handle('check-for-updates', async () => {
+handleTrusted('check-for-updates', async () => {
   try {
     await autoUpdater.checkForUpdates();
     return { ok: true };
@@ -703,7 +827,7 @@ ipcMain.handle('check-for-updates', async () => {
   }
 });
 
-ipcMain.handle('download-update', async () => {
+handleTrusted('download-update', async () => {
   try {
     await autoUpdater.downloadUpdate();
     return { ok: true };
@@ -712,12 +836,17 @@ ipcMain.handle('download-update', async () => {
   }
 });
 
-ipcMain.handle('install-update', () => {
+handleTrusted('install-update', () => {
   autoUpdater.quitAndInstall(false, true);
 });
 
-ipcMain.handle('open-external', (event, url) => {
-  shell.openExternal(url);
+handleTrusted('open-external', async (event, url) => {
+  const target = new URL(url);
+  if (target.protocol !== 'https:' || !ALLOWED_EXTERNAL_HOSTS.has(target.hostname)) {
+    throw new Error('External URL is not allowed');
+  }
+  await shell.openExternal(target.toString());
+  return true;
 });
 
 // === Folder Monitor ===
@@ -825,7 +954,7 @@ function setupTray() {
 
 function startMonitor() {
   const settings = loadSettings();
-  const interval = settings.monitorInterval || 86400000; // default 24h
+  const interval = clampMonitorInterval(settings.monitorInterval);
   if (monitorTimer) clearInterval(monitorTimer);
   monitorTimer = setInterval(runMonitorCheck, interval);
   setupTray();
@@ -836,23 +965,28 @@ function stopMonitor() {
   if (tray) { tray.destroy(); tray = null; }
 }
 
-ipcMain.handle('start-monitor', async (event, folderPath, intervalMs) => {
-  await saveSettings({ monitorFolder: folderPath, monitorInterval: intervalMs || 86400000, monitorEnabled: true });
+handleTrusted('start-monitor', async (event, folderPath, intervalMs) => {
+  folderPath = assertApprovedFolder(folderPath);
+  saveSettings({
+    monitorFolder: folderPath,
+    monitorInterval: clampMonitorInterval(intervalMs),
+    monitorEnabled: true
+  });
   startMonitor();
   return true;
 });
 
-ipcMain.handle('stop-monitor', async () => {
+handleTrusted('stop-monitor', async () => {
   stopMonitor();
-  await saveSettings({ monitorEnabled: false });
+  saveSettings({ monitorEnabled: false });
   return true;
 });
 
-ipcMain.handle('get-monitor-status', async () => {
+handleTrusted('get-monitor-status', async () => {
   const settings = loadSettings();
   return {
     enabled: !!monitorTimer,
     folder: settings.monitorFolder || null,
-    interval: settings.monitorInterval || 86400000
+    interval: clampMonitorInterval(settings.monitorInterval)
   };
 });
