@@ -352,7 +352,6 @@ handleTrusted('scan-folder', async (event, folderPath) => {
       // e.g. ".Document.pdf.icloud" represents "Document.pdf" stored only in iCloud
       const isICloudPlaceholder = process.platform === 'darwin' &&
         entry.name.startsWith('.') && entry.name.endsWith('.icloud') && entry.name.length > 8;
-      if (entry.name.startsWith('.') && !isICloudPlaceholder) continue;
 
       const fullPath = path.join(dir, entry.name);
 
@@ -1009,7 +1008,6 @@ async function quickScanSize(folderPath) {
       entries = await fs.promises.readdir(dir, { withFileTypes: true });
     } catch (e) { return; }
     for (const entry of entries) {
-      if (entry.name.startsWith('.')) continue;
       const fullPath = path.join(dir, entry.name);
       if (entry.isDirectory() && !entry.isSymbolicLink()) {
         await walk(fullPath, depth + 1);

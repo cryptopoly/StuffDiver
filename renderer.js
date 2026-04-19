@@ -109,6 +109,19 @@
     return (bytes / 1073741824).toFixed(2) + ' GB';
   }
 
+  function formatPercent(part, total) {
+    if (!total || total <= 0) return '0%';
+    const pct = (part / total) * 100;
+    return (pct >= 10 ? pct.toFixed(0) : pct.toFixed(1)) + '%';
+  }
+
+  function isVolumeRootPath(folderPath) {
+    if (!folderPath) return false;
+    if (window.api.platform === 'win32') return /^[A-Za-z]:[\\/]?$/.test(folderPath.trim());
+    const normalized = folderPath.replace(/\/+$/, '') || '/';
+    return normalized === '/';
+  }
+
   function formatRelativeDate(mtimeMs) {
     if (!mtimeMs) return '';
     const now = Date.now();
@@ -2837,19 +2850,38 @@
 
   function updateStats() {
     const showingCount = Math.min(displayFiles.length, viewMode === 'treemap' ? MAX_TREEMAP : displayFiles.length);
+    const scannedFolder = currentFolder || folderPathEl?.textContent || '';
+    const isWholeDriveScan = !selectedFolderPath && isVolumeRootPath(scannedFolder);
+    const scannedOnDisk = totalSize;
+    const diskTotal = diskSpaceInfo?.total || 0;
     let sizeLabel;
     if (cloudFilter === 'online') {
       sizeLabel = `<span>Online size: <span class="stat-value">${formatSize(totalCloudLogicalSize)}</span></span>`;
     } else if (cloudFilter === 'local') {
-      sizeLabel = `<span>On disk: <span class="stat-value">${formatSize(totalSize)}</span></span>`;
+      const scannedPct = diskTotal > 0 && isWholeDriveScan ? ` (${formatPercent(totalSize, diskTotal)})` : '';
+      sizeLabel = `<span title="Space attributed to files Stuff Diver scanned on this drive">Scanned: <span class="stat-value">${formatSize(totalSize)}${scannedPct}</span></span>`;
     } else {
       const combined = totalSize + totalCloudLogicalSize;
-      sizeLabel = `<span>Total: <span class="stat-value">${formatSize(combined)}</span></span>` +
-        (cloudOnlyCount > 0 ? `<span>On disk: <span class="stat-value">${formatSize(totalSize)}</span></span>` : '');
+      const scannedPct = diskTotal > 0 && isWholeDriveScan && cloudOnlyCount === 0 ? ` (${formatPercent(combined, diskTotal)})` : '';
+      const onDiskPct = diskTotal > 0 && isWholeDriveScan ? ` (${formatPercent(totalSize, diskTotal)})` : '';
+      sizeLabel = `<span title="Space attributed to files Stuff Diver scanned">Scanned: <span class="stat-value">${formatSize(combined)}${scannedPct}</span></span>` +
+        (cloudOnlyCount > 0 ? `<span>On disk: <span class="stat-value">${formatSize(totalSize)}${onDiskPct}</span></span>` : '');
     }
+
+    let driveUsageLabel = '';
+    if (diskSpaceInfo && diskSpaceInfo.total > 0 && isWholeDriveScan && cloudFilter !== 'online') {
+      const driveUsed = Math.max(0, diskSpaceInfo.total - diskSpaceInfo.available);
+      const otherUsed = Math.max(0, driveUsed - scannedOnDisk);
+      driveUsageLabel = `<span title="Used space reported by the operating system for this drive">Drive used: <span class="stat-value">${formatSize(driveUsed)} (${formatPercent(driveUsed, diskSpaceInfo.total)})</span></span>`;
+      if (otherUsed > 1073741824) {
+        driveUsageLabel += `<span title="Used space not attributed to scanned files. Common causes: protected folders, restore points, pagefile/hiberfil, reserved storage, NTFS metadata, or inaccessible items.">Other used: <span class="stat-value">${formatSize(otherUsed)} (${formatPercent(otherUsed, diskSpaceInfo.total)})</span></span>`;
+      }
+    }
+
     statsEl.innerHTML = `
       <span>Files: <span class="stat-value">${totalFiles.toLocaleString()}</span></span>
       ${sizeLabel}
+      ${driveUsageLabel}
       <span>Showing top: <span class="stat-value">${showingCount.toLocaleString()}</span></span>
       ${cloudOnlyCount > 0 ? `<span class="cloud-stat" title="Files stored in iCloud only — not on your local drive">&#9729; iCloud only: <span class="stat-value">${cloudOnlyCount.toLocaleString()}</span></span>` : ''}
       ${skippedDirs ? `<span>Inaccessible: <span class="stat-value">${skippedDirs.toLocaleString()}</span></span>` : ''}
