@@ -3125,6 +3125,7 @@
       loadTagsForFolder(folder);
       window.api.getDiskSpace(folder).then(info => {
         diskSpaceInfo = info;
+        updateStats();
         if (viewMode === 'treemap') renderVisualization();
       }).catch(() => {});
     }

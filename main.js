@@ -2,7 +2,7 @@ const { app, BrowserWindow, ipcMain, dialog, shell, Tray, Menu, Notification, na
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
-const { exec, execFile } = require('child_process');
+const { exec, execFile, spawn } = require('child_process');
 const { pathToFileURL } = require('url');
 const { promisify } = require('util');
 const execFileP = promisify(execFile);
@@ -116,6 +116,72 @@ async function confirmDangerousScan(folderPath) {
     detail: `${folderPath}\n\nScanning system folders can include millions of files Stuff Diver cannot open, double-count via APFS firmlinks, and cause the app to run out of memory. Pick a subfolder (for example your Documents or Downloads) for faster, more useful results.`
   });
   return result.response === 1;
+}
+
+// Stat for the scanner. Uses bigint so file IDs stay exact: NTFS file IDs are
+// 64-bit (sequence number in the high bits), and converting them to a JS
+// Number rounds away the low bits. Unrelated files/folders then share a
+// dev:ino key and get dropped as "duplicates" — on a whole-drive scan that
+// silently discards entire subtrees.
+async function statForScan(filePath) {
+  const s = await fs.promises.stat(filePath, { bigint: true });
+  return {
+    id: `${s.dev}:${s.ino}`,
+    size: Number(s.size),
+    blocks: s.blocks != null ? Number(s.blocks) : null,
+    mtimeMs: Number(s.mtimeMs),
+    nlink: Number(s.nlink)
+  };
+}
+
+// Linux virtual filesystems report fake sizes (/proc/kcore claims ~128 TB)
+// and contain no real disk usage; skip them when walking from /.
+const LINUX_PSEUDO_FS_ROOTS = new Set(['/proc', '/sys', '/dev', '/run']);
+function isPseudoFilesystemPath(fullPath) {
+  return process.platform === 'linux' && LINUX_PSEUDO_FS_ROOTS.has(fullPath);
+}
+
+// Windows: read sizes of files the OS holds open exclusively (pagefile.sys,
+// hiberfil.sys, ...). FileInfo reads attributes from the directory entry, so
+// it works where opening the file fails. Returns Map<lowercasePath, {size, mtimeMs}>.
+function statLockedWindowsFiles(paths) {
+  return new Promise((resolve) => {
+    const result = new Map();
+    if (process.platform !== 'win32' || !paths.length) return resolve(result);
+    const script = [
+      "$ErrorActionPreference='SilentlyContinue'",
+      '[Console]::InputEncoding=[Text.Encoding]::UTF8',
+      '[Console]::OutputEncoding=[Text.Encoding]::UTF8',
+      '$paths=[Console]::In.ReadToEnd() | ConvertFrom-Json',
+      '$epoch=[datetime]::new(1970,1,1,0,0,0,[DateTimeKind]::Utc)',
+      '$out=foreach($p in $paths){ $i=[System.IO.FileInfo]::new($p); if($i.Exists){ [pscustomobject]@{p=$p;s=$i.Length;m=[int64]($i.LastWriteTimeUtc-$epoch).TotalMilliseconds} } }',
+      'ConvertTo-Json -Compress -InputObject @($out)'
+    ].join('; ');
+    let child;
+    try {
+      child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script], { windowsHide: true });
+    } catch (e) {
+      return resolve(result);
+    }
+    let stdout = '';
+    const timer = setTimeout(() => { try { child.kill(); } catch (e) { /* ignore */ } }, 30000);
+    child.stdout.on('data', (d) => { stdout += d; });
+    child.on('error', () => { clearTimeout(timer); resolve(result); });
+    child.on('close', () => {
+      clearTimeout(timer);
+      try {
+        const parsed = JSON.parse(stdout.trim() || '[]');
+        for (const r of (Array.isArray(parsed) ? parsed : [parsed])) {
+          if (r && typeof r.p === 'string' && Number.isFinite(r.s)) {
+            result.set(r.p.toLowerCase(), { size: r.s, mtimeMs: Number(r.m) || 0 });
+          }
+        }
+      } catch (e) { /* ignore */ }
+      resolve(result);
+    });
+    child.stdin.on('error', () => { /* ignore */ });
+    child.stdin.end(JSON.stringify(paths));
+  });
 }
 
 function approveFolderPath(folderPath) {
@@ -338,6 +404,37 @@ handleTrusted('scan-folder', async (event, folderPath) => {
     lastBatchTime = Date.now();
   }
 
+  function recordFile(virtualPath, name, diskSize, logicalSize, mtime, cloudStatus) {
+    const ext = path.extname(name).toLowerCase();
+    const rel = path.relative(folderPath, virtualPath);
+    const fileObj = {
+      path: virtualPath,
+      relativePath: rel,
+      name,
+      size: diskSize,
+      logicalSize,
+      ext,
+      mtime,
+      ...(cloudStatus ? { cloudStatus } : {})
+    };
+    files.push(fileObj);
+    batchBuffer.push(fileObj);
+    addToTree(rel, diskSize, logicalSize || diskSize, ext, mtime);
+    count++;
+    if (batchBuffer.length >= 500 || (Date.now() - lastBatchTime) > 250) {
+      flushBatch();
+    }
+    if (count % 1000 === 0) {
+      try { event.sender.send('scan-progress', { count, skipped }); } catch (e) { /* window closed */ }
+    }
+  }
+
+  // Windows: files held open by the OS (pagefile.sys, hiberfil.sys,
+  // swapfile.sys, ...) can't be opened for stat, but their size is still
+  // readable from the directory entry. Retry those after the walk.
+  const lockedFiles = [];
+  const LOCKED_FILE_CAP = 5000;
+
   async function walk(dir, depth) {
     if (depth > 80) return;
     let entries;
@@ -356,81 +453,73 @@ handleTrusted('scan-folder', async (event, folderPath) => {
       const fullPath = path.join(dir, entry.name);
 
       if (!isICloudPlaceholder && entry.isDirectory() && !entry.isSymbolicLink()) {
+        if (isPseudoFilesystemPath(fullPath)) continue;
         // Dedupe by dev:ino so APFS firmlinks / bind mounts don't walk the
         // same tree twice (e.g. /System/Volumes/Data mirrors /).
         try {
-          const dirStat = await fs.promises.stat(fullPath);
-          const dirId = `${dirStat.dev}:${dirStat.ino}`;
-          if (seen.has(dirId)) continue;
-          seen.add(dirId);
+          const dirStat = await statForScan(fullPath);
+          if (seen.has(dirStat.id)) continue;
+          seen.add(dirStat.id);
         } catch (e) {
           skipped++;
           continue;
         }
         await walk(fullPath, depth + 1);
       } else if (entry.isFile() || isICloudPlaceholder) {
-        try {
-          const stat = await fs.promises.stat(fullPath);
-          const fileId = `${stat.dev}:${stat.ino}`;
-          if (seen.has(fileId)) continue;
-          seen.add(fileId);
-
-          let name, ext, diskSize, logicalSize, cloudStatus;
-          if (isICloudPlaceholder) {
-            // Strip leading '.' and trailing '.icloud' (7 chars) to recover real filename
-            name = entry.name.slice(1, -7);
-            ext = path.extname(name).toLowerCase();
-            diskSize = 0; // No local disk space used
-            logicalSize = 0;
-            cloudStatus = 'icloud-only';
-            cloudOnlyCount++;
-          } else {
-            name = entry.name;
-            ext = path.extname(entry.name).toLowerCase();
-            // On Windows, stat.blocks is unreliable — use stat.size (logical bytes) directly.
-            // On macOS/Linux, stat.blocks * 512 gives true on-disk usage (accounts for compression, sparse files, etc.)
-            diskSize = process.platform === 'win32'
-              ? stat.size
-              : (stat.blocks != null ? stat.blocks * 512 : stat.size);
-            logicalSize = stat.size;
-            // Modern macOS: evicted iCloud files keep their original name but have 0 data blocks
-            if (process.platform === 'darwin' && stat.blocks === 0 && stat.size > 0) {
-              cloudStatus = 'icloud-only';
-              cloudOnlyCount++;
-              diskSize = 0;
-            }
-          }
-
-          const virtualPath = isICloudPlaceholder ? path.join(dir, name) : fullPath;
-          const rel = path.relative(folderPath, virtualPath);
-          const fileObj = {
-            path: virtualPath,
-            relativePath: rel,
-            name,
-            size: diskSize,
-            logicalSize,
-            ext,
-            mtime: stat.mtimeMs,
-            ...(cloudStatus ? { cloudStatus } : {})
-          };
-          files.push(fileObj);
-          batchBuffer.push(fileObj);
-          addToTree(rel, diskSize, logicalSize || diskSize, ext, stat.mtimeMs);
-          count++;
-          if (batchBuffer.length >= 500 || (Date.now() - lastBatchTime) > 250) {
-            flushBatch();
-          }
-          if (count % 1000 === 0) {
-            try { event.sender.send('scan-progress', { count, skipped }); } catch (e) { /* window closed */ }
-          }
-        } catch (e) {
-          skipped++;
+        if (isICloudPlaceholder) {
+          // Strip leading '.' and trailing '.icloud' (7 chars) to recover real filename.
+          // No local disk space used.
+          let mtime = 0;
+          try { mtime = (await statForScan(fullPath)).mtimeMs; } catch (e) { /* keep 0 */ }
+          const name = entry.name.slice(1, -7);
+          cloudOnlyCount++;
+          recordFile(path.join(dir, name), name, 0, 0, mtime, 'icloud-only');
+          continue;
         }
+        let stat;
+        try {
+          stat = await statForScan(fullPath);
+        } catch (e) {
+          if (process.platform === 'win32' && (e.code === 'EPERM' || e.code === 'EBUSY' || e.code === 'EACCES') &&
+              lockedFiles.length < LOCKED_FILE_CAP) {
+            lockedFiles.push({ fullPath, name: entry.name });
+          } else {
+            skipped++;
+          }
+          continue;
+        }
+        // Only hard-linked files can appear twice; skip tracking the rest to
+        // keep memory flat on multi-million-file scans.
+        if (stat.nlink > 1) {
+          if (seen.has(stat.id)) continue;
+          seen.add(stat.id);
+        }
+        // On Windows, stat.blocks is unreliable — use stat.size (logical bytes) directly.
+        // On macOS/Linux, stat.blocks * 512 gives true on-disk usage (accounts for compression, sparse files, etc.)
+        let diskSize = process.platform === 'win32'
+          ? stat.size
+          : (stat.blocks != null ? stat.blocks * 512 : stat.size);
+        let cloudStatus;
+        // Modern macOS: evicted iCloud files keep their original name but have 0 data blocks
+        if (process.platform === 'darwin' && stat.blocks === 0 && stat.size > 0) {
+          cloudStatus = 'icloud-only';
+          cloudOnlyCount++;
+          diskSize = 0;
+        }
+        recordFile(fullPath, entry.name, diskSize, stat.size, stat.mtimeMs, cloudStatus);
       }
     }
   }
 
   await walk(folderPath, 0);
+  if (lockedFiles.length) {
+    const sizes = await statLockedWindowsFiles(lockedFiles.map(f => f.fullPath));
+    for (const f of lockedFiles) {
+      const info = sizes.get(f.fullPath.toLowerCase());
+      if (!info) { skipped++; continue; }
+      recordFile(f.fullPath, f.name, info.size, info.size, info.mtimeMs);
+    }
+  }
   flushBatch(); // send any remaining files
   try {
     propagate(folderTree);
@@ -658,13 +747,23 @@ handleTrusted('read-file-preview', async (event, filePath, maxBytes, asDataUrl) 
 handleTrusted('get-disk-space', async (event, folderPath) => {
   try {
     folderPath = assertApprovedFolder(folderPath);
+    // statfs works on Windows, macOS and Linux. (wmic, used previously on
+    // Windows, is removed from current Windows 11 builds.)
+    try {
+      const s = await fs.promises.statfs(folderPath, { bigint: true });
+      const total = Number(s.blocks * s.bsize);
+      const available = Number(s.bavail * s.bsize);
+      if (total > 0) return { total, available };
+    } catch (e) { /* fall back below */ }
     if (process.platform === 'win32') {
       const drive = path.parse(folderPath).root.replace(/\\/g, '').slice(0, 2);
       if (!/^[A-Za-z]:$/.test(drive)) return null;
-      const { stdout } = await execFileP('wmic', ['logicaldisk', 'where', `DeviceID='${drive}'`, 'get', 'Size,FreeSpace', '/format:csv']);
-      const lines = stdout.trim().split('\n').filter(l => l.trim());
-      const last = lines[lines.length - 1].split(',');
-      return { total: parseInt(last[1]) || 0, available: parseInt(last[2]) || 0 };
+      const { stdout } = await execFileP('powershell.exe', [
+        '-NoProfile', '-NonInteractive', '-Command',
+        `$d=[System.IO.DriveInfo]::new('${drive}'); "$($d.TotalSize),$($d.AvailableFreeSpace)"`
+      ], { windowsHide: true });
+      const [total, available] = stdout.trim().split(',').map(n => parseInt(n, 10) || 0);
+      return total > 0 ? { total, available } : null;
     } else {
       const { stdout } = await execFileP('df', ['-k', folderPath]);
       const lines = stdout.trim().split('\n');
@@ -723,6 +822,10 @@ function getCacheDir() {
   return dir;
 }
 
+// Bump when scan results change meaning so stale caches are ignored.
+// v2: exact (bigint) file IDs, locked Windows system files, Linux pseudo-FS skip.
+const SCAN_CACHE_VERSION = 2;
+
 function getCacheKey(folderPath) {
   return crypto.createHash('md5').update(folderPath).digest('hex');
 }
@@ -734,6 +837,7 @@ handleTrusted('load-cache', async (event, folderPath) => {
     if (!fs.existsSync(file)) return null;
     const raw = await fs.promises.readFile(file, 'utf8');
     const cached = JSON.parse(raw);
+    if (cached.scanVersion !== SCAN_CACHE_VERSION) return null;
     setActiveFolderState(folderPath, Array.isArray(cached.files) ? cached.files : []);
     return cached;
   } catch (e) {
@@ -745,7 +849,7 @@ handleTrusted('save-cache', async (event, folderPath, result) => {
   try {
     folderPath = assertApprovedFolder(folderPath);
     const file = path.join(getCacheDir(), getCacheKey(folderPath) + '.json');
-    const data = { ...result, cachedAt: Date.now(), folderPath };
+    const data = { ...result, cachedAt: Date.now(), folderPath, scanVersion: SCAN_CACHE_VERSION };
     await fs.promises.writeFile(file, JSON.stringify(data));
     return true;
   } catch (e) {
@@ -1010,6 +1114,7 @@ async function quickScanSize(folderPath) {
     for (const entry of entries) {
       const fullPath = path.join(dir, entry.name);
       if (entry.isDirectory() && !entry.isSymbolicLink()) {
+        if (isPseudoFilesystemPath(fullPath)) continue;
         await walk(fullPath, depth + 1);
       } else if (entry.isFile()) {
         try {
