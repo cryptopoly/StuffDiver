@@ -10,6 +10,14 @@ const execFileP = promisify(execFile);
 // Set the app name so macOS permission dialogs show "Stuff Diver"
 app.setName('Stuff Diver');
 
+// End-to-end test mode (Playwright): isolated user data, no native dialogs,
+// no auto-updater. Never enabled unless the env var is set explicitly.
+const E2E = process.env.STUFFDIVER_E2E === '1';
+const E2E_SCAN_DELAY = E2E ? (Number(process.env.STUFFDIVER_E2E_SCAN_DELAY_MS) || 0) : 0;
+if (E2E && process.env.STUFFDIVER_USER_DATA) {
+  app.setPath('userData', process.env.STUFFDIVER_USER_DATA);
+}
+
 let mainWindow;
 let tray = null;
 let monitorTimer = null;
@@ -106,6 +114,7 @@ function isDangerousPath(folderPath) {
 }
 
 async function confirmDangerousScan(folderPath) {
+  if (E2E) return true;
   const result = await dialog.showMessageBox(mainWindow, {
     type: 'warning',
     buttons: ['Cancel', 'Scan Anyway'],
@@ -184,6 +193,51 @@ function statLockedWindowsFiles(paths) {
   });
 }
 
+// Scan exclusions. A pattern is either a bare name/glob ("node_modules",
+// "*.tmp") matched against each entry name, or a path (contains a separator)
+// matched as a prefix of the full path. Case-insensitive on Windows/macOS.
+function buildExcluder(patterns) {
+  const ci = process.platform !== 'linux';
+  const norm = (v) => (ci ? v.toLowerCase() : v);
+  const names = [];
+  const prefixes = [];
+  for (const raw of Array.isArray(patterns) ? patterns : []) {
+    if (typeof raw !== 'string') continue;
+    const pat = raw.trim();
+    if (!pat) continue;
+    if (/[\\/]/.test(pat)) {
+      prefixes.push(norm(path.resolve(pat)));
+    } else {
+      const escaped = pat.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.');
+      names.push(new RegExp('^' + escaped + '$', ci ? 'i' : ''));
+    }
+  }
+  if (!names.length && !prefixes.length) return null;
+  return (fullPath, name) => {
+    if (names.some(re => re.test(name))) return true;
+    if (!prefixes.length) return false;
+    const p = norm(fullPath);
+    return prefixes.some(x => p === x || p.startsWith(x + path.sep));
+  };
+}
+
+// Run fn over items with at most `limit` in flight; results keep input order.
+async function mapLimit(items, limit, fn) {
+  const out = new Array(items.length);
+  let next = 0;
+  async function worker() {
+    while (true) {
+      const i = next++;
+      if (i >= items.length) return;
+      out[i] = await fn(items[i], i);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return out;
+}
+
+let activeScan = null;
+
 function approveFolderPath(folderPath) {
   const resolved = assertDirectoryPath(folderPath);
   approvedFolderPaths.add(resolved);
@@ -229,7 +283,7 @@ function createWindow() {
 
 app.whenReady().then(() => {
   createWindow();
-  setupAutoUpdater();
+  if (!E2E) setupAutoUpdater();
   // Auto-start folder monitor if enabled. The folder was explicitly approved
   // by the user when the monitor was set up; re-approve in-memory so the
   // monitor can run without prompting again on each app launch.
@@ -259,6 +313,7 @@ let lastScanAllFiles = [];
 // IPC Handlers
 
 handleTrusted('select-folder', async () => {
+  if (E2E && process.env.STUFFDIVER_E2E_FOLDER) return approveFolderPath(process.env.STUFFDIVER_E2E_FOLDER);
   const result = await dialog.showOpenDialog(mainWindow, {
     properties: ['openDirectory']
   });
@@ -271,6 +326,7 @@ handleTrusted('select-folder', async () => {
 handleTrusted('approve-folder', async (event, folderPath) => {
   const resolved = assertDirectoryPath(folderPath);
   if (approvedFolderPaths.has(resolved)) return true;
+  if (E2E) { approveFolderPath(resolved); return true; }
   if (isDangerousPath(resolved)) {
     if (!(await confirmDangerousScan(resolved))) return false;
     approveFolderPath(resolved);
@@ -290,8 +346,18 @@ handleTrusted('approve-folder', async (event, folderPath) => {
   return true;
 });
 
-handleTrusted('scan-folder', async (event, folderPath) => {
+handleTrusted('cancel-scan', async () => {
+  if (activeScan) activeScan.cancelled = true;
+  return true;
+});
+
+handleTrusted('scan-folder', async (event, folderPath, options) => {
   folderPath = assertApprovedFolder(folderPath);
+  const scanState = { cancelled: false };
+  activeScan = scanState;
+  const isExcluded = buildExcluder(options && options.exclude);
+  let excludedCount = 0;
+  const extStatsMap = new Map();
   const files = [];
   const seen = new Set();
   let count = 0;
@@ -406,7 +472,8 @@ handleTrusted('scan-folder', async (event, folderPath) => {
 
   function recordFile(virtualPath, name, diskSize, logicalSize, mtime, cloudStatus) {
     const ext = path.extname(name).toLowerCase();
-    const rel = path.relative(folderPath, virtualPath);
+    // Always '/'-separated so folder filters and searches behave the same on every OS.
+    const rel = path.relative(folderPath, virtualPath).split(path.sep).join('/');
     const fileObj = {
       path: virtualPath,
       relativePath: rel,
@@ -419,6 +486,9 @@ handleTrusted('scan-folder', async (event, folderPath) => {
     };
     files.push(fileObj);
     batchBuffer.push(fileObj);
+    const extKey = ext || '(none)';
+    const es = extStatsMap.get(extKey);
+    if (es) { es.size += diskSize; es.count++; } else extStatsMap.set(extKey, { ext: extKey, size: diskSize, count: 1 });
     addToTree(rel, diskSize, logicalSize || diskSize, ext, mtime);
     count++;
     if (batchBuffer.length >= 500 || (Date.now() - lastBatchTime) > 250) {
@@ -435,8 +505,10 @@ handleTrusted('scan-folder', async (event, folderPath) => {
   const lockedFiles = [];
   const LOCKED_FILE_CAP = 5000;
 
+  const STAT_CONCURRENCY = 24;
+
   async function walk(dir, depth) {
-    if (depth > 80) return;
+    if (depth > 80 || scanState.cancelled) return;
     let entries;
     try {
       entries = await fs.promises.readdir(dir, { withFileTypes: true });
@@ -444,75 +516,93 @@ handleTrusted('scan-folder', async (event, folderPath) => {
       skipped++;
       return;
     }
+    if (E2E_SCAN_DELAY) await new Promise(r => setTimeout(r, E2E_SCAN_DELAY));
+    const dirEntries = [];
+    const fileEntries = [];
     for (const entry of entries) {
       // Detect iCloud placeholder files: hidden files ending with .icloud
       // e.g. ".Document.pdf.icloud" represents "Document.pdf" stored only in iCloud
       const isICloudPlaceholder = process.platform === 'darwin' &&
         entry.name.startsWith('.') && entry.name.endsWith('.icloud') && entry.name.length > 8;
-
       const fullPath = path.join(dir, entry.name);
-
+      if (isExcluded && isExcluded(fullPath, entry.name)) { excludedCount++; continue; }
       if (!isICloudPlaceholder && entry.isDirectory() && !entry.isSymbolicLink()) {
         if (isPseudoFilesystemPath(fullPath)) continue;
-        // Dedupe by dev:ino so APFS firmlinks / bind mounts don't walk the
-        // same tree twice (e.g. /System/Volumes/Data mirrors /).
-        try {
-          const dirStat = await statForScan(fullPath);
-          if (seen.has(dirStat.id)) continue;
-          seen.add(dirStat.id);
-        } catch (e) {
-          skipped++;
-          continue;
-        }
-        await walk(fullPath, depth + 1);
+        dirEntries.push({ entry, fullPath });
       } else if (entry.isFile() || isICloudPlaceholder) {
-        if (isICloudPlaceholder) {
-          // Strip leading '.' and trailing '.icloud' (7 chars) to recover real filename.
-          // No local disk space used.
-          let mtime = 0;
-          try { mtime = (await statForScan(fullPath)).mtimeMs; } catch (e) { /* keep 0 */ }
-          const name = entry.name.slice(1, -7);
-          cloudOnlyCount++;
-          recordFile(path.join(dir, name), name, 0, 0, mtime, 'icloud-only');
-          continue;
-        }
-        let stat;
-        try {
-          stat = await statForScan(fullPath);
-        } catch (e) {
-          if (process.platform === 'win32' && (e.code === 'EPERM' || e.code === 'EBUSY' || e.code === 'EACCES') &&
-              lockedFiles.length < LOCKED_FILE_CAP) {
-            lockedFiles.push({ fullPath, name: entry.name });
-          } else {
-            skipped++;
-          }
-          continue;
-        }
-        // Only hard-linked files can appear twice; skip tracking the rest to
-        // keep memory flat on multi-million-file scans.
-        if (stat.nlink > 1) {
-          if (seen.has(stat.id)) continue;
-          seen.add(stat.id);
-        }
-        // On Windows, stat.blocks is unreliable — use stat.size (logical bytes) directly.
-        // On macOS/Linux, stat.blocks * 512 gives true on-disk usage (accounts for compression, sparse files, etc.)
-        let diskSize = process.platform === 'win32'
-          ? stat.size
-          : (stat.blocks != null ? stat.blocks * 512 : stat.size);
-        let cloudStatus;
-        // Modern macOS: evicted iCloud files keep their original name but have 0 data blocks
-        if (process.platform === 'darwin' && stat.blocks === 0 && stat.size > 0) {
-          cloudStatus = 'icloud-only';
-          cloudOnlyCount++;
-          diskSize = 0;
-        }
-        recordFile(fullPath, entry.name, diskSize, stat.size, stat.mtimeMs, cloudStatus);
+        fileEntries.push({ entry, fullPath, isICloudPlaceholder });
       }
+    }
+
+    // Stat files in parallel (the OS overlaps the I/O), then record in order.
+    const stats = await mapLimit(fileEntries, STAT_CONCURRENCY, async (f) => {
+      try { return { stat: await statForScan(f.fullPath) }; } catch (e) { return { error: e }; }
+    });
+    for (let i = 0; i < fileEntries.length; i++) {
+      const { entry, fullPath, isICloudPlaceholder } = fileEntries[i];
+      const { stat, error } = stats[i];
+      if (isICloudPlaceholder) {
+        // Strip leading '.' and trailing '.icloud' (7 chars) to recover real filename.
+        // No local disk space used.
+        const name = entry.name.slice(1, -7);
+        cloudOnlyCount++;
+        recordFile(path.join(dir, name), name, 0, 0, stat ? stat.mtimeMs : 0, 'icloud-only');
+        continue;
+      }
+      if (error) {
+        if (process.platform === 'win32' && (error.code === 'EPERM' || error.code === 'EBUSY' || error.code === 'EACCES') &&
+            lockedFiles.length < LOCKED_FILE_CAP) {
+          lockedFiles.push({ fullPath, name: entry.name });
+        } else {
+          skipped++;
+        }
+        continue;
+      }
+      // Only hard-linked files can appear twice; skip tracking the rest to
+      // keep memory flat on multi-million-file scans.
+      if (stat.nlink > 1) {
+        if (seen.has(stat.id)) continue;
+        seen.add(stat.id);
+      }
+      // blocks * 512 is the allocated size on every platform. On Windows libuv
+      // fills it from the NTFS AllocationSize, so cluster rounding, compression
+      // and sparse files are accounted for (small "resident" files that live
+      // inside the MFT report 0).
+      let diskSize = stat.blocks != null ? stat.blocks * 512 : stat.size;
+      let cloudStatus;
+      if (process.platform === 'darwin' && stat.blocks === 0 && stat.size > 0) {
+        // Modern macOS: evicted iCloud files keep their name but have 0 data blocks
+        cloudStatus = 'icloud-only';
+      } else if (process.platform === 'win32' && stat.blocks === 0 && stat.size > 4096) {
+        // Windows: OneDrive / Files-On-Demand placeholders report their full
+        // size but occupy no clusters. Anything this big can't be MFT-resident.
+        cloudStatus = 'icloud-only';
+      }
+      if (cloudStatus) {
+        cloudOnlyCount++;
+        diskSize = 0;
+      }
+      recordFile(fullPath, entry.name, diskSize, stat.size, stat.mtimeMs, cloudStatus);
+    }
+
+    for (const { fullPath } of dirEntries) {
+      if (scanState.cancelled) return;
+      // Dedupe by dev:ino so APFS firmlinks / bind mounts don't walk the
+      // same tree twice (e.g. /System/Volumes/Data mirrors /).
+      try {
+        const dirStat = await statForScan(fullPath);
+        if (seen.has(dirStat.id)) continue;
+        seen.add(dirStat.id);
+      } catch (e) {
+        skipped++;
+        continue;
+      }
+      await walk(fullPath, depth + 1);
     }
   }
 
   await walk(folderPath, 0);
-  if (lockedFiles.length) {
+  if (lockedFiles.length && !scanState.cancelled) {
     const sizes = await statLockedWindowsFiles(lockedFiles.map(f => f.fullPath));
     for (const f of lockedFiles) {
       const info = sizes.get(f.fullPath.toLowerCase());
@@ -544,21 +634,149 @@ handleTrusted('scan-folder', async (event, folderPath) => {
   const totalCloudLogicalSize = files
     .filter(f => f.cloudStatus === 'icloud-only')
     .reduce((s, f) => s + (f.logicalSize || 0), 0);
-  return { files: mergedFiles, totalFiles: files.length, totalSize, totalLogicalSize, totalCloudLogicalSize, skippedDirs: skipped, folderTree, cloudOnlyCount };
+  if (activeScan === scanState) activeScan = null;
+  const extStats = [...extStatsMap.values()].sort((x, y) => y.size - x.size).slice(0, 100);
+  return {
+    files: mergedFiles, totalFiles: files.length, totalSize, totalLogicalSize, totalCloudLogicalSize,
+    skippedDirs: skipped, folderTree, cloudOnlyCount, extStats,
+    cancelled: scanState.cancelled, excludedCount
+  };
+});
+
+// Largest files with a given extension from the full scan (the renderer only
+// holds the top ~500 overall, so extension views are answered here).
+handleTrusted('query-files-by-ext', async (event, ext, limit) => {
+  const key = typeof ext === 'string' ? ext : '';
+  const cap = Math.max(1, Math.min(Number(limit) || 500, 2000));
+  const norm = key === '(none)' ? '' : key.toLowerCase();
+  const out = [];
+  for (const f of lastScanAllFiles) {
+    if ((f.ext || '') === norm) out.push(f);
+  }
+  out.sort((a, b) => b.size - a.size);
+  return out.slice(0, cap);
+});
+
+// Is the process running with elevated rights? (Windows: Administrator;
+// POSIX: root.) Used to explain "inaccessible" counts.
+let elevatedCache = null;
+handleTrusted('is-elevated', async () => {
+  if (elevatedCache !== null) return elevatedCache;
+  if (process.platform !== 'win32') {
+    elevatedCache = typeof process.getuid === 'function' && process.getuid() === 0;
+    return elevatedCache;
+  }
+  try {
+    const { stdout } = await execFileP('powershell.exe', [
+      '-NoProfile', '-NonInteractive', '-Command',
+      '([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)'
+    ], { windowsHide: true });
+    elevatedCache = /true/i.test(stdout);
+  } catch (e) {
+    elevatedCache = false;
+  }
+  return elevatedCache;
+});
+
+// Windows: restart the app with a UAC prompt so protected folders can be read.
+// macOS: open the Full Disk Access pane. Other platforms: no-op.
+handleTrusted('elevate-access', async () => {
+  if (process.platform === 'win32') {
+    const args = app.isPackaged ? [] : [app.getAppPath()];
+    const argList = args.length ? `-ArgumentList '${args[0].replace(/'/g, "''")}'` : '';
+    const exe = process.execPath.replace(/'/g, "''");
+    try {
+      await execFileP('powershell.exe', [
+        '-NoProfile', '-NonInteractive', '-Command',
+        `Start-Process -FilePath '${exe}' ${argList} -Verb RunAs`
+      ], { windowsHide: true });
+      app.quit();
+      return 'relaunching';
+    } catch (e) {
+      return 'cancelled'; // user declined the UAC prompt
+    }
+  }
+  if (process.platform === 'darwin') {
+    await shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles');
+    return 'opened-settings';
+  }
+  return 'unsupported';
+});
+
+// === Smart Cleanup ===
+// Patterns run over the FULL scan list here in the main process (the renderer
+// only holds the ~500 largest files). Paths are matched as '/'-separated and
+// relative to the scanned folder, on every platform. First match wins, so
+// specific patterns come before generic ones.
+const CLEANUP_PATTERNS = [
+  { id: 'recycle', label: 'Recycle Bin', icon: '\u{1F5D1}', re: /^\/\$Recycle\.Bin\//i },
+  { id: 'wintemp', label: 'Windows temp files', icon: '\u{1F550}', re: /(^\/Windows\/Temp\/|\/AppData\/Local\/Temp\/)/i },
+  { id: 'winupdate', label: 'Windows Update downloads', icon: '\u{1FA9F}', re: /^\/Windows\/SoftwareDistribution\/Download\//i },
+  { id: 'crash', label: 'Crash dumps', icon: '\u{1F4A5}', re: /(\/CrashDumps\/|\/Crashpad\/|^\/Windows\/Minidump\/|\/MEMORY\.DMP$|\.dmp$)/i },
+  { id: 'aimodels', label: 'AI model caches (re-downloadable)', icon: '\u{1F9E0}', re: /(\/\.cache\/(huggingface|torch|whisper|lm-studio)\/|\/\.ollama\/models\/|\/\.lmstudio\/models\/)/i },
+  { id: 'pkgcache', label: 'Package manager caches', icon: '\u{1F4E6}', re: /(\/AppData\/Local\/(pip|npm-cache|NuGet|Yarn|pnpm)\/|\/\.nuget\/packages\/|\/\.gradle\/caches\/|\/\.m2\/repository\/|\/\.cargo\/registry\/|\/Library\/Caches\/(pip|Homebrew)\/|\/var\/cache\/apt\/archives\/)/i },
+  { id: 'node_modules', label: 'node_modules', icon: '\u{1F4E6}', re: /\/node_modules\// },
+  { id: 'git', label: '.git directories', icon: '\u{1F500}', re: /\/\.git\// },
+  { id: 'syscache', label: 'System & app caches', icon: '\u{1F5C4}', re: /(\/(cache|\.cache|__pycache__|\.pytest_cache|\.npm|\.yarn|INetCache|GPUCache|Code Cache)\/|\/Library\/Caches\/|\/\.local\/share\/Trash\/|\/\.Trash\/)/i },
+  { id: 'temp', label: 'Temp files', icon: '\u{1F550}', re: /\.(tmp|temp|swp|swo|bak|old)$/i },
+  { id: 'xcode', label: 'Xcode DerivedData', icon: '\u{1F528}', re: /\/DerivedData\// },
+  { id: 'build', label: 'Build artifacts', icon: '\u{1F3D7}', re: /\/(dist|\.next|\.nuxt|target|\.build)\//i },
+  { id: 'logs', label: 'Log files', icon: '\u{1F4DD}', re: /\.log$/i },
+  { id: 'dsstore', label: '.DS_Store files', icon: '\u{1F47B}', re: /\.DS_Store$/ },
+  { id: 'thumbs', label: 'Thumbnails & junk', icon: '\u{1F5D1}', re: /(Thumbs\.db|desktop\.ini|\.Spotlight|\.Trashes|\/\.cache\/thumbnails\/)/i }
+];
+const CLEANUP_PATH_CAP = 20000;
+
+handleTrusted('cleanup-scan', async () => {
+  const cats = CLEANUP_PATTERNS.map(p => ({ id: p.id, label: p.label, icon: p.icon, re: p.re, count: 0, totalSize: 0, paths: [] }));
+  for (const f of lastScanAllFiles) {
+    if (f.cloudStatus === 'icloud-only') continue;
+    const rp = '/' + String(f.relativePath || f.name).replace(/\\/g, '/');
+    for (const c of cats) {
+      if (c.re.test(rp)) {
+        c.count++;
+        c.totalSize += f.size;
+        if (c.paths.length < CLEANUP_PATH_CAP) c.paths.push(f.path);
+        break;
+      }
+    }
+  }
+  return cats.filter(c => c.count > 0).map(({ re, ...rest }) => rest).sort((a, b) => b.totalSize - a.totalSize);
 });
 
 handleTrusted('find-duplicates', async (event) => {
   const MIN_SIZE = 4096;
   const candidates = lastScanAllFiles.filter(f => f.size >= MIN_SIZE && f.cloudStatus !== 'icloud-only');
 
-  async function hashFile(filePath, maxBytes) {
+  // Full-content hash, streamed with a large buffer.
+  function hashFile(filePath) {
     return new Promise((resolve, reject) => {
       const hash = crypto.createHash('sha256');
-      const stream = fs.createReadStream(filePath, maxBytes ? { start: 0, end: maxBytes - 1 } : undefined);
+      const stream = fs.createReadStream(filePath, { highWaterMark: 1024 * 1024 });
       stream.on('data', d => hash.update(d));
       stream.on('end', () => resolve(hash.digest('hex')));
       stream.on('error', reject);
     });
+  }
+
+  // Cheap fingerprint: first and last 64KB. Same-size files that differ almost
+  // always differ at the head or tail, so this avoids most full reads.
+  const SAMPLE = 64 * 1024;
+  async function sampleHash(filePath, size) {
+    const fh = await fs.promises.open(filePath, 'r');
+    try {
+      const hash = crypto.createHash('sha256');
+      const buf = Buffer.alloc(SAMPLE);
+      let r = await fh.read(buf, 0, SAMPLE, 0);
+      hash.update(buf.subarray(0, r.bytesRead));
+      if (size > SAMPLE) {
+        r = await fh.read(buf, 0, SAMPLE, Math.max(SAMPLE, size - SAMPLE));
+        hash.update(buf.subarray(0, r.bytesRead));
+      }
+      return hash.digest('hex');
+    } finally {
+      await fh.close();
+    }
   }
 
   // --- Gold: exact content duplicates ---
@@ -576,35 +794,33 @@ handleTrusted('find-duplicates', async (event) => {
   const totalToHash = sizeGroups.reduce((s, g) => s + g.length, 0);
 
   for (const group of sizeGroups) {
-    // Quick hash: first 8KB
+    // Step 2: sample hash (head + tail), several files at once
+    const samples = await mapLimit(group, 6, async (f) => {
+      try { return await sampleHash(f.path, f.logicalSize); } catch (e) { return null; }
+    });
     const quickMap = new Map();
-    for (const f of group) {
-      try {
-        const qh = await hashFile(f.path, 8192);
-        if (!quickMap.has(qh)) quickMap.set(qh, []);
-        quickMap.get(qh).push(f);
-      } catch (e) { /* skip unreadable */ }
-      hashed++;
-      if (hashed % 20 === 0) {
-        try { event.sender.send('duplicate-progress', { phase: 'hashing', hashed, total: totalToHash }); } catch (e) { /* window closed */ }
-      }
-    }
+    group.forEach((f, i) => {
+      if (samples[i] == null) return;
+      if (!quickMap.has(samples[i])) quickMap.set(samples[i], []);
+      quickMap.get(samples[i]).push(f);
+    });
+    hashed += group.length;
+    try { event.sender.send('duplicate-progress', { phase: 'hashing', hashed, total: totalToHash }); } catch (e) { /* window closed */ }
 
-    // Full hash only where quick hash matched 2+
+    // Step 3: full hash only where the samples matched 2+
     for (const qGroup of quickMap.values()) {
       if (qGroup.length < 2) continue;
+      const fulls = await mapLimit(qGroup, 3, async (f) => {
+        try { return await hashFile(f.path); } catch (e) { return null; }
+      });
       const fullMap = new Map();
-      for (const f of qGroup) {
-        try {
-          const fh = await hashFile(f.path);
-          if (!fullMap.has(fh)) fullMap.set(fh, []);
-          fullMap.get(fh).push(f);
-        } catch (e) { /* skip */ }
-      }
+      qGroup.forEach((f, i) => {
+        if (fulls[i] == null) return;
+        if (!fullMap.has(fulls[i])) fullMap.set(fulls[i], []);
+        fullMap.get(fulls[i]).push(f);
+      });
       for (const fGroup of fullMap.values()) {
-        if (fGroup.length >= 2) {
-          goldGroups.push(fGroup);
-        }
+        if (fGroup.length >= 2) goldGroups.push(fGroup);
       }
     }
   }
@@ -790,7 +1006,7 @@ handleTrusted('delete-files', async (event, filePaths) => {
     return { deleted: 0, deletedPaths: [], error: e.message || 'Invalid file path' };
   }
 
-  const result = await dialog.showMessageBox(mainWindow, {
+  const result = E2E ? { response: 1 } : await dialog.showMessageBox(mainWindow, {
     type: 'warning',
     buttons: ['Cancel', 'Move to Trash'],
     defaultId: 0,
@@ -811,6 +1027,10 @@ handleTrusted('delete-files', async (event, filePaths) => {
       console.error('Failed to trash:', fp, e.message);
     }
   }
+  if (deletedPaths.length) {
+    const gone = new Set(deletedPaths);
+    lastScanAllFiles = lastScanAllFiles.filter(f => !gone.has(f.path));
+  }
   return { deleted: deletedPaths.length, deletedPaths };
 });
 
@@ -824,7 +1044,8 @@ function getCacheDir() {
 
 // Bump when scan results change meaning so stale caches are ignored.
 // v2: exact (bigint) file IDs, locked Windows system files, Linux pseudo-FS skip.
-const SCAN_CACHE_VERSION = 2;
+// v3: allocated sizes on Windows, '/'-separated relative paths, extension stats.
+const SCAN_CACHE_VERSION = 3;
 
 function getCacheKey(folderPath) {
   return crypto.createHash('md5').update(folderPath).digest('hex');
@@ -918,7 +1139,7 @@ function loadSettings() {
   }
 }
 
-const ALLOWED_SETTINGS_KEYS = ['recentFolders', 'theme', 'monitorFolder', 'monitorInterval', 'monitorEnabled', 'lastViewMode'];
+const ALLOWED_SETTINGS_KEYS = ['recentFolders', 'theme', 'monitorFolder', 'monitorInterval', 'monitorEnabled', 'lastViewMode', 'scanExclusions'];
 
 function saveSettings(settings) {
   const existing = loadSettings();
@@ -1119,7 +1340,7 @@ async function quickScanSize(folderPath) {
       } else if (entry.isFile()) {
         try {
           const stat = await fs.promises.stat(fullPath);
-          totalSize += process.platform === 'win32' ? stat.size : (stat.blocks != null ? stat.blocks * 512 : stat.size);
+          totalSize += stat.blocks != null ? stat.blocks * 512 : stat.size;
           fileCount++;
         } catch (e) { /* skip */ }
       }

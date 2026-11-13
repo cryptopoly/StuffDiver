@@ -4044,3 +4044,55 @@ body.light .treemap-breadcrumb {
     display: none;
   }
 }
+
+
+/* === Folder treemap === */
+.fm-container, .fm-leaf { position: absolute; box-sizing: border-box; overflow: hidden; border-radius: 3px; cursor: pointer; }
+.fm-container {
+  background: color-mix(in srgb, var(--fm-color, #64748b) 22%, transparent);
+  border: 1px solid color-mix(in srgb, var(--fm-color, #64748b) 70%, transparent);
+}
+.fm-container:hover { border-color: #fff; }
+.fm-head {
+  height: 16px; line-height: 16px; padding: 0 5px; font-size: 11px; font-weight: 600;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  background: color-mix(in srgb, var(--fm-color, #64748b) 65%, transparent); color: #fff;
+}
+.fm-leaf { padding: 4px 6px; color: #fff; font-size: 11px; }
+.fm-leaf:hover { outline: 2px solid #fff; outline-offset: -2px; z-index: 2; }
+.fm-leaf.free-space-block { cursor: default; }
+.fm-leaf .filename { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.fm-leaf .filesize { opacity: 0.85; }
+
+/* === Scan cancel, banner, chips === */
+.scan-cancel-btn {
+  margin-top: 14px; padding: 6px 18px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.3);
+  background: rgba(0,0,0,0.55); color: #fff; font-size: 13px; cursor: pointer; pointer-events: auto;
+}
+.scan-cancel-btn:hover { background: rgba(220,60,60,0.8); }
+.scan-cancel-btn:disabled { opacity: 0.6; cursor: default; }
+#loading.scanning .scan-cancel-btn { position: absolute; bottom: 36px; left: 50%; transform: translateX(-50%); margin: 0; }
+.access-banner {
+  display: flex; align-items: center; gap: 12px; padding: 6px 16px; font-size: 12.5px;
+  background: rgba(250, 190, 40, 0.14); border-bottom: 1px solid rgba(250, 190, 40, 0.4); color: var(--text, #e5e7eb);
+}
+.access-banner.hidden { display: none; }
+.access-banner span { flex: 1; }
+.access-banner button {
+  border: 1px solid rgba(250,190,40,0.6); background: transparent; color: inherit; border-radius: 6px;
+  padding: 3px 10px; cursor: pointer; font-size: 12px;
+}
+.access-banner button:hover { background: rgba(250,190,40,0.25); }
+.ext-filter-chip {
+  display: inline-block; padding: 1px 8px; border-radius: 10px; cursor: pointer; font-size: 12px;
+  background: rgba(56, 189, 248, 0.18); border: 1px solid rgba(56, 189, 248, 0.5);
+}
+.ext-filter-chip.partial-chip { background: rgba(250,190,40,0.18); border-color: rgba(250,190,40,0.6); }
+.ext-row { cursor: pointer; }
+.ext-row:hover { background: rgba(255,255,255,0.06); }
+.settings-textarea {
+  width: 100%; box-sizing: border-box; font-family: ui-monospace, Consolas, monospace; font-size: 12px;
+  background: var(--bg-input, rgba(255,255,255,0.05)); color: inherit; border: 1px solid rgba(255,255,255,0.15);
+  border-radius: 6px; padding: 6px 8px; resize: vertical;
+}
+.settings-hint { margin-top: 4px; font-size: 11.5px; opacity: 0.7; }

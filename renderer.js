@@ -57,7 +57,7 @@
   let viz, detailPanel, detailName, detailPath, detailSize;
   let actionOpen, actionPreview, actionShow;
   let tooltip, loading, loadingText, statsEl;
-  let btnSelectFolder, btnTreemap, btnPie, btnBubblemap, btnRings, btnDuplicates, folderPathEl;
+  let btnSelectFolder, btnTreemap, btnFoldermap, btnPie, btnBubblemap, btnRings, btnDuplicates, folderPathEl;
   let btnColorAge, btnColorType, btnColorFolder;
   let btnTable, btnHistogram, btnTimeline;
   let collectorItems = []; // files staged for deletion
@@ -65,6 +65,10 @@
   let tagSaveTimer = null;
   const TAG_DEFS = { keep: '#4ade80', reviewed: '#60a5fa', 'delete': '#f87171' };
   let diskSpaceInfo = null;
+  let extStats = [];
+  let extFilter = null; // { ext, files } while viewing one extension
+  let excludedCount = 0;
+  let scanCancelled = false;
   let scanAnimating = false;
   let scanTopFiles = []; // top 200 files by size during animated scan
   let lastAnimRenderTime = 0;
@@ -310,7 +314,7 @@
   ];
 
   function applyFilters() {
-    displayFiles = allFiles.filter(f => {
+    displayFiles = (extFilter ? extFilter.files : allFiles).filter(f => {
       if (cloudFilter === 'local' && f.cloudStatus === 'icloud-only') return false;
       if (cloudFilter === 'online' && f.cloudStatus !== 'icloud-only') return false;
       if (selectedFolderPath && !f.relativePath.startsWith(selectedFolderPath + '/') && f.relativePath !== selectedFolderPath) return false;
@@ -327,6 +331,14 @@
     updateStats();
     renderFolderTree();
     renderVisualization();
+  }
+
+  async function filterByExtension(ext) {
+    let files = [];
+    try { files = await window.api.queryFilesByExt(ext, 500); } catch (e) { /* keep empty */ }
+    extFilter = { ext, files };
+    if (viewMode === 'foldermap' || viewMode === 'rings' || viewMode === 'bubblemap') setViewMode('table');
+    applyFilters();
   }
 
   function normalizeFolderPath(folderPath) {
@@ -569,6 +581,116 @@
     }
   }
 
+  // === Rendering: Folder treemap (nested, WinDirStat-style) ===
+
+  function renderFolderTreemap() {
+    viz.innerHTML = '';
+    const root = bubbleCurrentNode || folderTree;
+    if (!root || !(root.size > 0)) { renderEmpty('No folder data'); return; }
+    const rect = { x: 0, y: 0, w: viz.clientWidth, h: viz.clientHeight };
+    if (rect.w < 10 || rect.h < 10) return;
+
+    const MAX_DEPTH = 4;
+    const HEAD = 16;
+    const PAD = 2;
+    const cells = [];
+
+    const showFree = !selectedFolderPath && diskSpaceInfo && diskSpaceInfo.available > 0 &&
+      isVolumeRootPath(currentFolder || folderPathEl?.textContent || '');
+
+    function layout(node, r, depth) {
+      const kids = Object.values(node.children || {}).filter(c => c.size > 0);
+      const childSum = kids.reduce((sum, c) => sum + c.size, 0);
+      const own = Math.max(0, node.size - childSum);
+      const items = kids.map(c => ({ node: c, size: c.size }));
+      if (own > 0) items.push({ node, size: own, isFiles: true });
+      if (depth === 0 && showFree) items.push({ isFree: true, size: diskSpaceInfo.available });
+      items.sort((a, b) => b.size - a.size);
+      for (const b of computeTreemap(items, r)) {
+        if (b.w < 3 || b.h < 3) continue;
+        const hasKids = b.node && !b.isFiles && !b.isFree && Object.keys(b.node.children || {}).length > 0;
+        if (hasKids && depth < MAX_DEPTH && b.w > 50 && b.h > 40) {
+          cells.push({ b, container: true });
+          layout(b.node, { x: b.x + PAD, y: b.y + HEAD, w: b.w - PAD * 2, h: b.h - HEAD - PAD }, depth + 1);
+        } else {
+          cells.push({ b, container: false });
+        }
+      }
+    }
+    layout(root, rect, 0);
+
+    const topColors = new Map();
+    Object.keys(folderTree.children || {}).forEach((name, i) => topColors.set(name, FOLDER_PALETTE[i % FOLDER_PALETTE.length]));
+    let minM = Infinity, maxM = -Infinity;
+    (function scanAge(n) {
+      if (n.mtime) { if (n.mtime < minM) minM = n.mtime; if (n.mtime > maxM) maxM = n.mtime; }
+      for (const c of Object.values(n.children || {})) scanAge(c);
+    })(folderTree);
+    const ageColor = (mtime) => {
+      if (!mtime || !(maxM > minM)) return '#64748b';
+      const t = Math.min(1, Math.max(0, (mtime - minM) / (maxM - minM)));
+      return `hsl(${(1 - t) * 220 + t * 10}, ${50 + t * 20}%, ${35 + t * 15}%)`;
+    };
+    const nodeColor = (node) => {
+      if (colorMode === 'folder') return topColors.get(String(node.path || '').split('/')[0]) || '#64748b';
+      if (colorMode === 'age') return ageColor(node.mtime);
+      return getFileColor(node.dominantExt && node.dominantExt !== '(none)' ? node.dominantExt : '');
+    };
+
+    for (const { b, container } of cells) {
+      const el = document.createElement('div');
+      const w = Math.max(0, b.w - GAP);
+      const h = Math.max(0, b.h - GAP);
+      el.style.left = (b.x + GAP / 2) + 'px';
+      el.style.top = (b.y + GAP / 2) + 'px';
+      el.style.width = w + 'px';
+      el.style.height = h + 'px';
+
+      if (b.isFree) {
+        el.className = 'fm-leaf free-space-block';
+        if (w > 55 && h > 28) el.innerHTML = `<div class="filename">Free Space</div>${h > 42 ? `<div class="filesize">${formatSize(b.size)}</div>` : ''}`;
+        el.addEventListener('mouseenter', (e) => { tooltip.innerHTML = `<strong>Free space</strong><br><span class="tip-size">${formatSize(b.size)}</span>`; tooltip.style.display = 'block'; moveTooltip(e); });
+      } else {
+        const node = b.node;
+        const name = b.isFiles ? (node === root && !node.path ? '(files in root)' : '(files)') : node.name;
+        el.className = container ? 'fm-container' : 'fm-leaf';
+        el.dataset.folderPath = node.path || '';
+        if (container) {
+          el.style.setProperty('--fm-color', nodeColor(node));
+          if (w > 50) {
+            const head = document.createElement('div');
+            head.className = 'fm-head';
+            head.textContent = `${name}  ${formatSize(b.size)}`;
+            el.appendChild(head);
+          }
+        } else {
+          el.style.backgroundColor = nodeColor(node);
+          if (w > 55 && h > 28) {
+            const nameEl = document.createElement('div');
+            nameEl.className = 'filename';
+            nameEl.textContent = name;
+            el.appendChild(nameEl);
+            if (h > 42) {
+              const sizeEl = document.createElement('div');
+              sizeEl.className = 'filesize';
+              sizeEl.textContent = formatSize(b.size);
+              el.appendChild(sizeEl);
+            }
+          }
+        }
+        el.addEventListener('click', () => { if (node.path) selectFolder(node.path); });
+        el.addEventListener('mouseenter', (e) => {
+          tooltip.innerHTML = `<strong>${escHtml(name)}</strong><br><span class="tip-path">${escHtml(node.path || '(root)')}</span><br><span class="tip-size">${formatSize(b.size)}</span> <span class="tip-path">&middot; ${(node.fileCount || 0).toLocaleString()} files in folder tree</span>`;
+          tooltip.style.display = 'block';
+          moveTooltip(e);
+        });
+      }
+      el.addEventListener('mousemove', moveTooltip);
+      el.addEventListener('mouseleave', hideTooltip);
+      viz.appendChild(el);
+    }
+  }
+
   // === Rendering: Pie Chart ===
 
   function renderPieChart() {
@@ -788,7 +910,7 @@
       if (file.cloudStatus === 'icloud-only') {
         const cloudIcon = document.createElement('span');
         cloudIcon.className = 'cloud-icon';
-        cloudIcon.title = 'iCloud only — not on your local drive';
+        cloudIcon.title = 'Cloud only — not on your local drive';
         cloudIcon.textContent = '☁';
         tdName.appendChild(cloudIcon);
       }
@@ -802,7 +924,7 @@
       const tdSize = document.createElement('td');
       tdSize.className = 'td-size';
       tdSize.textContent = file.cloudStatus === 'icloud-only'
-        ? (file.logicalSize ? '☁ ' + formatSize(file.logicalSize) : '☁ iCloud')
+        ? (file.logicalSize ? '☁ ' + formatSize(file.logicalSize) : '☁ Cloud')
         : formatSize(file.size);
 
       const tdMtime = document.createElement('td');
@@ -1193,7 +1315,7 @@
     bubbleCurrentNode = node;
     // Sync folder filter with bubble navigation
     selectedFolderPath = pathSegments.length ? pathSegments.join('/') : null;
-    displayFiles = allFiles.filter(f => {
+    displayFiles = (extFilter ? extFilter.files : allFiles).filter(f => {
       if (cloudFilter === 'local' && f.cloudStatus === 'icloud-only') return false;
       if (cloudFilter === 'online' && f.cloudStatus !== 'icloud-only') return false;
       if (selectedFolderPath && !f.relativePath.startsWith(selectedFolderPath + '/') && f.relativePath !== selectedFolderPath) return false;
@@ -2739,7 +2861,7 @@
     const query = searchInput ? searchInput.value : '';
     const expr = parseSearchExpression(query);
 
-    displayFiles = allFiles.filter(f => {
+    displayFiles = (extFilter ? extFilter.files : allFiles).filter(f => {
       if (cloudFilter === 'local' && f.cloudStatus === 'icloud-only') return false;
       if (cloudFilter === 'online' && f.cloudStatus !== 'icloud-only') return false;
       if (selectedFolderPath && !f.relativePath.startsWith(selectedFolderPath + '/') && f.relativePath !== selectedFolderPath) return false;
@@ -2769,6 +2891,36 @@
 
   // === Rendering: Common ===
 
+  async function updateAccessBanner() {
+    const el = document.getElementById('access-banner');
+    if (!el) return;
+    if (!skippedDirs) { el.classList.add('hidden'); el.innerHTML = ''; return; }
+    let elevated = false;
+    try { elevated = await window.api.isElevated(); } catch (e) { /* assume not */ }
+    const n = skippedDirs.toLocaleString();
+    const platform = window.api.platform;
+    let msg;
+    let action = '';
+    if (elevated) {
+      msg = `${n} items couldn't be read (in use, or protected by the system).`;
+    } else if (platform === 'win32') {
+      msg = `${n} items couldn't be read. Restart as administrator to include protected system folders.`;
+      action = 'Restart as admin';
+    } else if (platform === 'darwin') {
+      msg = `${n} items couldn't be read. Grant Stuff Diver Full Disk Access to include protected folders.`;
+      action = 'Open Privacy Settings';
+    } else {
+      msg = `${n} items need elevated permissions and aren't counted.`;
+    }
+    el.innerHTML = `<span id="access-msg">${escHtml(msg)}</span>` +
+      (action ? `<button id="access-action">${escHtml(action)}</button>` : '') +
+      '<button id="access-dismiss" title="Dismiss">&times;</button>';
+    el.classList.remove('hidden');
+    const actionBtn = document.getElementById('access-action');
+    if (actionBtn) actionBtn.addEventListener('click', () => window.api.elevateAccess());
+    document.getElementById('access-dismiss').addEventListener('click', () => el.classList.add('hidden'));
+  }
+
   function updateToolbarState() {
     const hasData = allFiles.length > 0;
     document.getElementById('btn-export').disabled = !hasData;
@@ -2778,9 +2930,13 @@
     document.getElementById('view-duplicates').disabled = !hasData;
   }
 
+  let breadcrumbEl = null;
+
   function updateTreemapBreadcrumb() {
-    const bc = document.getElementById('treemap-breadcrumb');
+    if (!breadcrumbEl) breadcrumbEl = document.getElementById('treemap-breadcrumb');
+    const bc = breadcrumbEl;
     if (!bc) return;
+    if (!bc.isConnected) viz.appendChild(bc);
     if (!selectedFolderPath || viewMode === 'bubblemap' || viewMode === 'rings') {
       bc.classList.add('hidden');
       return;
@@ -2810,7 +2966,14 @@
     }
   }
 
+  // Every renderer clears #visualization (which also holds the breadcrumb), so
+  // the breadcrumb is refreshed and re-attached after each render.
   function renderVisualization() {
+    renderVisualizationInner();
+    updateTreemapBreadcrumb();
+  }
+
+  function renderVisualizationInner() {
     if (viewMode !== 'bubblemap' && viewMode !== 'rings') {
       bubbleBreadcrumb.classList.add('hidden');
     }
@@ -2825,6 +2988,10 @@
     }
     if (viewMode === 'rings') {
       renderRingsChart();
+      return;
+    }
+    if (viewMode === 'foldermap') {
+      renderFolderTreemap();
       return;
     }
     if (!displayFiles.length) return;
@@ -2878,12 +3045,23 @@
       }
     }
 
+    let freeLabel = '';
+    if (diskSpaceInfo && diskSpaceInfo.total > 0) {
+      freeLabel = `<span class="stat-free" title="Free space on the drive that holds this folder">Free: <span class="stat-value">${formatSize(diskSpaceInfo.available)} of ${formatSize(diskSpaceInfo.total)}</span></span>`;
+    }
+    const extChip = extFilter ? `<span class="ext-filter-chip" id="ext-filter-chip" title="Click to show all files again">Only ${escHtml(extFilter.ext)} &times;</span>` : '';
+    const partialChip = scanCancelled ? `<span class="ext-filter-chip partial-chip" title="The scan was cancelled, so totals are incomplete">Partial scan</span>` : '';
+    const excludedLabel = excludedCount ? `<span title="Skipped because of your exclusion list">Excluded: <span class="stat-value">${excludedCount.toLocaleString()}</span></span>` : '';
+
     statsEl.innerHTML = `
       <span>Files: <span class="stat-value">${totalFiles.toLocaleString()}</span></span>
       ${sizeLabel}
       ${driveUsageLabel}
+      ${freeLabel}
       <span>Showing top: <span class="stat-value">${showingCount.toLocaleString()}</span></span>
-      ${cloudOnlyCount > 0 ? `<span class="cloud-stat" title="Files stored in iCloud only — not on your local drive">&#9729; iCloud only: <span class="stat-value">${cloudOnlyCount.toLocaleString()}</span></span>` : ''}
+      ${cloudOnlyCount > 0 ? `<span class="cloud-stat" title="Files stored in Cloud only — not on your local drive">&#9729; Cloud only: <span class="stat-value">${cloudOnlyCount.toLocaleString()}</span></span>` : ''}
+      ${excludedLabel}
+      ${extChip}${partialChip}
       ${skippedDirs ? `<span>Inaccessible: <span class="stat-value">${skippedDirs.toLocaleString()}</span></span>` : ''}
       ${cacheTimestamp ? `<span class="cache-indicator">Cached: <span class="stat-value">${formatRelativeDate(cacheTimestamp)}</span></span>` : ''}
       ${displayFiles.length ? '<button id="stats-toggle" class="stats-toggle-btn">' + (statsSummaryOpen ? 'Hide Summary' : 'Summary') + '</button>' : ''}
@@ -2974,11 +3152,24 @@
       }
     }
 
+    let extSectionHtml = '';
+    if (extStats.length) {
+      const extMax = extStats[0].size || 1;
+      const rows = extStats.slice(0, 12).map(e => `<div class="summary-bar-row ext-row" data-ext="${escHtml(e.ext)}" title="Show the largest ${escHtml(e.ext)} files">
+        <span class="summary-bar-label">${escHtml(e.ext)}</span>
+        <div class="summary-bar-track"><div class="summary-bar-fill" style="width:${(e.size / extMax) * 100}%;background:${getFileColor(e.ext)}"></div></div>
+        <span class="summary-bar-value">${formatSize(e.size)}</span>
+        <span class="summary-bar-count">${e.count.toLocaleString()}</span>
+      </div>`).join('');
+      extSectionHtml = `<div class="summary-section" id="ext-section"><div class="summary-heading">File extensions (whole scan)</div>${rows}</div>`;
+    }
+
     statsSummaryEl.innerHTML = `
       <div class="summary-section">
         <div class="summary-heading">Type Breakdown</div>
         ${typeHtml}
       </div>
+      ${extSectionHtml}
       <div class="summary-section summary-details">
         <div class="summary-stat"><span class="summary-stat-label">Average file size</span><span class="summary-stat-value">${formatSize(avgSize)}</span></div>
         ${oldest ? `<div class="summary-stat"><span class="summary-stat-label">Oldest file</span><span class="summary-stat-value" title="${oldest.name}">${formatRelativeDate(oldest.mtime)} &mdash; ${oldest.name.length > 30 ? oldest.name.slice(0, 30) + '...' : oldest.name}</span></div>` : ''}
@@ -2988,6 +3179,10 @@
         ${ageWarningHtml}
       </div>
     `;
+
+    statsSummaryEl.querySelectorAll('.ext-row').forEach(row => {
+      row.addEventListener('click', () => filterByExtension(row.dataset.ext));
+    });
 
     // Wire up age warning click
     const ageBtn = document.getElementById('age-warning-btn');
@@ -3036,7 +3231,7 @@
       detailPath.textContent = selectedFile.relativePath;
       detailPath.title = selectedFile.path;
       detailSize.textContent = selectedFile.cloudStatus === 'icloud-only'
-        ? '☁ ' + (selectedFile.logicalSize ? formatSize(selectedFile.logicalSize) + ' (iCloud only)' : 'iCloud only — not on local drive')
+        ? '☁ ' + (selectedFile.logicalSize ? formatSize(selectedFile.logicalSize) + ' (cloud only)' : 'Cloud only — not on local drive')
         : (selectedFile.logicalSize && selectedFile.logicalSize !== selectedFile.size
           ? `${formatSize(selectedFile.size)} on disk (${formatSize(selectedFile.logicalSize)} logical)`
           : formatSize(selectedFile.size));
@@ -3055,7 +3250,7 @@
   function showTooltip(e, file) {
     let sizeInfo;
     if (file.cloudStatus === 'icloud-only') {
-      sizeInfo = `<span class="tip-cloud">☁ iCloud only — not on local drive</span>`;
+      sizeInfo = `<span class="tip-cloud">☁ Cloud only — not on local drive</span>`;
     } else if (file.logicalSize && file.logicalSize !== file.size) {
       sizeInfo = `<span class="tip-size">${formatSize(file.size)} on disk</span> <span class="tip-path">(${formatSize(file.logicalSize)} logical)</span>`;
     } else {
@@ -3099,6 +3294,10 @@
     cloudOnlyCount = result.cloudOnlyCount || 0;
     totalLogicalSize = result.totalLogicalSize || result.totalSize;
     totalCloudLogicalSize = result.totalCloudLogicalSize || 0;
+    extStats = result.extStats || [];
+    extFilter = null;
+    excludedCount = result.excludedCount || 0;
+    scanCancelled = !!result.cancelled;
     cloudFilter = 'all';
     const cloudFilterEl = document.getElementById('cloud-filter');
     if (cloudFilterEl) cloudFilterEl.value = 'all';
@@ -3130,6 +3329,7 @@
       }).catch(() => {});
     }
     updateStats();
+    updateAccessBanner();
     if (folderTree) {
       folderPanel.classList.remove('hidden');
       renderFolderTree();
@@ -3257,12 +3457,16 @@
     });
 
     try {
-      const result = await window.api.scanFolder(folder);
+      const cancelBtn = document.getElementById('scan-cancel');
+      if (cancelBtn) { cancelBtn.disabled = false; cancelBtn.textContent = 'Cancel scan'; }
+      let exclude = [];
+      try { exclude = (await window.api.loadSettings()).scanExclusions || []; } catch (e) { /* none */ }
+      const result = await window.api.scanFolder(folder, { exclude });
       scanAnimating = false;
       window.api.removeScanBatchListeners();
       loading.classList.remove('scanning');
       loadScanResult(result);
-      window.api.saveCache(folder, result);
+      if (!result.cancelled) window.api.saveCache(folder, result);
     } catch (err) {
       scanAnimating = false;
       window.api.removeScanBatchListeners();
@@ -3284,6 +3488,7 @@
       window.api.saveSettings({ lastViewMode: mode });
     }
     btnTreemap.classList.toggle('active', viewMode === 'treemap');
+    btnFoldermap.classList.toggle('active', viewMode === 'foldermap');
     btnPie.classList.toggle('active', viewMode === 'pie');
     btnBubblemap.classList.toggle('active', viewMode === 'bubblemap');
     btnRings.classList.toggle('active', viewMode === 'rings');
@@ -3314,7 +3519,7 @@
       if (fhDate) fhDate.textContent = 'Modified';
       renderFolderTree();
     }
-    if ((viewMode === 'bubblemap' || viewMode === 'rings') && !bubbleCurrentNode && folderTree) {
+    if ((viewMode === 'bubblemap' || viewMode === 'rings' || viewMode === 'foldermap') && !bubbleCurrentNode && folderTree) {
       bubblePath = [];
       bubbleCurrentNode = folderTree;
     }
@@ -3486,44 +3691,27 @@
 
   // === Feature: Smart Cleanup Wizard ===
 
-  const CLEANUP_PATTERNS = [
-    { id: 'node_modules', label: 'node_modules', match: function(p) { return /\/node_modules\//.test(p); }, icon: '📦' },
-    { id: 'git', label: '.git directories', match: function(p) { return /\/\.git\//.test(p); }, icon: '🔀' },
-    { id: 'cache', label: 'Caches', match: function(p) { return /\/(cache|\.cache|__pycache__|\.pytest_cache|\.npm|\.yarn)\//i.test(p); }, icon: '🗄' },
-    { id: 'temp', label: 'Temp files', match: function(p) { return /\.(tmp|temp|swp|swo|bak)$/i.test(p); }, icon: '🕐' },
-    { id: 'xcode', label: 'Xcode DerivedData', match: function(p) { return /\/DerivedData\//.test(p); }, icon: '🔨' },
-    { id: 'build', label: 'Build artifacts', match: function(p) { return /\/(dist|\.next|\.nuxt|target|\.build)\//i.test(p); }, icon: '🏗' },
-    { id: 'logs', label: 'Log files', match: function(p) { return /\.log$/i.test(p); }, icon: '📝' },
-    { id: 'dsstore', label: '.DS_Store files', match: function(p) { return /\.DS_Store$/.test(p); }, icon: '👻' },
-    { id: 'thumbs', label: 'Thumbnails & junk', match: function(p) { return /(Thumbs\.db|desktop\.ini|\.Spotlight|\.Trashes)/i.test(p); }, icon: '🗑' }
-  ];
-
-  function openCleanupWizard() {
+  async function openCleanupWizard() {
     if (!allFiles.length) { alert('Please scan a folder first.'); return; }
     const overlay = document.getElementById('cleanup-overlay');
     overlay.classList.remove('hidden');
-
-    const categories = CLEANUP_PATTERNS.map(function(p) { return { id: p.id, label: p.label, icon: p.icon, match: p.match, files: [], totalSize: 0 }; });
-    for (const f of allFiles) {
-      const rp = '/' + (f.relativePath || f.name);
-      for (const cat of categories) {
-        if (cat.match(rp)) { cat.files.push(f); cat.totalSize += f.size; break; }
-      }
-    }
-
-    const found = categories.filter(function(c) { return c.files.length > 0; }).sort(function(a, b) { return b.totalSize - a.totalSize; });
     const body = document.getElementById('cleanup-body');
+    body.innerHTML = '<div class="cleanup-empty">Looking for reclaimable files...</div>';
+
+    // Matching runs in the main process over the full scan, not just the top files.
+    let found = [];
+    try { found = await window.api.cleanupScan(); } catch (e) { found = []; }
 
     if (!found.length) {
       body.innerHTML = '<div class="cleanup-empty">No reclaimable patterns found. Your folder looks clean!</div>';
       return;
     }
 
-    const grandTotal = found.reduce(function(s, c) { return s + c.totalSize; }, 0);
+    const grandTotal = found.reduce(function(sum, c) { return sum + c.totalSize; }, 0);
     let html = '<div class="cleanup-total"><span class="cleanup-total-label">Total reclaimable space</span><span class="cleanup-total-size">' + formatSize(grandTotal) + '</span></div>';
 
     for (const cat of found) {
-      html += '<div class="cleanup-category"><input type="checkbox" class="cleanup-check" data-id="' + cat.id + '" checked><span class="cleanup-icon">' + cat.icon + '</span><div class="cleanup-info"><div class="cleanup-name">' + cat.label + '</div><div class="cleanup-detail">' + cat.files.length.toLocaleString() + ' files</div></div><span class="cleanup-size">' + formatSize(cat.totalSize) + '</span></div>';
+      html += '<div class="cleanup-category"><input type="checkbox" class="cleanup-check" data-id="' + escHtml(cat.id) + '" checked><span class="cleanup-icon">' + cat.icon + '</span><div class="cleanup-info"><div class="cleanup-name">' + escHtml(cat.label) + '</div><div class="cleanup-detail">' + cat.count.toLocaleString() + ' files</div></div><span class="cleanup-size">' + formatSize(cat.totalSize) + '</span></div>';
     }
     html += '<div class="cleanup-actions"><button class="cleanup-btn-clean" id="cleanup-execute">Clean Selected</button></div>';
     body.innerHTML = html;
@@ -3533,7 +3721,7 @@
       const selectedIds = new Set([...checks].map(function(c) { return c.dataset.id; }));
       const filesToDelete = [];
       for (const cat of found) {
-        if (selectedIds.has(cat.id)) filesToDelete.push(...cat.files.map(function(f) { return f.path; }));
+        if (selectedIds.has(cat.id)) filesToDelete.push(...cat.paths);
       }
       if (filesToDelete.length === 0) return;
       const result = await window.api.deleteFiles(filesToDelete);
@@ -3707,6 +3895,8 @@
       entries: [
         { name: 'Treemap', desc: 'Rectangles sized by file size. The bigger the block, the bigger the file. Hover for details, click to select. Includes a hatched <strong>Free Space</strong> block showing available disk space for context.' },
         { name: 'Live scan animation', desc: 'When scanning a new folder, the treemap builds in real-time as files are discovered — you can watch the largest files appear and grow. A progress bar shows scan activity.' },
+        { name: 'Folders view', desc: 'A nested treemap of your <strong>folders</strong> (like WinDirStat): big rectangles are folders, smaller ones inside are their subfolders and files. Click a folder to zoom into it; use the breadcrumb or folder tree to zoom back out. On a whole-drive scan a Free Space block shows what is left.' },
+        { name: 'File extensions panel', desc: 'Open <strong>Summary</strong> to see which extensions use the most space across the whole scan. Click one to list its largest files; click the blue chip in the stats bar to clear it.' },
         { name: 'Treemap breadcrumbs', desc: 'When filtering to a subfolder, a breadcrumb trail appears at the top of the treemap. Click any segment to navigate back up the folder path.' },
         { name: 'Rings', desc: 'Concentric rings showing folder hierarchy. Click a ring segment to drill into that folder, click the centre or press <span class="help-kbd">Esc</span> to go back up.' },
         { name: 'Pie Chart', desc: 'Classic pie chart of the largest files. The legend shows every slice — click a legend item to select that file.' },
@@ -3780,6 +3970,9 @@
       category: 'Tools',
       icon: '&#128736;',
       entries: [
+        { name: 'Cancel a scan', desc: 'Click <strong>Cancel scan</strong> while scanning to stop early. You keep what was found so far, marked as a <em>Partial scan</em>.' },
+        { name: 'Scan exclusions', desc: 'In <strong>Settings</strong>, list names (node_modules), patterns (*.tmp) or full paths to skip on every scan. Excluded items are counted in the stats bar.' },
+        { name: 'Protected folders', desc: 'When some folders cannot be read, a banner explains why. On Windows it offers <strong>Restart as admin</strong>; on macOS it opens Full Disk Access settings.' },
         { name: 'Smart Cleanup', desc: 'Click the <strong>&#128736; Tools</strong> icon &rarr; <strong>Smart Cleanup</strong> to scan for reclaimable space: node_modules, .git directories, caches, temp files, build artifacts, logs, .DS_Store, and more. Check categories and clean with one click.' },
         { name: 'Storage Forecast', desc: 'Click <strong>&#128736; Tools</strong> &rarr; <strong>Storage Forecast</strong> to see a chart of your disk usage over time with a projected growth line. Shows estimated days until your drive is full.' },
         { name: 'Watch Folder', desc: 'Click <strong>&#128736; Tools</strong> &rarr; <strong>Watch Folder</strong> to monitor a folder for growth. Set a check interval (6h, daily, weekly) and get system notifications when significant growth is detected. A tray icon keeps the app running in the background.' },
@@ -4132,7 +4325,8 @@
     overlay.classList.remove('hidden');
     const version = await window.api.getAppVersion();
     document.getElementById('settings-version').textContent = 'v' + version;
-    await window.api.loadSettings();
+    const loaded = await window.api.loadSettings();
+    document.getElementById('settings-exclusions').value = (loaded.scanExclusions || []).join('\n');
     document.getElementById('settings-update-status').textContent = '';
     document.getElementById('settings-update-result').classList.add('hidden');
     document.getElementById('settings-download-progress').classList.add('hidden');
@@ -4155,7 +4349,9 @@
   }
 
   async function saveSettingsFromModal() {
-    const result = await window.api.saveSettings({});
+    const exclusions = document.getElementById('settings-exclusions').value
+      .split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+    const result = await window.api.saveSettings({ scanExclusions: exclusions });
     const statusEl = document.getElementById('settings-save-status');
     statusEl.textContent = result ? 'Saved!' : 'Error saving';
     statusEl.style.color = result ? '#4caf50' : '#f44336';
@@ -4412,6 +4608,7 @@
     statsEl = document.getElementById('stats');
     btnSelectFolder = document.getElementById('select-folder');
     btnTreemap = document.getElementById('view-treemap');
+    btnFoldermap = document.getElementById('view-foldermap');
     btnPie = document.getElementById('view-pie');
     btnBubblemap = document.getElementById('view-bubblemap');
     btnDuplicates = document.getElementById('view-duplicates');
@@ -4461,6 +4658,15 @@
     btnSelectFolder.addEventListener('click', handleSelectFolder);
     document.getElementById('empty-state-btn').addEventListener('click', handleSelectFolder);
     btnTreemap.addEventListener('click', () => setViewMode('treemap'));
+    btnFoldermap.addEventListener('click', () => setViewMode('foldermap'));
+    document.getElementById('scan-cancel').addEventListener('click', (e) => {
+      e.target.disabled = true;
+      e.target.textContent = 'Cancelling...';
+      window.api.cancelScan();
+    });
+    statsEl.addEventListener('click', (e) => {
+      if (e.target.closest('#ext-filter-chip')) { extFilter = null; applyFilters(); }
+    });
     btnPie.addEventListener('click', () => setViewMode('pie'));
     btnBubblemap.addEventListener('click', () => setViewMode('bubblemap'));
     btnRings.addEventListener('click', () => setViewMode('rings'));
@@ -4706,6 +4912,7 @@
         viewMode = saved;
         lastChartMode = saved;
         btnTreemap.classList.toggle('active', saved === 'treemap');
+        btnFoldermap.classList.toggle('active', saved === 'foldermap');
         btnPie.classList.toggle('active', saved === 'pie');
         btnBubblemap.classList.toggle('active', saved === 'bubblemap');
         btnRings.classList.toggle('active', saved === 'rings');

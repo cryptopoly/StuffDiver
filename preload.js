@@ -3,7 +3,12 @@ const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('api', {
   selectFolder: () => ipcRenderer.invoke('select-folder'),
   approveFolder: (folderPath) => ipcRenderer.invoke('approve-folder', folderPath),
-  scanFolder: (folderPath) => ipcRenderer.invoke('scan-folder', folderPath),
+  scanFolder: (folderPath, options) => ipcRenderer.invoke('scan-folder', folderPath, options),
+  cancelScan: () => ipcRenderer.invoke('cancel-scan'),
+  queryFilesByExt: (ext, limit) => ipcRenderer.invoke('query-files-by-ext', ext, limit),
+  cleanupScan: () => ipcRenderer.invoke('cleanup-scan'),
+  isElevated: () => ipcRenderer.invoke('is-elevated'),
+  elevateAccess: () => ipcRenderer.invoke('elevate-access'),
   openFile: (filePath) => ipcRenderer.invoke('open-file', filePath),
   showInFolder: (filePath) => ipcRenderer.invoke('show-in-folder', filePath),
   previewFile: (filePath) => ipcRenderer.invoke('preview-file', filePath),

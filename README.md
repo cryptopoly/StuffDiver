@@ -10,8 +10,8 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.4.2-blue" alt="Version">
-  <img src="https://img.shields.io/badge/electron-35-teal" alt="Electron">
+  <img src="https://img.shields.io/badge/version-0.4.5-blue" alt="Version">
+  <img src="https://img.shields.io/badge/electron-41-teal" alt="Electron">
   <img src="https://img.shields.io/badge/platforms-macOS%20%7C%20Windows%20%7C%20Linux-green" alt="Platforms">
   <img src="https://img.shields.io/badge/license-MIT-yellow" alt="License">
   <br>
@@ -22,16 +22,17 @@
 
 ## What is Stuff Diver?
 
-Stuff Diver is a desktop app that helps you understand where your disk space is going. Select any folder and instantly see its contents brought to life through seven interactive visualisation modes, find duplicate files wasting space, and clean up with intelligent pattern-based tools.
+Stuff Diver is a desktop app that helps you understand where your disk space is going. Select any folder and instantly see its contents brought to life through eight interactive visualisation modes, find duplicate files wasting space, and clean up with intelligent pattern-based tools.
 
 ## Features
 
-### 7 Visualisation Modes
+### 8 Visualisation Modes
 
 | View | Description |
 |------|-------------|
 | **Rings** | Concentric rings showing folder hierarchy at a glance |
-| **Treemap** | Space-filling rectangles sized by file/folder size |
+| **Treemap** | Space-filling rectangles sized by file size, with a Free Space block |
+| **Folders** | Nested, WinDirStat-style treemap of folders; click to zoom in |
 | **Pie Chart** | Circular breakdown of top files |
 | **Bubbles** | Interactive circle packing with drill-down navigation |
 | **Table** | Sortable list with full file details |
@@ -73,7 +74,19 @@ Compares current and previous scans to project growth trends -- daily/monthly ra
 
 Background monitoring with configurable intervals (6h / daily / weekly). Get system notifications when a folder grows significantly. Runs in the system tray when minimised.
 
+### Accurate on every platform
+
+- Windows: allocated (on-disk) sizes, pagefile/hiberfil/swapfile included, OneDrive placeholders detected, hard links counted once
+- Exact 64-bit file IDs, so no folders are skipped as false duplicates
+- Free space and drive usage read from the OS (Windows, macOS, Linux)
+- Linux: `/proc`, `/sys`, `/dev`, `/run` skipped
+- Protected folders: banner with *Restart as admin* (Windows) or Full Disk Access shortcut (macOS)
+
 ### More
+
+- **Cancel scans** -- stop a long scan and keep the partial result
+- **Scan exclusions** -- skip names, `*` patterns or full paths (Settings)
+- **File extensions panel** -- space per extension across the whole scan; click to list the largest files
 
 - **Cloud file detection** -- identifies iCloud placeholders and online-only files
 - **Cloud filter** -- show All Files, Local Only, or Online Only
@@ -106,6 +119,14 @@ npm install
 
 ```bash
 npm start
+```
+
+### Test
+
+End-to-end tests drive the real Electron app with Playwright:
+
+```bash
+npm test
 ```
 
 ### Build

@@ -40,6 +40,7 @@
         <span class="toolbar-label">View</span>
         <div class="view-toggle">
           <button id="view-treemap">Treemap</button>
+          <button id="view-foldermap">Folders</button>
           <button id="view-rings" class="active">Rings</button>
           <button id="view-pie">Pie Chart</button>
           <button id="view-bubblemap">Bubbles</button>
@@ -83,6 +84,7 @@
   </header>
 
   <div id="stats" class="hidden"></div>
+  <div id="access-banner" class="access-banner hidden"></div>
   <div id="stats-summary" class="hidden"></div>
   <div id="filter-bar" class="hidden"></div>
   <div id="bubble-breadcrumb" class="hidden">
@@ -139,6 +141,11 @@
               <button id="settings-support-paypal" class="settings-btn-secondary">Donate with PayPal</button>
             </div>
           </div>
+        </div>
+        <div class="settings-section">
+          <label class="settings-label" for="settings-exclusions">Scan exclusions</label>
+          <textarea id="settings-exclusions" class="settings-textarea" rows="4" spellcheck="false" placeholder="One per line, e.g.&#10;node_modules&#10;*.tmp&#10;D:\Backups"></textarea>
+          <div class="settings-hint">A name or <code>*</code> pattern skips matching files and folders anywhere. A full path skips that folder. Applies to the next scan.</div>
         </div>
         <div class="settings-section settings-save-row">
           <button id="settings-save" class="settings-btn-primary">Save Settings</button>
@@ -244,6 +251,7 @@
       <div id="scan-progress-fill" class="scan-progress-fill"></div>
     </div>
     <p id="loading-text">Diving in...</p>
+    <button id="scan-cancel" class="scan-cancel-btn">Cancel scan</button>
   </div>
 
   <div id="tooltip"></div>
