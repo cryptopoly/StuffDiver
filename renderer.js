@@ -2910,7 +2910,7 @@
       msg = `${n} items couldn't be read. Grant Stuff Diver Full Disk Access to include protected folders.`;
       action = 'Open Privacy Settings';
     } else {
-      msg = `${n} items need elevated permissions and aren't counted.`;
+      msg = `${n} items couldn't be read. They need elevated permissions and aren't counted.`;
     }
     el.innerHTML = `<span id="access-msg">${escHtml(msg)}</span>` +
       (action ? `<button id="access-action">${escHtml(action)}</button>` : '') +
