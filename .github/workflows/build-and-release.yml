@@ -83,3 +83,24 @@ jobs:
           path: |
             dist/*.AppImage
             dist/*.deb
+
+  release-notes:
+    needs: [build-macos, build-windows, build-linux]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set release notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          # Use the curated notes only if they are for this version; otherwise
+          # fall back to GitHub's auto-generated notes (commit/PR titles).
+          if [ -f RELEASE_NOTES.md ] && head -n 1 RELEASE_NOTES.md | grep -q "$VERSION"; then
+            gh release edit "$GITHUB_REF_NAME" --notes-file RELEASE_NOTES.md
+          else
+            gh api "repos/${GITHUB_REPOSITORY}/releases/generate-notes" -f tag_name="$GITHUB_REF_NAME" --jq .body > generated-notes.md
+            gh release edit "$GITHUB_REF_NAME" --notes-file generated-notes.md
+          fi
