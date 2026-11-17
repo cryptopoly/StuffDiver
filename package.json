@@ -94,6 +94,8 @@
     },
     "files": [
       "main.js",
+      "scanner.js",
+      "cli.js",
       "preload.js",
       "index.html",
       "styles.css",
