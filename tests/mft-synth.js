@@ -53,7 +53,7 @@ function fileName(parent, parentSeq, name, ns = 1) {
 }
 const reparse = (tag) => { const c = Buffer.alloc(8); c.writeUInt32LE(tag, 0); return attrResident(0xC0, c); };
 
-function record({ seq = 1, dir = false, inUse = true, base = 0, attrs = [], corrupt = false }) {
+function record({ seq = 1, dir = false, inUse = true, base = 0, baseSeq = 0, attrs = [], corrupt = false }) {
   const b = Buffer.alloc(FRS);
   b.write('FILE', 0, 'latin1');
   const usaCount = FRS / 512 + 1;
@@ -61,7 +61,7 @@ function record({ seq = 1, dir = false, inUse = true, base = 0, attrs = [], corr
   b.writeUInt16LE(seq, 0x10);
   const first = 0x38;
   b.writeUInt16LE(first, 0x14); b.writeUInt16LE((inUse ? 1 : 0) | (dir ? 2 : 0), 0x16);
-  b.writeUInt32LE(FRS, 0x1C); u64(b, 0x20, base);
+  b.writeUInt32LE(FRS, 0x1C); b.writeUInt32LE(base, 0x20); b.writeUInt16LE(baseSeq, 0x26);
   let p = first;
   for (const a of attrs) { a.copy(b, p); p += a.length; }
   b.writeUInt32LE(0xFFFFFFFF, p);

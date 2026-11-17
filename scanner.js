@@ -373,7 +373,7 @@ async function runScan(folderPath, options = {}) {
         continue;
       }
       if (error) {
-        if (process.platform === 'win32' && (error.code === 'EPERM' || error.code === 'EBUSY' || error.code === 'EACCES') &&
+        if (process.platform === 'win32' && (error.code === 'EPERM' || error.code === 'EBUSY' || error.code === 'EACCES' || error.code === 'EINVAL') &&
             lockedFiles.length < LOCKED_FILE_CAP) {
           lockedFiles.push({ fullPath, name: entry.name });
         } else {

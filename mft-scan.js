@@ -218,7 +218,8 @@ async function scanNtfsVolume(volumeRoot, opts = {}) {
         const rflags = chunkBuf.readUInt16LE(off + 0x16);
         if (!(rflags & 1)) continue; // not in use
         if (!applyFixups(chunkBuf, off, frsSize)) { stats.torn++; continue; }
-        const baseRef = u64(chunkBuf, off + 0x20) % 281474976710656; // low 48 bits
+        // 48-bit record number; u64() would lose low bits once the sequence number (top 16 bits) is >= 32
+        const baseRef = chunkBuf.readUInt32LE(off + 0x20) + chunkBuf.readUInt16LE(off + 0x24) * 4294967296;
         if (baseRef === 0) {
           flags[n] |= F_USED | (rflags & 2 ? F_DIR : 0);
           seq[n] = chunkBuf.readUInt16LE(off + 0x10);
@@ -278,4 +279,4 @@ async function scanNtfsVolume(volumeRoot, opts = {}) {
   }
 }
 
-module.exports = { scanNtfsVolume, parseBootSector, applyFixups, parseRuns };
+module.exports = { scanNtfsVolume, parseBootSector, applyFixups, parseRuns, readMftExtents };

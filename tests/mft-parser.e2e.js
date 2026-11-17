@@ -32,7 +32,7 @@ function specs() {
     { rec: 41, attrs: [S.stdInfo(MT), S.fileName(30, 9, 'stale.txt'), data(4096, 10)] },
     // sizes live in an extension record (attribute list case)
     { rec: 42, attrs: [S.stdInfo(MT), S.fileName(5, 1, 'ext.bin')] },
-    { rec: 43, base: 42, attrs: [data(65536, 60000)] },
+    { rec: 43, base: 42, baseSeq: 40, attrs: [data(65536, 60000)] }, // seq >= 32: a double-based u64 would corrupt the record number
     // torn record (fixup mismatch) is skipped
     { rec: 44, corrupt: true, attrs: [S.stdInfo(MT), S.fileName(5, 1, 'torn.txt'), data(4096, 10)] },
     // metadata area: anything under $Extend (record 11) must not appear
