@@ -611,6 +611,10 @@ handleTrusted('scan-folder', async (event, folderPath, options) => {
       // and sparse files are accounted for (small "resident" files that live
       // inside the MFT report 0).
       let diskSize = stat.blocks != null ? stat.blocks * 512 : stat.size;
+      // Windows: libuv can report a garbage AllocationSize (~1e15 blocks) for
+      // small NTFS-compressed files resident in the MFT. Allocation never
+      // exceeds the file size by more than a cluster, so distrust anything bigger.
+      if (process.platform === 'win32' && diskSize > stat.size + 4 * 1024 * 1024) diskSize = stat.size;
       let cloudStatus;
       if (process.platform === 'darwin' && stat.blocks === 0 && stat.size > 0) {
         // Evicted iCloud file or small compressed file; decided after the walk.
@@ -1071,7 +1075,10 @@ function protectedReason(inputPath) {
     if (p === home) return 'your home folder';
     for (const r of approvedFolderPaths) if (norm(r) === p) return 'the folder you scanned (delete items inside it instead)';
     if (win) {
-      const sysRoots = ['c:/windows', 'c:/program files', 'c:/program files (x86)', 'c:/programdata/microsoft',
+      // Folders Smart Cleanup legitimately empties: allowed even though they sit under system roots.
+      const cleanable = ['c:/windows/temp', 'c:/windows/softwaredistribution/download', 'c:/windows/minidump', 'c:/$recycle.bin'];
+      const exempt = cleanable.some(r => p !== r && p.startsWith(r + '/')) || p === 'c:/windows/memory.dmp';
+      const sysRoots = exempt ? [] : ['c:/windows', 'c:/program files', 'c:/program files (x86)', 'c:/programdata/microsoft',
         'c:/system volume information', 'c:/$recycle.bin', 'c:/boot', 'c:/recovery'];
       for (const r of sysRoots) if (insideOrEq(p, r)) return 'a Windows system folder';
       if (/^[a-z]:\/(pagefile|hiberfil|swapfile)\.sys$/.test(p)) return 'a Windows system file';
@@ -1192,7 +1199,8 @@ function getCacheDir() {
 // v2: exact (bigint) file IDs, locked Windows system files, Linux pseudo-FS skip.
 // v3: allocated sizes on Windows, '/'-separated relative paths, extension stats.
 // v4: full file list stored in a gzip sidecar; previous scan kept for compare.
-const SCAN_CACHE_VERSION = 4;
+// v5: Windows scans no longer trust garbage allocation sizes (caches could hold absurd totals).
+const SCAN_CACHE_VERSION = 5;
 
 function getCacheKey(folderPath) {
   return crypto.createHash('md5').update(folderPath).digest('hex');
