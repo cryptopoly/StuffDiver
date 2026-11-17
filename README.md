@@ -129,6 +129,33 @@ End-to-end tests drive the real Electron app with Playwright:
 npm test
 ```
 
+### Command line (headless)
+
+Scan a folder with no window, e.g. from a scheduled task or a script. The CLI is read-only: it never deletes or modifies scanned files and only writes the report files you name.
+
+```bash
+# From source
+npx electron . --scan ~/Projects --export report.csv --export report.json --export report.html
+
+# Packaged app (macOS / Windows / Linux)
+"/Applications/Stuff Diver.app/Contents/MacOS/Stuff Diver" --scan /data --export out.csv
+"C:\Program Files\Stuff Diver\Stuff Diver.exe" --scan D:\data --export out.json
+```
+
+| Option | Meaning |
+|---|---|
+| `--scan PATH` | Folder to scan (required) |
+| `--export FILE` | Report to write; format from extension `.csv`, `.json` or `.html` (repeatable, at least one required) |
+| `--exclude PAT` | Name/glob (`node_modules`, `*.tmp`) or path prefix to skip (repeatable) |
+| `--top N` | Entries in the JSON/HTML summaries (default 20) |
+| `--help`, `--version` | Show usage / version |
+
+- **CSV** lists every scanned file: `path,size_on_disk,logical_size,mtime,ext` (mtime is ISO 8601 UTC).
+- **JSON / HTML** hold totals plus the largest folders, largest files and size by extension. Folder paths are relative to the scanned folder; the folder list comes from the same tree the app shows, which prunes tiny folders on very large scans.
+- Same scanner as the app: same exclusion rules, hard-link/firmlink dedupe and size-on-disk accounting.
+- Progress and errors go to stderr. Exit code `0` = success, `1` = scan or export failed, `2` = bad usage.
+- On macOS, grant Full Disk Access to the app (or the terminal running it) to read protected folders; unreadable folders are counted as skipped.
+
 ### Build
 
 ```bash
@@ -154,7 +181,9 @@ Builds output to the `dist/` directory.
 
 ```
 StuffDiver/
-├── main.js          # Electron main process (scanning, IPC, tray, updates)
+├── main.js          # Electron main process (IPC, tray, updates)
+├── scanner.js       # Folder scanner shared by the app and the CLI
+├── cli.js           # Headless CLI: argument parsing and CSV/JSON/HTML export
 ├── renderer.js      # UI, visualisations, and all frontend logic
 ├── index.html       # Application shell
 ├── styles.css       # All styling including dark/light themes

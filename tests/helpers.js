@@ -2,6 +2,7 @@ const { _electron: electron, expect } = require('@playwright/test');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { spawnSync } = require('child_process');
 
 // Build a small fixture tree with known sizes.
 function makeFixture() {
@@ -45,4 +46,14 @@ async function scanViaUi(page) {
   await expect(page.locator('#stats')).toContainText('Files:', { timeout: 30000 });
 }
 
-module.exports = { makeFixture, launch, scanViaUi };
+// Run the headless CLI (`electron . --scan ...`) and return { status, stdout, stderr }.
+function runCli(args, extraEnv = {}) {
+  const r = spawnSync(require('electron'), [path.join(__dirname, '..'), ...(process.platform === 'linux' ? ['--no-sandbox'] : []), ...args], {
+    env: { ...process.env, ...extraEnv },
+    encoding: 'utf8',
+    timeout: 60000
+  });
+  return { status: r.status, stdout: r.stdout, stderr: r.stderr };
+}
+
+module.exports = { makeFixture, launch, scanViaUi, runCli };
