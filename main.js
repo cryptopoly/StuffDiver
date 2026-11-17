@@ -2,6 +2,9 @@ const { app, BrowserWindow, ipcMain, dialog, shell, Tray, Menu, Notification, na
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
+const zlib = require('zlib');
+const readline = require('readline');
+const { pipeline } = require('stream/promises');
 const { exec, execFile, spawn } = require('child_process');
 const { pathToFileURL } = require('url');
 const { promisify } = require('util');
@@ -47,6 +50,7 @@ function handleTrusted(channel, handler) {
 
 function setActiveFolderState(folderPath, files) {
   lastScanAllFiles = Array.isArray(files) ? files.slice() : [];
+  lastScanFolder = folderPath;
 }
 
 function assertAllowedFilePath(filePath) {
@@ -345,6 +349,7 @@ app.on('activate', () => {
 
 // Full file list from last scan (kept in main process for duplicate detection)
 let lastScanAllFiles = [];
+let lastScanFolder = null;
 
 // IPC Handlers
 
@@ -1094,21 +1099,59 @@ function getCacheDir() {
 // Bump when scan results change meaning so stale caches are ignored.
 // v2: exact (bigint) file IDs, locked Windows system files, Linux pseudo-FS skip.
 // v3: allocated sizes on Windows, '/'-separated relative paths, extension stats.
-const SCAN_CACHE_VERSION = 3;
+// v4: full file list stored in a gzip sidecar; previous scan kept for compare.
+const SCAN_CACHE_VERSION = 4;
 
 function getCacheKey(folderPath) {
   return crypto.createHash('md5').update(folderPath).digest('hex');
 }
 
+function cachePaths(folderPath) {
+  const base = path.join(getCacheDir(), getCacheKey(folderPath));
+  return {
+    result: base + '.json', files: base + '.files.ndjson.gz',
+    prevResult: base + '.prev.json', prevFiles: base + '.prev.files.ndjson.gz'
+  };
+}
+
+// The renderer only receives the top files; the full list lives here so
+// Duplicates, Smart Cleanup, extension views and compare keep working from cache.
+async function writeFilesSidecar(file, files) {
+  const tmp = file + '.tmp';
+  async function* lines() {
+    let buf = [];
+    for (const f of files) {
+      buf.push(JSON.stringify(f));
+      if (buf.length >= 5000) { yield buf.join('\n') + '\n'; buf = []; }
+    }
+    if (buf.length) yield buf.join('\n') + '\n';
+  }
+  await pipeline(lines(), zlib.createGzip(), fs.createWriteStream(tmp));
+  await fs.promises.rename(tmp, file);
+}
+
+async function readFilesSidecar(file) {
+  const out = [];
+  const rl = readline.createInterface({
+    input: fs.createReadStream(file).pipe(zlib.createGunzip()), crlfDelay: Infinity
+  });
+  for await (const line of rl) { if (line) out.push(JSON.parse(line)); }
+  return out;
+}
+
+async function renameIfExists(from, to) {
+  try { await fs.promises.rename(from, to); } catch (e) { /* nothing to rotate */ }
+}
+
 handleTrusted('load-cache', async (event, folderPath) => {
   try {
     folderPath = assertApprovedFolder(folderPath);
-    const file = path.join(getCacheDir(), getCacheKey(folderPath) + '.json');
-    if (!fs.existsSync(file)) return null;
-    const raw = await fs.promises.readFile(file, 'utf8');
+    const cp = cachePaths(folderPath);
+    if (!fs.existsSync(cp.result) || !fs.existsSync(cp.files)) return null;
+    const raw = await fs.promises.readFile(cp.result, 'utf8');
     const cached = JSON.parse(raw);
     if (cached.scanVersion !== SCAN_CACHE_VERSION) return null;
-    setActiveFolderState(folderPath, Array.isArray(cached.files) ? cached.files : []);
+    setActiveFolderState(folderPath, await readFilesSidecar(cp.files));
     return cached;
   } catch (e) {
     return null;
@@ -1118,20 +1161,75 @@ handleTrusted('load-cache', async (event, folderPath) => {
 handleTrusted('save-cache', async (event, folderPath, result) => {
   try {
     folderPath = assertApprovedFolder(folderPath);
-    const file = path.join(getCacheDir(), getCacheKey(folderPath) + '.json');
+    if (lastScanFolder !== folderPath) return false; // full list belongs to another scan
+    const cp = cachePaths(folderPath);
+    await renameIfExists(cp.result, cp.prevResult);
+    await renameIfExists(cp.files, cp.prevFiles);
+    await writeFilesSidecar(cp.files, lastScanAllFiles);
     const data = { ...result, cachedAt: Date.now(), folderPath, scanVersion: SCAN_CACHE_VERSION };
-    await fs.promises.writeFile(file, JSON.stringify(data));
+    await fs.promises.writeFile(cp.result, JSON.stringify(data));
     return true;
   } catch (e) {
     return false;
   }
 });
 
+// Summary of the scan before the current one (for Forecast).
+handleTrusted('load-previous-cache', async (event, folderPath) => {
+  try {
+    folderPath = assertApprovedFolder(folderPath);
+    const cp = cachePaths(folderPath);
+    const prev = JSON.parse(await fs.promises.readFile(cp.prevResult, 'utf8'));
+    if (prev.scanVersion !== SCAN_CACHE_VERSION) return null;
+    return { cachedAt: prev.cachedAt, totalSize: prev.totalSize, totalFiles: prev.totalFiles };
+  } catch (e) {
+    return null;
+  }
+});
+
+// Diff the current full scan against the previous one, entirely in main.
+handleTrusted('compare-scan', async (event, folderPath) => {
+  try {
+    folderPath = assertApprovedFolder(folderPath);
+    if (lastScanFolder !== folderPath || !lastScanAllFiles.length) return { error: 'noscan' };
+    const cp = cachePaths(folderPath);
+    let prevMeta;
+    try { prevMeta = JSON.parse(await fs.promises.readFile(cp.prevResult, 'utf8')); } catch (e) { return { error: 'noprev' }; }
+    if (prevMeta.scanVersion !== SCAN_CACHE_VERSION || !fs.existsSync(cp.prevFiles)) return { error: 'noprev' };
+    const key = (f) => f.relativePath || f.path;
+    const old = new Map();
+    for (const f of await readFilesSidecar(cp.prevFiles)) old.set(key(f), f);
+    const cats = { added: [], removed: [], grown: [], shrunk: [] };
+    const totals = { added: 0, removed: 0, grown: 0, shrunk: 0 };
+    const counts = { added: 0, removed: 0, grown: 0, shrunk: 0 };
+    const TOP = 20;
+    const keep = (cat, item) => {
+      counts[cat]++; totals[cat] += item.diff;
+      const arr = cats[cat];
+      arr.push(item);
+      if (arr.length > TOP * 8) { arr.sort((a, b) => b.diff - a.diff); arr.length = TOP; }
+    };
+    const seen = new Set();
+    for (const f of lastScanAllFiles) {
+      const k = key(f); seen.add(k);
+      const o = old.get(k);
+      if (!o) keep('added', { ...f, diff: f.size });
+      else if (f.size > o.size) keep('grown', { ...f, diff: f.size - o.size, oldSize: o.size });
+      else if (f.size < o.size) keep('shrunk', { ...f, diff: o.size - f.size, oldSize: o.size });
+    }
+    for (const [k, f] of old) if (!seen.has(k)) keep('removed', { ...f, diff: f.size });
+    for (const c of Object.keys(cats)) { cats[c].sort((a, b) => b.diff - a.diff); cats[c].length = Math.min(cats[c].length, TOP); }
+    return { prevDate: prevMeta.cachedAt, lists: cats, counts, totals };
+  } catch (e) {
+    return { error: 'failed' };
+  }
+});
+
 handleTrusted('clear-cache', async (event, folderPath) => {
   try {
     folderPath = assertApprovedFolder(folderPath);
-    const file = path.join(getCacheDir(), getCacheKey(folderPath) + '.json');
-    if (fs.existsSync(file)) await fs.promises.unlink(file);
+    const cp = cachePaths(folderPath);
+    for (const f of Object.values(cp)) { try { await fs.promises.unlink(f); } catch (e) { /* absent */ } }
     return true;
   } catch (e) {
     return false;

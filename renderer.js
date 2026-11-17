@@ -2614,56 +2614,20 @@
     const folderPath = folderPathEl.textContent;
     if (!folderPath) return;
 
-    // Load the cached previous scan
-    const cached = await window.api.loadCache(folderPath);
-    if (!cached || !cached.files) {
-      alert('No previous scan cached for this folder. Scan it once, then scan again later to compare.');
+    // The diff runs in the main process over the full file lists.
+    const cmp = await window.api.compareScan(folderPath);
+    if (!cmp || cmp.error) {
+      alert(cmp && cmp.error === 'noscan'
+        ? 'Scan or open this folder first, then compare.'
+        : 'No previous scan to compare with. Scan this folder again later to see what changed.');
       return;
     }
 
-    const cachedDate = new Date(cached.cachedAt).toLocaleString();
-    const oldFiles = new Map();
-    for (const f of cached.files) {
-      oldFiles.set(f.relativePath || f.path, f);
-    }
-
-    const currentFiles = new Map();
-    for (const f of allFiles) {
-      currentFiles.set(f.relativePath || f.path, f);
-    }
-
-    // Compute diffs
-    const added = [];      // in current but not in old
-    const removed = [];    // in old but not in current
-    const grown = [];      // size increased
-    const shrunk = [];     // size decreased
-
-    for (const [key, f] of currentFiles) {
-      const old = oldFiles.get(key);
-      if (!old) {
-        added.push({ ...f, diff: f.size });
-      } else if (f.size > old.size) {
-        grown.push({ ...f, diff: f.size - old.size, oldSize: old.size });
-      } else if (f.size < old.size) {
-        shrunk.push({ ...f, diff: old.size - f.size, oldSize: old.size });
-      }
-    }
-    for (const [key, f] of oldFiles) {
-      if (!currentFiles.has(key)) {
-        removed.push({ ...f, diff: f.size });
-      }
-    }
-
-    // Sort by diff descending
-    added.sort((a, b) => b.diff - a.diff);
-    removed.sort((a, b) => b.diff - a.diff);
-    grown.sort((a, b) => b.diff - a.diff);
-    shrunk.sort((a, b) => b.diff - a.diff);
-
-    const totalAdded = added.reduce((s, f) => s + f.diff, 0);
-    const totalRemoved = removed.reduce((s, f) => s + f.diff, 0);
-    const totalGrown = grown.reduce((s, f) => s + f.diff, 0);
-    const totalShrunk = shrunk.reduce((s, f) => s + f.diff, 0);
+    const cachedDate = new Date(cmp.prevDate).toLocaleString();
+    const added = cmp.lists.added, removed = cmp.lists.removed;
+    const grown = cmp.lists.grown, shrunk = cmp.lists.shrunk;
+    const totalAdded = cmp.totals.added, totalRemoved = cmp.totals.removed;
+    const totalGrown = cmp.totals.grown, totalShrunk = cmp.totals.shrunk;
     const netChange = totalAdded + totalGrown - totalRemoved - totalShrunk;
 
     let html = '<div class="compare-container">';
@@ -2671,17 +2635,17 @@
 
     // Summary cards
     html += '<div class="compare-summary">';
-    html += `<div class="compare-card compare-added"><span class="compare-num">+${formatSize(totalAdded)}</span><span class="compare-label">${added.length} new files</span></div>`;
-    html += `<div class="compare-card compare-removed"><span class="compare-num">-${formatSize(totalRemoved)}</span><span class="compare-label">${removed.length} deleted files</span></div>`;
-    html += `<div class="compare-card compare-grown"><span class="compare-num">+${formatSize(totalGrown)}</span><span class="compare-label">${grown.length} files grew</span></div>`;
-    html += `<div class="compare-card compare-shrunk"><span class="compare-num">-${formatSize(totalShrunk)}</span><span class="compare-label">${shrunk.length} files shrank</span></div>`;
+    html += `<div class="compare-card compare-added"><span class="compare-num">+${formatSize(totalAdded)}</span><span class="compare-label">${cmp.counts.added.toLocaleString()} new files</span></div>`;
+    html += `<div class="compare-card compare-removed"><span class="compare-num">-${formatSize(totalRemoved)}</span><span class="compare-label">${cmp.counts.removed.toLocaleString()} deleted files</span></div>`;
+    html += `<div class="compare-card compare-grown"><span class="compare-num">+${formatSize(totalGrown)}</span><span class="compare-label">${cmp.counts.grown.toLocaleString()} files grew</span></div>`;
+    html += `<div class="compare-card compare-shrunk"><span class="compare-num">-${formatSize(totalShrunk)}</span><span class="compare-label">${cmp.counts.shrunk.toLocaleString()} files shrank</span></div>`;
     html += `<div class="compare-card compare-net"><span class="compare-num">${netChange >= 0 ? '+' : ''}${formatSize(Math.abs(netChange))}</span><span class="compare-label">net ${netChange >= 0 ? 'growth' : 'reduction'}</span></div>`;
     html += '</div>';
 
     // Detail lists (show top 20 each)
-    function renderChangeList(title, items, cssClass, showOldSize) {
+    function renderChangeList(title, items, cssClass, showOldSize, total) {
       if (!items.length) return '';
-      let h = `<div class="compare-section"><h4 class="${cssClass}">${title} (${items.length})</h4>`;
+      let h = `<div class="compare-section"><h4 class="${cssClass}">${title} (${total.toLocaleString()})</h4>`;
       h += '<div class="compare-list">';
       const shown = items.slice(0, 20);
       for (const f of shown) {
@@ -2694,15 +2658,15 @@
           <span class="compare-item-diff ${cssClass}">${cssClass.includes('add') || cssClass.includes('grow') ? '+' : '-'}${formatSize(f.diff)}</span>
         </div>`;
       }
-      if (items.length > 20) h += `<div class="compare-more">...and ${items.length - 20} more</div>`;
+      if (total > items.length) h += `<div class="compare-more">...and ${(total - items.length).toLocaleString()} more</div>`;
       h += '</div></div>';
       return h;
     }
 
-    html += renderChangeList('New Files', added, 'compare-added', false);
-    html += renderChangeList('Deleted Files', removed, 'compare-removed', false);
-    html += renderChangeList('Files That Grew', grown, 'compare-grown', true);
-    html += renderChangeList('Files That Shrank', shrunk, 'compare-shrunk', true);
+    html += renderChangeList('New Files', added, 'compare-added', false, cmp.counts.added);
+    html += renderChangeList('Deleted Files', removed, 'compare-removed', false, cmp.counts.removed);
+    html += renderChangeList('Files That Grew', grown, 'compare-grown', true, cmp.counts.grown);
+    html += renderChangeList('Files That Shrank', shrunk, 'compare-shrunk', true, cmp.counts.shrunk);
     html += '</div>';
 
     // Temporarily switch to compare view
@@ -3758,9 +3722,9 @@
     let diskInfo = null;
     try { diskInfo = await window.api.getDiskSpace(folderPath); } catch (e) {}
 
-    const cached = await window.api.loadCache(folderPath);
-    const currentTotal = allFiles.reduce(function(s, f) { return s + f.size; }, 0);
-    const currentDate = Date.now();
+    const cached = await window.api.loadPreviousCache(folderPath);
+    const currentTotal = totalSize;
+    const currentDate = cacheTimestamp || Date.now();
 
     const ctx = canvas.getContext('2d');
     const dpr = window.devicePixelRatio || 1;

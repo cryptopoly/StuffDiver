@@ -16,6 +16,8 @@ contextBridge.exposeInMainWorld('api', {
   deleteFiles: (paths) => ipcRenderer.invoke('delete-files', paths),
   loadCache: (folderPath) => ipcRenderer.invoke('load-cache', folderPath),
   saveCache: (folderPath, result) => ipcRenderer.invoke('save-cache', folderPath, result),
+  loadPreviousCache: (folderPath) => ipcRenderer.invoke('load-previous-cache', folderPath),
+  compareScan: (folderPath) => ipcRenderer.invoke('compare-scan', folderPath),
   clearCache: (folderPath) => ipcRenderer.invoke('clear-cache', folderPath),
   onScanProgress: (callback) => ipcRenderer.on('scan-progress', (_e, count) => callback(count)),
   onScanBatch: (callback) => ipcRenderer.on('scan-batch', (_e, data) => callback(data)),

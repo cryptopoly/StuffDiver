@@ -171,3 +171,34 @@ test('unreadable folders raise the access banner', async () => {
     }
   }).finally(() => { try { restore(); } catch (e) { /* ignore */ } });
 });
+
+test('cache keeps the full file list and compare diffs against the previous scan', async () => {
+  const fx = makeFixture();
+  const { app, page, userData } = await launch(fx.root);
+  try {
+    await scanViaUi(page);
+    // First scan is saved by the UI; wait for the sidecar, then change the tree.
+    const cacheDir = path.join(userData, 'scan-cache');
+    await expect.poll(() => fs.existsSync(cacheDir) && fs.readdirSync(cacheDir).some(f => f.endsWith('.files.ndjson.gz'))).toBe(true);
+    fs.unlinkSync(path.join(fx.root, 'docs/b.txt'));
+    fs.writeFileSync(path.join(fx.root, 'docs/new.log'), Buffer.alloc(64 * 1024, 'n'));
+    const res = await page.evaluate(async (r) => {
+      const scan = await window.api.scanFolder(r, {});
+      await window.api.saveCache(r, scan);
+      return scan;
+    }, fx.root);
+    const sidecar = fs.readdirSync(cacheDir).find(f => f.endsWith('.files.ndjson.gz') && !f.includes('.prev.'));
+    const lines = require('zlib').gunzipSync(fs.readFileSync(path.join(cacheDir, sidecar))).toString().trim().split('\n');
+    expect(lines.length).toBe(res.totalFiles);
+    const cmp = await page.evaluate((r) => window.api.compareScan(r), fx.root);
+    expect(cmp.counts).toMatchObject({ added: 1, removed: 1, grown: 0, shrunk: 0 });
+    expect(cmp.lists.added[0].name).toBe('new.log');
+    expect(cmp.lists.removed[0].name).toBe('b.txt');
+    const prev = await page.evaluate((r) => window.api.loadPreviousCache(r), fx.root);
+    expect(prev.totalFiles).toBe(fx.fileCount);
+    const cached = await page.evaluate((r) => window.api.loadCache(r), fx.root);
+    expect(cached.totalFiles).toBe(res.totalFiles);
+  } finally {
+    await app.close();
+  }
+});
