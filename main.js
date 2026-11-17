@@ -277,6 +277,7 @@ handleTrusted('scan-folder', async (event, folderPath, options) => {
   const send = (channel, payload) => { try { event.sender.send(channel, payload); } catch (e) { /* window closed */ } };
   const { allFiles, ...result } = await runScan(folderPath, {
     exclude: options && options.exclude,
+    mftFastScan: loadSettings().mftFastScan === true,
     scanState,
     delayMs: E2E_SCAN_DELAY,
     onBatch: (p) => send('scan-batch', p),
@@ -973,7 +974,7 @@ function loadSettings() {
   }
 }
 
-const ALLOWED_SETTINGS_KEYS = ['recentFolders', 'theme', 'monitorFolder', 'monitorInterval', 'monitorEnabled', 'lastViewMode', 'scanExclusions'];
+const ALLOWED_SETTINGS_KEYS = ['recentFolders', 'theme', 'monitorFolder', 'monitorInterval', 'monitorEnabled', 'lastViewMode', 'scanExclusions', 'mftFastScan'];
 
 function saveSettings(settings) {
   const existing = loadSettings();

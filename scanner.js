@@ -429,7 +429,31 @@ async function runScan(folderPath, options = {}) {
     }
   }
 
-  await walk(folderPath, 0);
+  // Optional NTFS fast scan (Windows, whole volume, setting OFF by default).
+  // STUFFDIVER_MFT_SCAN=1/0 overrides the setting (manual compare script).
+  // Any problem leaves nothing recorded and falls through to the normal walk.
+  let mftWanted = options.mftFastScan === true;
+  if (process.env.STUFFDIVER_MFT_SCAN === '1') mftWanted = true;
+  if (process.env.STUFFDIVER_MFT_SCAN === '0') mftWanted = false;
+  let fastScanInfo = null;
+  if (process.platform === 'win32' && mftWanted && !(options.exclude && options.exclude.length) &&
+      /^[A-Za-z]:\\$/.test(folderPath)) {
+    fastScanInfo = { engine: 'walk', fallbackReason: null };
+    try {
+      const t0 = Date.now();
+      const r = await require('./mft-scan').scanNtfsVolume(folderPath, { isCancelled: () => scanState.cancelled });
+      for (let i = 0; i < r.count; i++) {
+        if (r.cloud[i]) cloudOnlyCount++;
+        recordFile(r.fullPaths[i], r.names[i], r.cloud[i] ? 0 : r.diskSize[i], r.logicalSize[i], r.mtimeMs[i], r.cloud[i] ? 'icloud-only' : undefined);
+      }
+      skipped += r.stats.orphans + r.stats.torn;
+      fastScanInfo = { engine: 'mft', ms: Date.now() - t0, stats: r.stats };
+    } catch (e) {
+      fastScanInfo = { engine: 'walk', fallbackReason: String(e && e.message || e) };
+      console.warn('MFT fast scan unavailable, using normal scan:', fastScanInfo.fallbackReason);
+    }
+  }
+  if (!fastScanInfo || fastScanInfo.engine !== 'mft') await walk(folderPath, 0);
   if (darwinZeroBlock.length && !scanState.cancelled) {
     const dataless = await findDatalessDarwin(darwinZeroBlock.map(f => f.fullPath));
     for (const f of darwinZeroBlock) {
@@ -475,7 +499,8 @@ async function runScan(folderPath, options = {}) {
   return {
     files: mergedFiles, totalFiles: files.length, totalSize, totalLogicalSize, totalCloudLogicalSize,
     skippedDirs: skipped, folderTree, cloudOnlyCount, extStats,
-    cancelled: scanState.cancelled, excludedCount, allFiles: files
+    cancelled: scanState.cancelled, excludedCount, allFiles: files,
+    ...(fastScanInfo ? { fastScan: fastScanInfo } : {})
   };
 }
 
