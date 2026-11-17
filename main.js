@@ -153,8 +153,25 @@ const LINUX_PSEUDO_FS_ROOTS = new Set(['/proc', '/sys', '/dev', '/run']);
 // macOS: scanning / must not wander into other mounted volumes, the /net
 // automount, or the system's auxiliary APFS volumes (VM, Preboot, ...).
 const DARWIN_SKIP_ROOTS = new Set(['/Volumes', '/net', '/Network']);
+// Linux: network, FUSE, VM-share and snap (squashfs) mounts are not local disk
+// usage; scanning / would otherwise walk shared Mac/Windows homes and NFS.
+const LINUX_FOREIGN_FSTYPES = /^(nfs\d*|cifs|smb3|smbfs|9p|squashfs|prl_fs|vboxsf|vmhgfs|fuse(\..*)?|sshfs|davfs|afs|ceph|glusterfs)$/;
+let linuxForeignMounts = null;
+function getLinuxForeignMounts() {
+  if (linuxForeignMounts) return linuxForeignMounts;
+  linuxForeignMounts = new Set();
+  try {
+    for (const line of fs.readFileSync('/proc/self/mounts', 'utf8').split('\n')) {
+      const parts = line.split(' ');
+      if (parts.length < 3 || !LINUX_FOREIGN_FSTYPES.test(parts[2])) continue;
+      // /proc/mounts escapes spaces and tabs as octal
+      linuxForeignMounts.add(parts[1].replace(/\\([0-7]{3})/g, (m, o) => String.fromCharCode(parseInt(o, 8))));
+    }
+  } catch (e) { /* no /proc: nothing to skip */ }
+  return linuxForeignMounts;
+}
 function isPseudoFilesystemPath(fullPath) {
-  if (process.platform === 'linux') return LINUX_PSEUDO_FS_ROOTS.has(fullPath);
+  if (process.platform === 'linux') return LINUX_PSEUDO_FS_ROOTS.has(fullPath) || getLinuxForeignMounts().has(fullPath);
   if (process.platform === 'darwin') {
     return DARWIN_SKIP_ROOTS.has(fullPath) ||
       (fullPath.startsWith('/System/Volumes/') && fullPath !== '/System/Volumes/Data');
