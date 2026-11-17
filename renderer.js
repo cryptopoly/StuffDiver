@@ -2483,7 +2483,8 @@
 
     // Confirmation is handled by main process
     const paths = collectorItems.map(f => f.path);
-    const result = await window.api.deleteFiles(paths);
+    const result = await window.api.deleteFiles(paths, 'collector');
+    if (result && result.error) alert(result.error);
     if (result && result.deleted > 0) {
       // Remove deleted files from allFiles and displayFiles
       const deletedSet = new Set(result.deletedPaths || paths);
@@ -3688,7 +3689,8 @@
         if (selectedIds.has(cat.id)) filesToDelete.push(...cat.paths);
       }
       if (filesToDelete.length === 0) return;
-      const result = await window.api.deleteFiles(filesToDelete);
+      const result = await window.api.deleteFiles(filesToDelete, 'smart-cleanup');
+      if (result && result.error) { alert(result.error); return; }
       if (result && result.deleted > 0) {
         const deletedSet = new Set(result.deletedPaths || []);
         allFiles = allFiles.filter(function(f) { return !deletedSet.has(f.path); });

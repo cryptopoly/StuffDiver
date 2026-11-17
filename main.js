@@ -1049,7 +1049,74 @@ handleTrusted('get-disk-space', async (event, folderPath) => {
 
 // === Delete files (Collector) ===
 
-handleTrusted('delete-files', async (event, filePaths) => {
+// Hard safety net for deletion. These paths can never be trashed from the app,
+// no matter what the user selected, which preset matched, or which folder was
+// approved. Checked on both the given path and its symlink-resolved form.
+const PROTECTED_HOME_FOLDERS = ['Desktop', 'Documents', 'Downloads', 'Pictures', 'Music', 'Movies', 'Videos',
+  'Library', 'Applications', 'AppData', 'OneDrive', 'iCloud Drive', 'Public'];
+const PROTECTED_HOME_SECRETS = ['.ssh', '.gnupg', '.aws', '.kube', '.docker', '.config/gcloud', '.azure',
+  'Library/Keychains', 'Library/Mobile Documents', 'AppData/Roaming/Microsoft/Credentials',
+  'AppData/Roaming/Microsoft/Protect', 'AppData/Local/Microsoft/Credentials'];
+
+function protectedReason(inputPath) {
+  const variants = new Set([path.resolve(inputPath)]);
+  try { variants.add(fs.realpathSync(path.resolve(inputPath))); } catch (e) { /* missing: judge by name */ }
+  const win = process.platform === 'win32';
+  const norm = (v) => { const x = v.split(path.sep).join('/').replace(/\/+$/, ''); return win ? x.toLowerCase() : x; };
+  const home = norm(require('os').homedir());
+  const insideOrEq = (p, root) => p === root || p.startsWith(root + '/');
+  for (const raw of variants) {
+    const p = norm(raw) || '/';
+    if (p === '/' || /^[a-z]:$/i.test(p)) return 'a drive or filesystem root';
+    if (p === home) return 'your home folder';
+    for (const r of approvedFolderPaths) if (norm(r) === p) return 'the folder you scanned (delete items inside it instead)';
+    if (win) {
+      const sysRoots = ['c:/windows', 'c:/program files', 'c:/program files (x86)', 'c:/programdata/microsoft',
+        'c:/system volume information', 'c:/$recycle.bin', 'c:/boot', 'c:/recovery'];
+      for (const r of sysRoots) if (insideOrEq(p, r)) return 'a Windows system folder';
+      if (/^[a-z]:\/(pagefile|hiberfil|swapfile)\.sys$/.test(p)) return 'a Windows system file';
+      if (/^[a-z]:\/users$/.test(p) || /^[a-z]:\/users\/[^/]+$/.test(p)) return 'a user profile folder';
+    } else {
+      const sysRoots = ['/system', '/usr', '/bin', '/sbin', '/etc', '/dev', '/cores', '/private/etc', '/private/var/db',
+        '/opt/homebrew/bin', '/boot', '/proc', '/sys', '/lib', '/lib64', '/var/lib', '/var/db'];
+      for (const r of sysRoots) if (insideOrEq(p, r)) return 'an operating-system folder';
+      if (p === '/users' || p === '/home' || p === '/volumes' || p === '/applications' || p === '/library' || p === '/private' || p === '/var') return 'a top-level system folder';
+    }
+    if (insideOrEq(p, home)) {
+      const rel = p.slice(home.length + 1);
+      for (const f of PROTECTED_HOME_FOLDERS) if (rel === norm(f)) return `your ${f} folder`;
+      for (const f of PROTECTED_HOME_SECRETS) if (insideOrEq(rel, norm(f))) return 'a credentials or keychain location';
+    }
+  }
+  return null;
+}
+
+// Append-only record of everything trashed (or refused), kept in user data.
+function deletionLogPath() { return path.join(app.getPath('userData'), 'deletion-log.jsonl'); }
+async function logDeletion(entries) {
+  if (!entries.length) return;
+  try {
+    await fs.promises.appendFile(deletionLogPath(), entries.map(e => JSON.stringify(e)).join('\n') + '\n');
+  } catch (e) { /* logging must never block the user */ }
+}
+
+handleTrusted('get-deletion-log', async (event, limit) => {
+  try {
+    const lines = (await fs.promises.readFile(deletionLogPath(), 'utf8')).split('\n').filter(Boolean);
+    const n = Math.max(1, Math.min(Number(limit) || 500, 5000));
+    return lines.slice(-n).reverse().map(l => { try { return JSON.parse(l); } catch (e) { return null; } }).filter(Boolean);
+  } catch (e) {
+    return [];
+  }
+});
+
+handleTrusted('reveal-deletion-log', async () => {
+  const p = deletionLogPath();
+  if (fs.existsSync(p)) shell.showItemInFolder(p);
+  return fs.existsSync(p);
+});
+
+handleTrusted('delete-files', async (event, filePaths, source) => {
   if (!Array.isArray(filePaths) || !filePaths.length) return { deleted: 0, deletedPaths: [] };
   const safePaths = [];
   try {
@@ -1060,6 +1127,21 @@ handleTrusted('delete-files', async (event, filePaths) => {
     return { deleted: 0, deletedPaths: [], error: e.message || 'Invalid file path' };
   }
 
+  // All-or-nothing: one protected path refuses the whole request.
+  const blocked = [];
+  for (const fp of safePaths) {
+    const reason = protectedReason(fp);
+    if (reason) blocked.push({ path: fp, reason });
+  }
+  if (blocked.length) {
+    const now = Date.now();
+    await logDeletion(blocked.map(b => ({ t: now, path: b.path, status: 'blocked', reason: b.reason, source: source || 'collector' })));
+    return {
+      deleted: 0, deletedPaths: [], blocked,
+      error: `Refused: ${blocked[0].path} is ${blocked[0].reason}.` + (blocked.length > 1 ? ` (+${blocked.length - 1} more protected)` : '')
+    };
+  }
+
   const result = E2E ? { response: 1 } : await dialog.showMessageBox(mainWindow, {
     type: 'warning',
     buttons: ['Cancel', 'Move to Trash'],
@@ -1067,20 +1149,30 @@ handleTrusted('delete-files', async (event, filePaths) => {
     cancelId: 0,
     title: 'Delete Files',
     message: `Move ${filePaths.length} file${filePaths.length > 1 ? 's' : ''} to trash?`,
-    detail: 'This will move the selected files to your system trash.'
+    detail: 'This will move the selected files to your system trash. You can restore them from the trash, and each one is recorded in the deletion log.'
   });
 
   if (result.response !== 1) return { deleted: 0, deletedPaths: [] };
 
+  const sizeByPath = new Map();
+  const want = new Set(safePaths);
+  for (const f of lastScanAllFiles) if (want.has(f.path)) sizeByPath.set(f.path, f.size);
+
   const deletedPaths = [];
+  const log = [];
+  const now = Date.now();
   for (const fp of safePaths) {
+    const entry = { t: now, path: fp, size: sizeByPath.get(fp) ?? null, source: source || 'collector' };
     try {
       await shell.trashItem(fp);
       deletedPaths.push(fp);
+      log.push({ ...entry, status: 'trashed' });
     } catch (e) {
       console.error('Failed to trash:', fp, e.message);
+      log.push({ ...entry, status: 'failed', reason: e.message });
     }
   }
+  await logDeletion(log);
   if (deletedPaths.length) {
     const gone = new Set(deletedPaths);
     lastScanAllFiles = lastScanAllFiles.filter(f => !gone.has(f.path));

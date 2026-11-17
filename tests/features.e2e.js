@@ -202,3 +202,33 @@ test('cache keeps the full file list and compare diffs against the previous scan
     await app.close();
   }
 });
+
+test('delete is logged, and protected paths are refused', async () => {
+  const fx = makeFixture();
+  const { app, page, userData } = await launch(fx.root);
+  try {
+    await scanViaUi(page);
+    const target = path.join(fx.root, 'docs/b.txt');
+    const ok = await page.evaluate((t) => window.api.deleteFiles([t], 'test'), target);
+    // Trash may be unavailable on headless CI; the log must record the attempt either way.
+    expect(ok.error).toBeUndefined();
+    const log = await page.evaluate(() => window.api.getDeletionLog(10));
+    expect(log[0]).toMatchObject({ path: target, source: 'test' });
+    expect(['trashed', 'failed']).toContain(log[0].status);
+
+    for (const bad of [fx.root, os.homedir(), path.join(os.homedir(), '.ssh'), path.parse(fx.root).root]) {
+      const res = await page.evaluate((t) => window.api.deleteFiles([t], 'test'), bad);
+      expect(res.deleted).toBe(0);
+      expect(res.error).toBeTruthy();
+    }
+    // One protected path refuses the whole request; the safe file survives.
+    const keep = path.join(fx.root, 'docs/a.txt');
+    const mixed = await page.evaluate((t) => window.api.deleteFiles(t, 'test'), [keep, fx.root]);
+    expect(mixed.deleted).toBe(0);
+    expect(fs.existsSync(keep)).toBe(true);
+    const blocked = (await page.evaluate(() => window.api.getDeletionLog(20))).filter(e => e.status === 'blocked');
+    expect(blocked.length).toBeGreaterThan(0);
+  } finally {
+    await app.close();
+  }
+});
