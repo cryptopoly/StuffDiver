@@ -146,8 +146,42 @@ async function statForScan(filePath) {
 // Linux virtual filesystems report fake sizes (/proc/kcore claims ~128 TB)
 // and contain no real disk usage; skip them when walking from /.
 const LINUX_PSEUDO_FS_ROOTS = new Set(['/proc', '/sys', '/dev', '/run']);
+// macOS: scanning / must not wander into other mounted volumes, the /net
+// automount, or the system's auxiliary APFS volumes (VM, Preboot, ...).
+const DARWIN_SKIP_ROOTS = new Set(['/Volumes', '/net', '/Network']);
 function isPseudoFilesystemPath(fullPath) {
-  return process.platform === 'linux' && LINUX_PSEUDO_FS_ROOTS.has(fullPath);
+  if (process.platform === 'linux') return LINUX_PSEUDO_FS_ROOTS.has(fullPath);
+  if (process.platform === 'darwin') {
+    return DARWIN_SKIP_ROOTS.has(fullPath) ||
+      (fullPath.startsWith('/System/Volumes/') && fullPath !== '/System/Volumes/Data');
+  }
+  return false;
+}
+
+// macOS: files with 0 blocks but a size are either evicted iCloud files
+// (SF_DATALESS flag) or small compressed files stored in an xattr. Returns the
+// set of paths that are really dataless; on stat failure assume dataless.
+const SF_DATALESS = 0x40000000;
+async function findDatalessDarwin(paths) {
+  const dataless = new Set();
+  const CHUNK = 200;
+  for (let i = 0; i < paths.length; i += CHUNK) {
+    const chunk = paths.slice(i, i + CHUNK);
+    const known = new Set();
+    let stdout = '';
+    try {
+      stdout = (await execFileP('/usr/bin/stat', ['-f', '%Xf\t%N', '--', ...chunk], { maxBuffer: 64 * 1024 * 1024 })).stdout;
+    } catch (e) { stdout = (e && e.stdout) || ''; } // non-zero exit if a path vanished; keep partial output
+    for (const line of stdout.split('\n')) {
+      const tab = line.indexOf('\t');
+      if (tab < 0) continue;
+      const p = line.slice(tab + 1);
+      known.add(p);
+      if ((parseInt(line.slice(0, tab), 16) & SF_DATALESS) !== 0) dataless.add(p);
+    }
+    for (const p of chunk) if (!known.has(p)) dataless.add(p);
+  }
+  return dataless;
 }
 
 // Windows: read sizes of files the OS holds open exclusively (pagefile.sys,
@@ -205,8 +239,10 @@ function buildExcluder(patterns) {
     if (typeof raw !== 'string') continue;
     const pat = raw.trim();
     if (!pat) continue;
-    if (/[\\/]/.test(pat)) {
-      prefixes.push(norm(path.resolve(pat)));
+    if (/[\\/]/.test(pat) || pat === '~') {
+      const expanded = pat === '~' || pat.startsWith('~/') || pat.startsWith('~\\')
+        ? path.join(require('os').homedir(), pat.slice(1)) : pat;
+      prefixes.push(norm(path.resolve(expanded)));
     } else {
       const escaped = pat.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.');
       names.push(new RegExp('^' + escaped + '$', ci ? 'i' : ''));
@@ -363,6 +399,7 @@ handleTrusted('scan-folder', async (event, folderPath, options) => {
   let count = 0;
   let skipped = 0;
   let cloudOnlyCount = 0;
+  const darwinZeroBlock = [];
 
   // Folder tree for bubble map — accumulates sizes during walk
   const folderTree = { name: path.basename(folderPath), size: 0, logicalSize: 0, fileCount: 0, mtime: 0, children: {}, extSizes: {} };
@@ -571,8 +608,9 @@ handleTrusted('scan-folder', async (event, folderPath, options) => {
       let diskSize = stat.blocks != null ? stat.blocks * 512 : stat.size;
       let cloudStatus;
       if (process.platform === 'darwin' && stat.blocks === 0 && stat.size > 0) {
-        // Modern macOS: evicted iCloud files keep their name but have 0 data blocks
-        cloudStatus = 'icloud-only';
+        // Evicted iCloud file or small compressed file; decided after the walk.
+        darwinZeroBlock.push({ fullPath, name: entry.name, size: stat.size, mtimeMs: stat.mtimeMs });
+        continue;
       } else if (process.platform === 'win32' && stat.blocks === 0 && stat.size > 4096) {
         // Windows: OneDrive / Files-On-Demand placeholders report their full
         // size but occupy no clusters. Anything this big can't be MFT-resident.
@@ -602,6 +640,17 @@ handleTrusted('scan-folder', async (event, folderPath, options) => {
   }
 
   await walk(folderPath, 0);
+  if (darwinZeroBlock.length && !scanState.cancelled) {
+    const dataless = await findDatalessDarwin(darwinZeroBlock.map(f => f.fullPath));
+    for (const f of darwinZeroBlock) {
+      if (dataless.has(f.fullPath)) {
+        cloudOnlyCount++;
+        recordFile(f.fullPath, f.name, 0, f.size, f.mtimeMs, 'icloud-only');
+      } else {
+        recordFile(f.fullPath, f.name, f.size, f.size, f.mtimeMs);
+      }
+    }
+  }
   if (lockedFiles.length && !scanState.cancelled) {
     const sizes = await statLockedWindowsFiles(lockedFiles.map(f => f.fullPath));
     for (const f of lockedFiles) {
