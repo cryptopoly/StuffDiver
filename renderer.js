@@ -3700,7 +3700,25 @@
     el.textContent = (d.phase === 'trash' ? 'Moving to Trash' : 'Verifying') + ' ' + Math.min(d.done + 1, d.total) + ' of ' + d.total + ': ' + name;
   });
 
-  async function openCleanupWizard(notice) {
+  // One plain-language summary for every cleanup run (folders or files): nothing is hidden in an alert.
+  function cleanupSummary(result, noun) {
+    const failures = (result && result.failures) || [];
+    const moved = (result && result.deleted) || 0;
+    const skipped = failures.filter(function(f) { return f.state === 'skipped'; }).length + ((result && !result.failures && result.skipped) || 0);
+    const failed = failures.length - failures.filter(function(f) { return f.state === 'skipped'; }).length;
+    if (!moved && !failures.length && !skipped) return '';
+    let msg = (result && result.cancelled ? 'Cancelled. ' : '') + 'Moved ' + moved + ' ' + noun + (moved === 1 ? '' : 's') + ' to the Trash' + (moved && result.freedBytes ? ' (up to ' + formatSize(result.freedBytes) + ' freed; shared files may free less)' : '') + ', failed ' + failed + ', skipped ' + skipped + '.';
+    if (failures.length) {
+      msg += '\n' + failures.slice(0, 8).map(function(f) {
+        return '- ' + (f.state === 'skipped' ? 'skipped' : 'failed') + ': ' + f.path + ' (' + f.reason + ')' + (f.finalState === 'gone' ? ' - the system reported an error but the item is already gone' : '');
+      }).join('\n');
+      if (failures.length > 8) msg += '\n(+' + (failures.length - 8) + ' more, see the Deletion Log)';
+      msg += '\nFailed and skipped items were not changed' + (failures.some(function(f) { return f.finalState === 'gone'; }) ? ', except those marked "already gone"' : '') + '. Items that were moved can be restored from the Trash or Recycle Bin. This is not all-or-nothing once moving has started.';
+    } else if (moved) msg += ' You can restore them from the Trash or Recycle Bin.';
+    return msg;
+  }
+
+  async function openCleanupWizard(notice, noticeIsError) {
     if (!allFiles.length) { alert('Please scan a folder first.'); return; }
     const overlay = document.getElementById('cleanup-overlay');
     overlay.classList.remove('hidden');
@@ -3710,23 +3728,26 @@
     // Matching runs in the main process over the full scan, not just the top files.
     let found = [];
     let folders = { candidates: [], totalFound: 0, shown: 0 };
+    let devOn = false;
     try { found = await window.api.cleanupScan(); } catch (e) { found = []; }
-    try { folders = await window.api.cleanupFoldersScan(); } catch (e) { /* none */ }
+    try { devOn = (await window.api.loadSettings()).developerFolderCleanup === true; } catch (e) { devOn = false; }
+    if (devOn) { try { folders = await window.api.cleanupFoldersScan(); } catch (e) { /* none */ } }
     const cands = folders.candidates || [];
 
-    if (!found.length && !cands.length) {
-      body.innerHTML = '<div class="cleanup-empty">No reclaimable patterns found. Your folder looks clean!</div>';
-      return;
-    }
-
-    let html = notice ? '<div class="cleanup-result" id="cleanup-result">' + escHtml(notice).replace(/\n/g, '<br>') + '</div>' : '';
+    let html = '<div class="cleanup-result' + (notice ? '' : ' hidden') + (noticeIsError ? ' cleanup-result-error' : '') + '" id="cleanup-result">' + (notice ? escHtml(notice).replace(/\n/g, '<br>') : '') + '</div>';
+    // Developer folders: off by default, one sentence on the risk, one switch.
+    html += '<div class="cleanup-section-title">Developer folders (advanced)</div>';
+    html += '<label class="cleanup-dev-toggle"><input type="checkbox" id="cleanup-dev-toggle"' + (devOn ? ' checked' : '') + '> Enable developer folder cleanup</label>';
+    html += '<div class="cleanup-note">' + (devOn
+      ? 'Whole folders such as node_modules or build output are moved to the Trash as a unit; a wrong pick can break a project that cannot simply be reinstalled, so tick each one deliberately.'
+      : 'Off: only loose files are offered. Developer-folder cleanup (node_modules, build caches, virtualenvs) exists, but moving whole folders can break a project that cannot simply be reinstalled, so it is switched off until you enable it.') + '</div>';
+    if (devOn && !cands.length) html += '<div class="cleanup-note">No developer folders found in this scan.</div>';
     if (cands.length) {
       const shown = cands.slice(0, CLEANUP_FOLDER_RENDER_CAP);
-      html += '<div class="cleanup-section-title">Folders you can regenerate</div>';
       html += '<div class="cleanup-note" id="cleanup-folder-count">' + folders.totalFound.toLocaleString() + ' folder' + (folders.totalFound === 1 ? '' : 's') + ' found'
         + (shown.length < folders.totalFound ? ', showing the ' + shown.length.toLocaleString() + ' largest' : '')
-        + '. Each is moved to the trash as a whole folder and re-checked just before that. Nothing is pre-selected: tick each folder you want gone. Recently used and very large folders are flagged.</div>';
-      html += '<div class="cleanup-total"><span class="cleanup-total-label">Selected folders</span><span class="cleanup-total-size" id="cleanup-folder-total"></span></div>';
+        + '. Each is re-checked just before it is moved. Nothing is pre-selected. Sizes here are space on disk from the scan; the confirmation shows logical sizes.</div>';
+      html += '<div class="cleanup-total"><span class="cleanup-total-label">Selected folders (size on disk)</span><span class="cleanup-total-size" id="cleanup-folder-total"></span></div>';
       shown.forEach(function(c, i) {
         const refused = !!c.refused;
         html += '<div class="cleanup-category cleanup-folder' + (refused ? ' cleanup-refused' : '') + '" data-idx="' + i + '">'
@@ -3734,7 +3755,7 @@
           + '<span class="cleanup-icon">' + escHtml(c.icon) + '</span><div class="cleanup-info">'
           + '<div class="cleanup-name" title="' + escHtml(c.path) + '">' + escHtml(c.relPath || c.path) + '</div>'
           + '<div class="cleanup-detail">' + escHtml(c.label) + ': ' + escHtml(c.reason) + '</div>'
-          + '<div class="cleanup-detail">' + Number(c.files).toLocaleString() + ' files &middot; last modified ' + escHtml(formatAge(c.ageDays)) + '</div>'
+          + '<div class="cleanup-detail">' + Number(c.files).toLocaleString() + ' files in the scan &middot; ' + formatSize(Number(c.size) || 0) + ' on disk &middot; last modified ' + escHtml(formatAge(c.ageDays)) + '</div>'
           + (refused
             ? '<div class="cleanup-detail cleanup-refuse-reason">Not offered: ' + escHtml(c.refused) + '</div>'
             : '<div class="cleanup-detail">If you restore or regenerate: ' + escHtml(c.restore) + '</div>')
@@ -3743,16 +3764,29 @@
       });
       html += '<div class="cleanup-actions"><button class="cleanup-btn-clean" id="cleanup-folders-execute">Move Selected Folders to Trash</button></div><div class="cleanup-note" id="cleanup-progress"></div>';
     }
+    if (!found.length && !cands.length) html += '<div class="cleanup-empty">No reclaimable loose files found.' + (devOn ? '' : ' Your folder looks clean!') + '</div>';
     if (found.length) {
       const grandTotal = found.reduce(function(sum, c) { return sum + c.totalSize; }, 0);
       html += '<div class="cleanup-section-title">Loose files</div>';
-      html += '<div class="cleanup-total"><span class="cleanup-total-label">Total reclaimable space</span><span class="cleanup-total-size">' + formatSize(grandTotal) + '</span></div>';
+      html += '<div class="cleanup-total"><span class="cleanup-total-label">Total reclaimable space (on disk)</span><span class="cleanup-total-size">' + formatSize(grandTotal) + '</span></div>';
       for (const cat of found) {
-        html += '<div class="cleanup-category"><input type="checkbox" class="cleanup-check" data-id="' + escHtml(cat.id) + '"' + (CLEANUP_PRETICKED.has(cat.id) ? ' checked' : '') + '><span class="cleanup-icon">' + escHtml(cat.icon) + '</span><div class="cleanup-info"><div class="cleanup-name">' + escHtml(cat.label) + '</div><div class="cleanup-detail">' + (Number(cat.count) || 0).toLocaleString() + ' files</div></div><span class="cleanup-size">' + formatSize(Number(cat.totalSize) || 0) + '</span></div>';
+        html += '<div class="cleanup-category"><input type="checkbox" class="cleanup-check" data-id="' + escHtml(cat.id) + '"' + (CLEANUP_PRETICKED.has(cat.id) ? ' checked' : '') + '><span class="cleanup-icon">' + escHtml(cat.icon) + '</span><div class="cleanup-info"><div class="cleanup-name">' + escHtml(cat.label) + '</div><div class="cleanup-detail">' + (Number(cat.count) || 0).toLocaleString() + ' files'
+          + (cat.capped ? ' &middot; <span class="cleanup-warn">this run handles only the first ' + Number(cat.cap).toLocaleString() + ' found; run it again for the rest</span>' : '') + '</div></div><span class="cleanup-size">' + formatSize(Number(cat.totalSize) || 0) + '</span></div>';
       }
       html += '<div class="cleanup-actions"><button class="cleanup-btn-clean" id="cleanup-execute">Clean Selected</button></div>';
     }
     body.innerHTML = html;
+
+    const showNotice = function(text, isError) {
+      const el = document.getElementById('cleanup-result');
+      el.innerHTML = escHtml(text).replace(/\n/g, '<br>');
+      el.classList.remove('hidden');
+      el.classList.toggle('cleanup-result-error', !!isError);
+    };
+    document.getElementById('cleanup-dev-toggle').addEventListener('change', async function(e) {
+      try { await window.api.saveSettings({ developerFolderCleanup: e.target.checked }); } catch (er) { /* ignore */ }
+      openCleanupWizard();
+    });
 
     if (cands.length) {
       const updateTotal = function() {
@@ -3769,27 +3803,22 @@
         if (!picked.length) return;
         btn.dataset.busy = '1'; btn.textContent = 'Cancel';
         document.getElementById('cleanup-progress').textContent = 'Verifying 1 of ' + picked.length + '...';
-        const pickedRel = cands.filter(function(c) { return picked.indexOf(c.path) >= 0; }).map(function(c) { return c.relPath; });
         const result = await window.api.deleteFolders(picked, 'smart-cleanup-folders');
         delete btn.dataset.busy; btn.textContent = 'Move Selected Folders to Trash';
         document.getElementById('cleanup-progress').textContent = '';
-        if (result && result.error && !result.cancelled) { alert(result.error); return; }
-        if (result && result.logError) alert(result.logError);
         const moved = (result && result.deleted) || 0;
-        const failures = (result && result.failures) || [];
-        let msg = '';
-        if (result && result.cancelled) msg = 'Cancelled: ' + moved + ' folder' + (moved === 1 ? '' : 's') + ' moved to the Trash before cancelling; the others were left untouched.';
-        else if (failures.length) msg = moved + ' moved, ' + failures.length + ' failed (the batch is not all-or-nothing once moving has started):\n' + failures.slice(0, 5).map(function(f) { return f.path + ': ' + f.reason; }).join('\n');
-        else if (moved) msg = moved + ' folder' + (moved === 1 ? '' : 's') + ' moved to the Trash (' + formatSize(result.freedBytes || 0) + '). You can restore them from the Trash or Recycle Bin.';
+        let msg = cleanupSummary(result, 'folder');
+        if (result && result.logError) msg += (msg ? '\n' : '') + result.logError;
+        if (result && result.error && !moved) { showNotice(msg ? result.error + '\n' + msg : result.error, !result.cancelled); return; }
         if (moved > 0) {
           const movedSet = new Set(result.deletedPaths || []);
           const prefixes = (result.deletedPaths || []).map(function(p) { return p + (p.indexOf('\\') >= 0 ? '\\' : '/'); });
           allFiles = allFiles.filter(function(f) { return !prefixes.some(function(p) { return f.path.startsWith(p); }); });
           removeFoldersFromTree(cands.filter(function(c) { return movedSet.has(c.path); }).map(function(c) { return c.relPath; }));
           applyFilters();
-          openCleanupWizard(msg);
+          openCleanupWizard(msg, !!(result.failures && result.failures.length));
         } else if (msg) {
-          openCleanupWizard(msg);
+          showNotice(msg, true);
         }
       });
     }
@@ -3804,13 +3833,15 @@
       }
       if (filesToDelete.length === 0) return;
       const result = await window.api.deleteFiles(filesToDelete, 'smart-cleanup');
-      if (result && result.error) { alert(result.error); return; }
+      if (result && result.error) { showNotice(result.error, true); return; }
+      let msg = cleanupSummary(result, 'file');
+      if (result && result.logError) msg += (msg ? '\n' : '') + result.logError;
       if (result && result.deleted > 0) {
         const deletedSet = new Set(result.deletedPaths || []);
         allFiles = allFiles.filter(function(f) { return !deletedSet.has(f.path); });
         applyFilters();
-        openCleanupWizard();
-      }
+        openCleanupWizard(msg, !!(result.failures && result.failures.length));
+      } else if (msg) showNotice(msg, true);
     });
   }
 
@@ -3860,7 +3891,7 @@
     const empty = document.getElementById('dellog-empty');
     const c = res.counts || {};
     document.getElementById('dellog-summary').textContent = res.total
-      ? 'Showing ' + st.entries.length.toLocaleString() + ' of ' + res.matched.toLocaleString() + ' matching (' + res.total.toLocaleString() + ' total: ' + (c.trashed || 0) + ' trashed, ' + (c.failed || 0) + ' failed, ' + (c.blocked || 0) + ' blocked)'
+      ? 'Showing ' + st.entries.length.toLocaleString() + ' of ' + res.matched.toLocaleString() + ' matching (' + res.total.toLocaleString() + ' total: ' + (c.trashed || 0) + ' trashed, ' + (c.failed || 0) + ' failed, ' + (c.blocked || 0) + ' blocked, ' + (c.skipped || 0) + ' skipped)'
       : '';
     list.innerHTML = st.entries.map(function(e, i) {
       return '<div class="dellog-row" data-i="' + i + '"><span class="dellog-badge dellog-' + escHtml(e.status) + '">' + escHtml(e.status) + '</span>'
@@ -3870,7 +3901,7 @@
         + (e.files != null ? ' &middot; ' + (Number(e.files) || 0).toLocaleString() + ' files' : '')
         + (e.type === 'folder' ? ' &middot; folder' : '')
         + ' &middot; ' + escHtml(e.source || 'unknown') + '</div>'
-        + (e.reason ? '<div class="dellog-reason">' + escHtml(e.reason) + '</div>' : '') + '</div>'
+        + (e.reason ? '<div class="dellog-reason">' + escHtml(e.reason) + (e.finalState ? ' (final state: ' + escHtml(e.finalState === 'gone' ? 'already gone' : 'untouched') + ')' : '') + '</div>' : '') + '</div>'
         + '<button class="dellog-copy" data-i="' + i + '" title="Copy path">Copy path</button></div>';
     }).join('');
     empty.classList.toggle('hidden', st.entries.length > 0);

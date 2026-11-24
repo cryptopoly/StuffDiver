@@ -117,11 +117,11 @@ test('smart cleanup scans the full file list (incl. Windows-style separators)', 
     expect(cats.find(c => c.id === 'node_modules')).toBeUndefined();
     const folders = await page.evaluate(() => window.api.cleanupFoldersScan());
     expect(folders.candidates.map(c => c.relPath)).toEqual(['node_modules']);
-    expect(folders.candidates[0].files).toBe(1);
+    expect(folders.candidates[0].files).toBe(2);
     await page.locator('#tools-btn').click();
     await page.locator('[data-tool="cleanup"]').click();
     await expect(page.locator('#cleanup-body')).toContainText('node_modules');
-  }, { prepare: (fx) => { fs.writeFileSync(path.join(fx.root, 'package.json'), '{}'); fs.writeFileSync(path.join(fx.root, 'package-lock.json'), '{}'); } });
+  }, { prepare: (fx) => { fs.writeFileSync(path.join(fx.root, 'package.json'), '{}'); fs.writeFileSync(path.join(fx.root, 'package-lock.json'), '{}'); fs.writeFileSync(path.join(fx.root, 'node_modules/.package-lock.json'), '{}'); } });
 });
 
 test('duplicate finder reports the exact copy as a gold match', async () => {

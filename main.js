@@ -314,7 +314,8 @@ handleTrusted('query-files-by-ext', async (event, ext, limit) => {
 // Is the process running with elevated rights? (Windows: Administrator;
 // POSIX: root.) Used to explain "inaccessible" counts.
 let elevatedCache = null;
-handleTrusted('is-elevated', async () => {
+handleTrusted('is-elevated', async () => detectElevated());
+async function detectElevated() {
   if (elevatedCache !== null) return elevatedCache;
   if (process.platform !== 'win32') {
     elevatedCache = typeof process.getuid === 'function' && process.getuid() === 0;
@@ -330,7 +331,7 @@ handleTrusted('is-elevated', async () => {
     elevatedCache = false;
   }
   return elevatedCache;
-});
+}
 
 // Windows: restart the app with a UAC prompt so protected folders can be read.
 // macOS: open the Full Disk Access pane. Other platforms: no-op.
@@ -363,33 +364,40 @@ handleTrusted('elevate-access', async () => {
 // relative to the scanned folder, on every platform. First match wins, so
 // specific patterns come before generic ones.
 const CLEANUP_PATTERNS = [
-  { id: 'recycle', label: 'Recycle Bin', icon: '\u{1F5D1}', re: /^\/\$Recycle\.Bin\//i },
+  // Recycle Bin / Trash contents are not offered: moving them to the trash again is meaningless and is refused.
   { id: 'wintemp', label: 'Windows temp files', icon: '\u{1F550}', re: /(^\/Windows\/Temp\/|\/AppData\/Local\/Temp\/)/i },
   { id: 'winupdate', label: 'Windows Update downloads', icon: '\u{1FA9F}', re: /^\/Windows\/SoftwareDistribution\/Download\//i },
-  // Crash dumps only inside known crash folders, never any *.dmp (those can be memory dumps users keep or other tools' data).
-  { id: 'crash', label: 'Crash dumps', icon: '\u{1F4A5}', re: /(\/CrashDumps\/|\/Crashpad\/|^\/Windows\/Minidump\/|(^|\/)MEMORY\.DMP$|^\/var\/crash\/)/ },
-  // Only re-downloadable caches. ~/.lmstudio/models holds models people imported by hand (may be the only copy).
-  { id: 'aimodels', label: 'AI model caches (re-downloadable)', icon: '\u{1F9E0}', re: /(\/\.cache\/(huggingface|torch|whisper)\/|\/\.ollama\/models\/)/i },
-  { id: 'pkgcache', label: 'Package manager caches', icon: '\u{1F4E6}', re: /(\/AppData\/Local\/(pip|npm-cache|NuGet|Yarn|pnpm)\/|\/\.nuget\/packages\/|\/\.gradle\/caches\/|\/\.m2\/repository\/|\/\.cargo\/registry\/|\/Library\/Caches\/(pip|Homebrew)\/|\/var\/cache\/apt\/archives\/)/i },
-  { id: 'syscache', label: 'System & app caches', icon: '\u{1F5C4}', re: /(\/(\.cache|\.npm|INetCache|GPUCache|Code Cache)\/|\/Library\/Caches\/|\/\.local\/share\/Trash\/|\/\.Trash\/)/i },
-  { id: 'temp', label: 'Temp files', icon: '\u{1F550}', re: /\.(tmp|temp)$/i },
-  // .log is also the write-ahead file of LevelDB/SQLite-style stores (extensions, wallets, Slack, Chrome sync, VS Code state).
-  // Offered only when clearly a log: never in store folders, never a 6-digit counter name, never next to CURRENT/MANIFEST,
-  // and inside app-data trees only when the parent folder is literally log/logs.
+  // Crash dumps only inside known crash folders; MEMORY.DMP only as C:\Windows\MEMORY.DMP.
+  { id: 'crash', label: 'Crash dumps', icon: '\u{1F4A5}', re: /(\/CrashDumps\/|\/Crashpad\/|^\/Windows\/Minidump\/|(^|\/)MEMORY\.DMP$|^\/var\/crash\/)/,
+    skip: (full) => /(^|\/)MEMORY\.DMP$/.test(full) && !/^[A-Za-z]:\/Windows\/MEMORY\.DMP$/i.test(full) },
+  // Re-downloadable caches only: not the Hugging Face token, not LM Studio models, not Ollama models (may come from local files).
+  { id: 'aimodels', label: 'AI model caches (re-downloadable)', icon: '\u{1F9E0}', re: /(\/\.cache\/huggingface\/(hub|datasets)\/|\/\.cache\/(torch|whisper)\/)/i },
+  // Cache/store folders only: not pnpm.exe / global CLIs (AppData/Local/pnpm), not Yarn global installs, not ~/.m2/repository (mvn-installed artifacts).
+  { id: 'pkgcache', label: 'Package manager caches', icon: '\u{1F4E6}', re: /(\/AppData\/Local\/(pip\/Cache|npm-cache|NuGet\/(v3-cache|http-cache)|pnpm\/store|Yarn\/Cache)\/|\/\.nuget\/packages\/|\/\.gradle\/caches\/|\/\.cargo\/registry\/(cache|src)\/|\/Library\/Caches\/(pip|Homebrew)\/|\/var\/cache\/apt\/archives\/)/i },
+  { id: 'syscache', label: 'System & app caches', icon: '\u{1F5C4}', re: /(\/(\.cache|\.npm|INetCache|GPUCache|Code Cache)\/|\/Library\/Caches\/)/i,
+    skip: (full) => /\/\.cache\/(lm-studio|lmstudio|huggingface\/(?!hub\/|datasets\/))/i.test(full) },
+  { id: 'temp', label: 'Temp files', icon: '\u{1F550}', re: /\.(tmp|temp)$/i,
+    skip: (full) => /^~/.test(full.split('/').pop()) },   // Office ~WRL*.tmp / ~$ recovery and lock files
+  // .log is also the write-ahead file of LevelDB/SQLite-style stores (extensions, wallets, Slack, Chrome sync, VS Code state),
+  // and chat clients keep their history as .log. Offered only when clearly a log.
   { id: 'logs', label: 'Log files', icon: '\u{1F4DD}', re: /\.log$/i,
     skip: (full, ctx) => {
       const parts = full.split('/');
       const name = parts[parts.length - 1], parent = parts[parts.length - 2] || '';
-      if (/^\d{6}\.log$/.test(name)) return true;
+      if (/^\d{6,}\.log$/.test(name)) return true;   // LevelDB / Kafka-style numbered segments
       if (/\/(leveldb|Local Storage|IndexedDB|Local Extension Settings|Sync Extension Settings|Session Storage|Sync Data|GCM Store|WebCache|databases|Service Worker|File System|blob_storage)\//i.test(full)) return true;
+      if (/\/(irclogs?|chatlogs?|ChatStorage|Slack|Discord|Teams|Skype|WhatsApp|Telegram|Signal|Zoom|Pidgin|Adium|HexChat|weechat|Messages)\//i.test(full)) return true;
       if (ctx && ctx.dbDirs.has(parts.slice(0, -1).join('/'))) return true;
       if (/\/(Application Support|AppData|\.config|\.local\/share)\//i.test(full) && !/^(logs?)$/i.test(parent)) return true;
       return false;
     } },
-  { id: 'junkdirs', label: 'Spotlight index, volume trash & thumbnail caches', icon: '\u{1F5C2}', re: /(\/\.Spotlight-V100\/|\/\.Trashes\/|\/\.cache\/thumbnails\/)/ },
+  { id: 'junkdirs', label: 'Spotlight index & thumbnail caches', icon: '\u{1F5C2}', re: /(\/\.Spotlight-V100\/|\/\.cache\/thumbnails\/)/ },
+  // desktop.ini names Documents/Start Menu folders and sets their icons: never pre-ticked, never in special folders.
+  { id: 'desktopini', label: 'desktop.ini files', icon: '\u{1F5D1}', re: /(^|\/)desktop\.ini$/i,
+    skip: (full) => /\/(Documents|My Documents|Start Menu|Desktop|Pictures|Music|Videos|Downloads|Favorites|Links|Saved Games|Searches|Contacts|AppData|Windows|Program Files[^/]*|ProgramData)\//i.test(full) || /^[A-Za-z]:\/Users\/[^/]+\/desktop\.ini$/i.test(full) },
   // Pre-ticked presets: whole-name anchors only, so "MyThumbs.dbs" or "x.Spotlight.project" can never match.
   { id: 'dsstore', label: '.DS_Store files', icon: '\u{1F47B}', re: /(^|\/)\.DS_Store$/ },
-  { id: 'thumbs', label: 'Thumbs.db & desktop.ini', icon: '\u{1F5D1}', re: /(^|\/)(Thumbs\.db|desktop\.ini)$/i }
+  { id: 'thumbs', label: 'Thumbs.db files', icon: '\u{1F5D1}', re: /(^|\/)Thumbs\.db$/i }
 ];
 const CLEANUP_PATH_CAP = 20000;
 
@@ -401,22 +409,26 @@ handleTrusted('cleanup-scan', async () => {
     if (f.name === 'CURRENT' || (f.name && f.name.startsWith('MANIFEST-'))) dbDirs.add(f.path.replace(/\\/g, '/').split('/').slice(0, -1).join('/'));
   }
   const ctx = { dbDirs };
+  const pathCap = (E2E && global.__e2ePathCap) || CLEANUP_PATH_CAP; // E2E-only override so tests can exercise the cap cheaply
   for (const f of lastScanAllFiles) {
     if (f.cloudStatus === 'icloud-only') continue;
     const rp = '/' + String(f.relativePath || f.name).replace(/\\/g, '/');
     for (const c of cats) {
       if (c.re.test(rp)) {
-        if (c.skip && c.skip(f.path.replace(/\\/g, '/'), ctx)) break;
+        const full = f.path.replace(/\\/g, '/');
+        if (c.skip && c.skip(full, ctx)) break;
+        // Files in cloud-synced folders or already in a Trash are never offered (a delete there is felt everywhere / is meaningless).
+        if (cleanupFolders.cloudSyncedReason(f.path) || cleanupFolders.trashReason(f.path)) break;
         // Never offer paths the delete guard would refuse (a single one refuses the whole request).
         if (protectedReason(f.path, true)) break;
         c.count++;
         c.totalSize += f.size;
-        if (c.paths.length < CLEANUP_PATH_CAP) c.paths.push(f.path);
+        if (c.paths.length < pathCap) c.paths.push(f.path);
         break;
       }
     }
   }
-  return cats.filter(c => c.count > 0).map(({ re, skip, ...rest }) => rest).sort((a, b) => b.totalSize - a.totalSize);
+  return cats.filter(c => c.count > 0).map(({ re, skip, ...rest }) => ({ ...rest, capped: rest.count > rest.paths.length, cap: pathCap })).sort((a, b) => b.totalSize - a.totalSize);
 });
 
 handleTrusted('find-duplicates', async (event) => {
@@ -818,6 +830,7 @@ handleTrusted('delete-files', async (event, filePaths, source) => {
   for (const fp of safePaths) {
     const reason = protectedReason(fp);
     if (reason) { blocked.push({ path: fp, reason }); continue; }
+    if (cleanupFolders.trashReason(fp)) { blocked.push({ path: fp, reason: 'already in a Trash or Recycle Bin (it cannot be moved to the Trash again)' }); continue; }
     // This handler only trashes files. Folders go through delete-folders and its safeguards.
     try {
       const st = fs.lstatSync(fp);
@@ -856,7 +869,7 @@ handleTrusted('delete-files', async (event, filePaths, source) => {
 
   if (result.response !== 1) return { deleted: 0, deletedPaths: [] };
 
-  const deletedPaths = [];
+  const deletedPaths = [], failures = [];
   let logError = null;
   for (const fp of safePaths) {
     const entry = { t: Date.now(), path: fp, size: sizeByPath.get(fp) ?? null, source: source || 'collector' };
@@ -867,7 +880,10 @@ handleTrusted('delete-files', async (event, filePaths, source) => {
       rec = { ...entry, status: 'trashed' };
     } catch (e) {
       console.error('Failed to trash:', fp, e.message);
-      rec = { ...entry, status: 'failed', reason: e.message };
+      // macOS can report "doesn't exist" for an item it did remove: record what is really there now.
+      let gone = false; try { fs.lstatSync(fp); } catch (er) { gone = er.code === 'ENOENT'; }
+      rec = { ...entry, status: 'failed', finalState: gone ? 'gone' : 'untouched', reason: osErrorReason(e) };
+      failures.push({ path: fp, reason: rec.reason, state: 'failed', finalState: rec.finalState });
     }
     logError = (await logDeletion([rec])) || logError; // written per item: a crash mid-batch loses nothing
   }
@@ -875,7 +891,7 @@ handleTrusted('delete-files', async (event, filePaths, source) => {
     const gone = new Set(deletedPaths);
     lastScanAllFiles = lastScanAllFiles.filter(f => !gone.has(f.path));
   }
-  return { deleted: deletedPaths.length, deletedPaths, ...(logError ? { logError } : {}) };
+  return { deleted: deletedPaths.length, deletedPaths, failures, ...(logError ? { logError } : {}) };
 });
 
 
@@ -911,12 +927,21 @@ const osErrorReason = (e) => {
   const code = e.code || (/\b(E[A-Z]{3,}|ERROR_[A-Z_]+)\b/.exec(e.message || '') || [])[1];
   return (code && !String(e.message).includes(code) ? code + ': ' : '') + (e.message || String(e));
 };
+const devFoldersOn = () => loadSettings().developerFolderCleanup === true;
 const FOLDER_BATCH_CAP = 500;
 const FOLDER_SCAN_CAP = 2000;
 
 // Full delete-time verification of one folder. Returns {ok:true, ...info} or {ok:false, reason}.
 let folderDeleteCancel = false;
+// Working directories of running processes, memoised for a few seconds (lsof is slow on big machines).
+let cwdMemo = { t: 0, v: null };
+function currentCwds() {
+  if (E2E && typeof global.__e2eCwds === 'function') return global.__e2eCwds();
+  if (Date.now() - cwdMemo.t > 3000) cwdMemo = { t: Date.now(), v: cleanupFolders.runningCwds() };
+  return cwdMemo.v;
+}
 async function evaluateFolder(fp) {
+  cleanupFolders.setElevated(await detectElevated());
   let resolved;
   try { resolved = assertAllowedFilePath(fp); } catch (e) { return { ok: false, path: String(fp), reason: 'is outside the scanned folder' }; }
   const fail = (reason) => ({ ok: false, path: resolved, reason });
@@ -942,33 +967,40 @@ async function evaluateFolder(fp) {
     const expected = path.join(fs.realpathSync.native(root), path.relative(root, resolved));
     if (!eq(fs.realpathSync.native(resolved), expected)) return fail('resolves to a different location than the scanned path (symlink or junction involved)');
   } catch (e) { return fail('cannot be resolved (' + (e.code || e.message) + ')'); }
-  const ci2 = process.platform === 'win32' || process.platform === 'darwin';
-  const mc = cleanupFolders.mountConflict([resolved, realNow], mountList(), ci2);
+  const mc = cleanupFolders.mountConflict([resolved, realNow], mountList(), ci);
   if (mc) return fail(mc);
   if (cleanupFolders.deviceDiffersFromParent(resolved, walkFs())) return fail('is on a different device than its parent folder (mount or volume boundary)');
-  const w = await cleanupFolders.inspectFolder(resolved, walkFs(), undefined, () => folderDeleteCancel);
+  const w = await cleanupFolders.inspectFolder(resolved, walkFs(), undefined, () => folderDeleteCancel, c);
   if (w.error) return fail(w.error);
-  if (w.git) return fail(`contains a .git folder or file (${w.git}), so it may hold a repository`);
+  if (w.git) return fail(`contains a version-control folder or file (${w.git}), so it may hold a repository`);
+  if (w.userDoc) return fail(`contains ${w.userDoc}, a document that does not belong in ${c.label}`);
+  if (w.forbidden) return fail(`contains ${w.forbidden}, an Xcode archive that cannot be rebuilt`);
   for (const d of w.dirs) {
     const dr = protectedReason(d, true);
     if (dr) return fail(`contains ${d}, which is ${dr}`);
   }
-  return { ok: true, path: resolved, logPath: realNow || resolved, kind: c.kind, label: c.label, reason: c.reason, size: w.bytes, files: w.files, newest: w.newest };
+  const sig = cleanupFolders.projectSignals(resolved, c.kind, { fsx: walkFs(), cwds: currentCwds() });
+  if (sig.severe) return fail(sig.severe);
+  return { ok: true, path: resolved, logPath: realNow || resolved, kind: c.kind, label: c.label, reason: c.reason, size: w.bytes, files: w.files, newest: w.newest, warnings: sig.warnings };
 }
 
 handleTrusted('cleanup-folders-scan', async () => {
   const ci = process.platform === 'win32' || process.platform === 'darwin';
+  if (!devFoldersOn()) return { candidates: [], totalFound: 0, shown: 0, cap: FOLDER_SCAN_CAP, disabled: true };
   if (!lastScanFolder) return { candidates: [], totalFound: 0, shown: 0, cap: FOLDER_SCAN_CAP };
-  const found = cleanupFolders.findCandidates(lastScanAllFiles, lastScanFolder, ci, walkFs(), mountList());
+  cleanupFolders.setElevated(await detectElevated());
+  const found = cleanupFolders.findCandidates(lastScanAllFiles, lastScanFolder, ci, walkFs(), mountList(), currentCwds());
   const now = Date.now();
   const out = found.map(c => {
     let refused = protectedReason(c.path, true) ? `is ${protectedReason(c.path, true)}` : containsProtected(c.path);
     if (!refused && c.refusedReason) refused = c.refusedReason;
-    if (!refused && c.hasGit) refused = 'contains a .git folder, so it may hold a repository';
+    if (!refused && c.hasGit) refused = 'contains a .git or other version-control folder, so it may hold a repository';
+    if (!refused && c.userDoc) refused = `contains ${c.userDoc}, a document that does not belong in ${c.label}`;
+    if (!refused && c.forbidden) refused = `contains ${c.forbidden}, an Xcode archive that cannot be rebuilt`;
     const ageDays = c.newest ? Math.floor((now - c.newest) / 86400000) : null;
     const recent = ageDays !== null && ageDays < cleanupFolders.RECENT_DAYS;
     const many = c.files > cleanupFolders.MANY_FILES;
-    const warnings = [];
+    const warnings = [...(c.signals || [])];
     if (recent) warnings.push(`modified ${ageDays === 0 ? 'today' : ageDays + ' day(s) ago'}: probably in use`);
     if (many) warnings.push(`${c.files.toLocaleString()} files: review before cleaning`);
     if (c.defaultOff) warnings.push('may contain packages installed by hand');
@@ -990,6 +1022,7 @@ handleTrusted('delete-folders', async (event, folderPaths, source) => {
   const src = source || 'smart-cleanup-folders';
   const nothing = { deleted: 0, deletedPaths: [], freedBytes: 0 };
   if (!Array.isArray(folderPaths) || !folderPaths.length) return nothing;
+  if (!devFoldersOn()) return { ...nothing, error: 'Refused: developer folder cleanup is switched off. Nothing was moved.' };
   if (folderDeleteBusy) return { ...nothing, error: 'Another folder cleanup is already running.' };
   folderDeleteBusy = true;
   try {
@@ -1002,11 +1035,17 @@ handleTrusted('delete-folders', async (event, folderPaths, source) => {
       return { ...nothing, error: `Refused: ${kept.length} folders selected, the limit is ${FOLDER_BATCH_CAP} per run. Nothing was changed.` };
     }
     folderDeleteCancel = false;
+    // Cancelled before anything moved: every requested item is accounted for in the log.
+    const cancelledEarly = async () => {
+      const t = Date.now();
+      const le = await logDeletion(kept.map(k => ({ t, path: k, type: 'folder', status: 'skipped', reason: 'cancelled before anything was moved', source: src })));
+      return { ...nothing, cancelled: true, skipped: kept.length, ...(le ? { logError: le } : {}), error: 'Cancelled. Nothing was moved.' };
+    };
     const checks = [];
     for (const k of kept) {
       sendFolderProgress('verify', checks.length, kept.length, k);
       checks.push(await evaluateFolder(k));
-      if (folderDeleteCancel) return { ...nothing, cancelled: true, error: 'Cancelled. Nothing was moved.' };
+      if (folderDeleteCancel) return cancelledEarly();
     }
     const blocked = checks.filter(c => !c.ok);
     if (blocked.length) {
@@ -1022,12 +1061,14 @@ handleTrusted('delete-folders', async (event, folderPaths, source) => {
     if (!E2E) {
       const top = [...checks].sort((a, b) => b.size - a.size).slice(0, 10).map(c => `${formatSizeMain(c.size)}  ${c.path}`);
       const recent = checks.filter(c => c.newest && Date.now() - c.newest < cleanupFolders.RECENT_DAYS * 86400000).length;
+      const warned = checks.filter(c => c.warnings && c.warnings.length);
       const r = await dialog.showMessageBox(mainWindow, {
         type: 'warning', buttons: ['Cancel', 'Move to Trash'], defaultId: 0, cancelId: 0,
         title: 'Clean up folders',
-        message: `Move ${checks.length} folder${checks.length > 1 ? 's' : ''} (${formatSizeMain(total)}, ${checks.reduce((a, c) => a + c.files, 0).toLocaleString()} files) to the trash?`,
+        message: `Move ${checks.length} folder${checks.length > 1 ? 's' : ''} (${formatSizeMain(total)} logical size, ${checks.reduce((a, c) => a + c.files, 0).toLocaleString()} entries counted just now) to the trash?`,
         detail: (recent ? `${recent} of them were modified in the last ${cleanupFolders.RECENT_DAYS} days.\n\n` : '') +
-          `Largest ${top.length}:\n${top.join('\n')}\n\nThey are moved to the Trash (macOS/Linux) or Recycle Bin (Windows); nothing is permanently deleted, and you can restore them from there. Each one is recorded in the deletion log.`
+          (warned.length ? `Warnings (${warned.length} folder${warned.length > 1 ? 's' : ''}):\n` + warned.slice(0, 5).map(c => `- ${c.path}: ${c.warnings.join('; ')}`).join('\n') + (warned.length > 5 ? `\n(+${warned.length - 5} more)` : '') + '\n\n' : '') +
+          `Largest ${top.length}:\n${top.join('\n')}\n\nSizes are logical sizes; space actually freed can be less (shared or compressed files). They are moved to the Trash (macOS/Linux) or Recycle Bin (Windows); nothing is permanently deleted, and you can restore them from there. Each one is recorded in the deletion log.`
       });
       if (r.response !== 1) return nothing;
     }
@@ -1036,7 +1077,7 @@ handleTrusted('delete-folders', async (event, folderPaths, source) => {
     for (const c of checks) {
       sendFolderProgress('verify', again.length, checks.length, c.path);
       again.push(await evaluateFolder(c.path));
-      if (folderDeleteCancel) return { ...nothing, cancelled: true, error: 'Cancelled. Nothing was moved.' };
+      if (folderDeleteCancel) return cancelledEarly();
     }
     const changed = again.filter(c => !c.ok);
     if (changed.length) {
@@ -1050,22 +1091,28 @@ handleTrusted('delete-folders', async (event, folderPaths, source) => {
       sendFolderProgress('trash', deletedPaths.length + failed.length, checks.length, c.path);
       const entry = { t: Date.now(), path: c.logPath || c.path, type: 'folder', size: c.size, files: c.files, category: c.kind, source: src };
       let rec;
-      // Full re-verification (symlinks, real location, marker, .git, protected paths) immediately before EVERY move.
       if (E2E && typeof global.__e2eBeforeTrash === 'function') await global.__e2eBeforeTrash(c.path); // test hook, E2E only
-      if (folderDeleteCancel) { failed.push(c.path); failures.push({ path: c.path, reason: 'cancelled before it was moved' }); continue; } // cancelled: remaining folders are left untouched
-      const last = await evaluateFolder(c.path);
-      if (!last.ok) {
-        rec = { ...entry, status: 'blocked', reason: 'changed just before delete: ' + last.reason };
-        failed.push(c.path); failures.push({ path: c.path, reason: rec.reason });
-      } else {
-        try {
-          await shell.trashItem(c.path);
-          deletedPaths.push(c.path); freedBytes += c.size;
-          rec = { ...entry, status: 'trashed', reason: c.reason };
-        } catch (e) {
-          failed.push(c.path);
-          rec = { ...entry, status: 'failed', reason: osErrorReason(e) };
-          failures.push({ path: c.path, reason: rec.reason });
+      const skip = (why) => { failed.push(c.path); failures.push({ path: c.path, reason: why, state: 'skipped' }); return { ...entry, status: 'skipped', reason: why }; };
+      if (folderDeleteCancel) rec = skip('cancelled before it was moved');
+      else {
+        // Full re-verification (symlinks, real location, marker, version control, protected paths) immediately before EVERY move.
+        const last = await evaluateFolder(c.path);
+        if (!last.ok && folderDeleteCancel && last.reason === 'cancelled') rec = skip('cancelled before it was moved');
+        else if (!last.ok) {
+          rec = { ...entry, status: 'blocked', reason: 'changed just before delete: ' + last.reason };
+          failed.push(c.path); failures.push({ path: c.path, reason: rec.reason, state: 'blocked' });
+        } else {
+          try {
+            await shell.trashItem(c.path);
+            deletedPaths.push(c.path); freedBytes += c.size;
+            rec = { ...entry, status: 'trashed', reason: c.reason };
+          } catch (e) {
+            failed.push(c.path);
+            // Some platforms report an error although the item was moved: record what is really there now.
+            let gone = false; try { fs.lstatSync(c.path); } catch (er) { gone = er.code === 'ENOENT'; }
+            rec = { ...entry, status: 'failed', finalState: gone ? 'gone' : 'untouched', reason: osErrorReason(e) };
+            failures.push({ path: c.path, reason: rec.reason, state: 'failed', finalState: rec.finalState });
+          }
         }
       }
       logError = (await logDeletion([rec])) || logError; // per item, right after the move
@@ -1088,10 +1135,10 @@ handleTrusted('query-deletion-log', async (event, opts) => {
   const limit = Math.max(1, Math.min(Number(o.limit) || 200, 1000));
   const offset = Math.max(0, Number(o.offset) || 0);
   const file = Math.max(0, Math.min(Number(o.file) || 0, LOG_KEEP - 1));
-  const status = ['trashed', 'failed', 'blocked'].includes(o.status) ? o.status : null;
+  const status = ['trashed', 'failed', 'blocked', 'skipped'].includes(o.status) ? o.status : null;
   const q = typeof o.search === 'string' ? o.search.trim().toLowerCase() : '';
   const all = await readLogEntries(file);
-  const counts = { trashed: 0, failed: 0, blocked: 0 };
+  const counts = { trashed: 0, failed: 0, blocked: 0, skipped: 0 };
   const matched = [];
   for (let i = all.length - 1; i >= 0; i--) {
     const e = all[i];
@@ -1312,7 +1359,7 @@ function loadSettings() {
   }
 }
 
-const ALLOWED_SETTINGS_KEYS = ['recentFolders', 'theme', 'monitorFolder', 'monitorInterval', 'monitorEnabled', 'lastViewMode', 'scanExclusions', 'mftFastScan'];
+const ALLOWED_SETTINGS_KEYS = ['developerFolderCleanup', 'recentFolders', 'theme', 'monitorFolder', 'monitorInterval', 'monitorEnabled', 'lastViewMode', 'scanExclusions', 'mftFastScan'];
 
 function saveSettings(settings) {
   const existing = loadSettings();

@@ -16,6 +16,22 @@ const entriesOf = (dir, fsx) => { try { return fsx.readdirSync(dir, { withFileTy
 const anyFile = (dir, names, fsx) => entriesOf(dir, fsx).some(e => names.includes(e.name) && e.isFile());
 const exists = (p, fsx) => anyFile(path.dirname(p), [path.basename(p)], fsx);
 const LOCKFILES = ['package-lock.json', 'yarn.lock', 'pnpm-lock.yaml', 'bun.lock', 'bun.lockb'];
+const VCS_NAMES = new Set(['.git', '.hg', '.jj', '.svn', '.bzr', '.fossil', '_fossil_']);
+// Documents people write by hand: never found in tool output such as target/, .next/, __pycache__ or DerivedData.
+const USER_DOC_EXT = /\.(docx?|xlsx?|pptx?|odt|ods|odp|pdf|pages|numbers|key|psd|ai|sketch|fig|md|markdown|rtf)$/i;
+let elevated = false; // set by the app: Windows Administrator / POSIX root
+function setElevated(v) { elevated = !!v; }
+const CLOUD_RE = /^(cloudstorage|mobile documents|icloud drive.*|iclouddrive|dropbox.*|google drive.*|googledrive|my drive|box|box sync|onedrive.*|nextcloud.*|owncloud.*|pcloud.*|mega.*|synologydrive.*|syncthing.*|sync|seafile.*|creative cloud files.*|yandex\.disk.*|resilio.*|insync.*|tresorit.*|spideroak.*|backblaze.*|idrive.*)$/;
+// Reason if any path component is a cloud-synced root (trashing there deletes the cloud copy everywhere).
+function cloudSyncedReason(p) {
+  const segs = String(p).replace(/\\/g, '/').toLowerCase().split('/').filter(Boolean);
+  return segs.some(x => CLOUD_RE.test(x)) ? 'is a cloud-synced folder: deleting here deletes it everywhere' : null;
+}
+const TRASH_RE_TEST = (norm, segs) => segs.some(x => x === '$recycle.bin' || x === 'recycler' || /^\.trash(-\d+)?$/.test(x) || x === '.trashes') || /\/\.local\/share\/trash(\/|$)/.test(norm);
+function trashReason(p) {
+  const norm = String(p).replace(/\\/g, '/').toLowerCase();
+  return TRASH_RE_TEST(norm, norm.split('/').filter(Boolean)) ? 'is already in a Trash or Recycle Bin' : null;
+}
 const VENV_ENTRIES = new Set(['bin', 'Scripts', 'lib', 'Lib', 'lib64', 'include', 'Include', 'share', 'pyvenv.cfg', '.gitignore', 'CACHEDIR.TAG', '.gitkeep']);
 
 // Locations where a matching folder belongs to an installed tool/app/system, or
@@ -47,6 +63,7 @@ function blockedLocation(dir, opts = {}) {
     if (segs[i] === 'appdata' && segs[i + 1] === 'roaming' && segs[i + 2] === 'npm') return 'is a global npm install location';
   }
   if (/^[a-z]:\/(program files( \(x86\))?|programdata|windows)(\/|$)/.test(norm)) return 'is inside a Windows system or program folder';
+  for (let i = 0; i < segs.length - 1; i++) if (segs[i] === 'resources' && (segs[i + 1] === 'app' || segs[i + 1] === 'app.asar.unpacked')) return 'is inside a packaged application (resources/app)';
   // On the system drive only user folders qualify; tool installs like C:\node22 or C:\tools are not projects.
   const win = opts.win !== undefined ? opts.win : process.platform === 'win32';
   const sysDrive = (opts.systemDrive || process.env.SystemDrive || 'C:').toLowerCase().replace(/[\\/]+$/, '');
@@ -58,8 +75,8 @@ function blockedLocation(dir, opts = {}) {
   // Allow-by-location: folder cleanup is for project areas, not for where tools, apps and sync clients live.
   const inTmp = tmps.some(t => norm.startsWith(t + '/'));
   // Already-trashed items are never candidates (the Recycle Bin / Trash presets handle them as files).
-  if (segs.some(x => x === '$recycle.bin' || x === 'recycler' || /^\.trash(-\d+)?$/.test(x) || x === '.trashes') || /\/\.local\/share\/trash(\/|$)/.test(norm)) return 'is already in a Trash or Recycle Bin';
-  if (segs.some(x => /^(cloudstorage|mobile documents|icloud drive.*|dropbox.*|google drive.*|googledrive|my drive|box|box sync|onedrive.*)$/.test(x))) return 'is a cloud-synced folder: deleting here deletes it everywhere';
+  if (TRASH_RE_TEST(norm, segs)) return 'is already in a Trash or Recycle Bin';
+  if (segs.some(x => CLOUD_RE.test(x))) return 'is a cloud-synced folder: deleting here deletes it everywhere';
   if (/^\/(volumes|mnt|media|run\/media)\//.test(norm) || /^(\\\\|\/\/)/.test(dir)) return 'is on an external, network or mounted volume';
   if (segs.some(x => /^(linuxbrew|\.linuxbrew|homebrew|cellar)$/.test(x))) return 'is inside a Homebrew install';
   if (!inTmp && segs.includes('appdata')) return 'is inside AppData (installed apps and settings), not a project';
@@ -70,6 +87,7 @@ function blockedLocation(dir, opts = {}) {
     if (rel[0].startsWith('.')) return 'is inside a hidden folder in your home (tools and settings live there)';
     if (rel[0] === 'library' && rel[1] !== 'developer') return 'is inside your Library folder (app data), not a project';
   }
+  if (win && (opts.elevated !== undefined ? opts.elevated : elevated) && !homes.some(h => norm.startsWith(h + '/')) && !inTmp) return 'is outside your user profile and this app is running elevated (Administrator)';
   if (uid === 0 && !/^(\/root|\/home\/|\/users\/|[a-z]:\/users\/)/.test(norm)) return 'is outside home folders and this app is running as root/administrator';
   return null;
 }
@@ -80,12 +98,17 @@ const KINDS = [
   {
     id: 'node_modules', label: 'node_modules', icon: '\u{1F4E6}',
     name: n => n === 'node_modules',
-    marker: (d, fsx) => anyFile(path.dirname(d), ['package.json'], fsx) && anyFile(path.dirname(d), LOCKFILES, fsx),
+    marker: (d, fsx) => {
+      if (!(anyFile(path.dirname(d), ['package.json'], fsx) && anyFile(path.dirname(d), LOCKFILES, fsx))) return false;
+      // The package manager itself writes one of these inside node_modules; hand-made or shipped folders lack them.
+      return anyFile(d, ['.package-lock.json', '.modules.yaml', '.yarn-integrity'], fsx) || 'has no package-manager install marker (.package-lock.json, .modules.yaml or .yarn-integrity)';
+    },
     reason: 'node_modules next to package.json and a lockfile (a project you installed, not a shipped package)',
     restore: 'Reinstall with npm install (or yarn / pnpm install). Restoring from the trash also works.'
   },
   {
     id: 'pycache', label: 'Python bytecode cache', icon: '\u{1F40D}',
+    denyDocs: true,
     name: n => n === '__pycache__',
     marker: (d, fsx) => {
       const entries = fsx.readdirSync(d, { withFileTypes: true });
@@ -111,14 +134,21 @@ const KINDS = [
   {
     id: 'derived_data', label: 'Xcode DerivedData', icon: '\u{1F528}',
     name: n => n === 'DerivedData',
-    marker: (d) => /[\\/]Library[\\/]Developer[\\/]/.test(d),
+    denyDocs: true, forbidNames: (n) => /\.xcarchive$/i.test(n) || n.toLowerCase() === 'archives',
+    marker: (d) => /[\\/]Library[\\/]Developer[\\/]Xcode[\\/]DerivedData$/.test(d),
     reason: 'DerivedData inside a Library/Developer folder',
     restore: 'Xcode rebuilds it on the next build (the first build is slower).'
   },
   {
     id: 'target', label: 'Build output (target)', icon: '\u{1F3D7}',
     name: n => n === 'target',
-    marker: (d, fsx) => anyFile(path.dirname(d), ['Cargo.toml', 'pom.xml'], fsx),
+    denyDocs: true,
+    marker: (d, fsx) => {
+      const up = path.dirname(d);
+      if (anyFile(up, ['Cargo.toml'], fsx)) return anyFile(d, ['CACHEDIR.TAG'], fsx) || 'has no CACHEDIR.TAG written by cargo';
+      if (anyFile(up, ['pom.xml'], fsx)) return entriesOf(d, fsx).some(e => e.isDirectory() && ['classes', 'maven-status', 'generated-sources', 'maven-archiver'].includes(e.name)) || 'has no Maven build output folders';
+      return false;
+    },
     reason: 'target next to Cargo.toml or pom.xml',
     restore: 'Rebuild with cargo build or mvn package.'
   },
@@ -132,7 +162,8 @@ const KINDS = [
   {
     id: 'next', label: 'Next.js build cache', icon: '\u{1F3D7}',
     name: n => n === '.next',
-    marker: (d, fsx) => anyFile(path.dirname(d), ['next.config.js', 'next.config.mjs', 'next.config.cjs', 'next.config.ts'], fsx),
+    denyDocs: true,
+    marker: (d, fsx) => anyFile(path.dirname(d), ['next.config.js', 'next.config.mjs', 'next.config.cjs', 'next.config.ts'], fsx) && (anyFile(d, ['BUILD_ID'], fsx) || 'has no BUILD_ID written by next build'),
     reason: '.next next to next.config.*',
     restore: 'Rebuild with next build (or next dev).'
   },
@@ -174,12 +205,14 @@ function classifyFolder(dir, fsx = fs) {
   })();
   if (blocked) return { refused: blocked };
   const base = path.basename(dir);
+  try { fsx.readdirSync(dir); } catch (e) { return { unreadable: true, refused: `cannot be read (${e.code || e.message})` }; }
   for (const k of KINDS) {
     const named = k.name(base) || k.byMarkerFile;
     if (!named) continue;
     let ok = false;
     try { ok = k.marker(dir, fsx); } catch (e) { ok = false; }
-    if (ok) return { kind: k.id, label: k.label, icon: k.icon, reason: k.reason, restore: k.restore, defaultOff: !!k.defaultOff };
+    if (typeof ok === 'string') return { refused: ok };
+    if (ok) return { kind: k.id, label: k.label, icon: k.icon, reason: k.reason, restore: k.restore, defaultOff: !!k.defaultOff, denyDocs: !!k.denyDocs, forbidNames: k.forbidNames || null };
   }
   return null;
 }
@@ -187,8 +220,8 @@ function classifyFolder(dir, fsx = fs) {
 // Walk a folder without following links. Reports file count, bytes, newest
 // mtime, whether any `.git` exists inside, and every directory seen (for the
 // protected-path check). Returns {error} if the walk cannot be trusted.
-async function inspectFolder(dir, fsx = fs, isWin = process.platform === 'win32', shouldCancel = null) {
-  const out = { files: 0, bytes: 0, newest: 0, git: null, dirs: [], error: null };
+async function inspectFolder(dir, fsx = fs, isWin = process.platform === 'win32', shouldCancel = null, kindInfo = null) {
+  const out = { files: 0, bytes: 0, newest: 0, git: null, dirs: [], error: null, userDoc: null, forbidden: null };
   const devOf = (p) => { try { return fsx.lstatSync(p, { bigint: true }).dev; } catch (e) { return null; } };
   const rootDev = devOf(dir);
   if (rootDev === null) { out.error = 'cannot read ' + dir; return out; }
@@ -203,7 +236,9 @@ async function inspectFolder(dir, fsx = fs, isWin = process.platform === 'win32'
     for (const e of entries) {
       if (++seen > WALK_ENTRY_CAP) { out.error = 'too many entries to verify safely'; return out; }
       const full = path.join(cur, e.name);
-      if (e.name === '.git' && !out.git) out.git = full;
+      if (VCS_NAMES.has(e.name.toLowerCase()) && !out.git) out.git = full;
+      if (kindInfo && kindInfo.denyDocs && !out.userDoc && !e.isDirectory() && USER_DOC_EXT.test(e.name)) out.userDoc = full;
+      if (kindInfo && kindInfo.forbidNames && !out.forbidden && kindInfo.forbidNames(e.name)) out.forbidden = full;
       if (e.isSymbolicLink()) {
         // Windows junctions and directory links report as links: refuse them anywhere inside.
         if (isWin) { let isDir = true; try { isDir = fsx.statSync(full).isDirectory(); } catch (er) { /* dangling: treat as unsafe */ } if (isDir) { out.error = `contains ${full}, a junction or directory link`; return out; } }
@@ -270,6 +305,100 @@ function deviceDiffersFromParent(dir, fsx = fs) {
 }
 const realOf = (dir, fsx) => { try { return fsx.realpathSync && fsx.realpathSync.native ? fsx.realpathSync.native(dir) : null; } catch (e) { return null; } };
 
+// ---- "could this break something that cannot simply be reinstalled / is in use?" (R5) ----
+const SAFE_HOSTS = /^https?:\/\/(registry\.npmjs\.org|registry\.yarnpkg\.com)\//i;
+function readCapped(p, max, fsx) {
+  try { const st = fsx.statSync(p); if (!st.isFile()) return null; if (st.size > max) return false; return fsx.readFileSync(p, 'utf8'); } catch (e) { return null; }
+}
+function lockfileProblem(text) {
+  const re = /(?:resolved|tarball)["']?\s*[:=]?\s*["']?((?:[a-z+]+:\/\/|file:|link:|git\+)[^\s"',)]*)/gi;
+  let m;
+  while ((m = re.exec(text))) {
+    const u = m[1];
+    if (/^(file:|link:|git\+|git:)/i.test(u)) return `lockfile has a ${u.split(':')[0]} dependency that cannot be reinstalled from a registry`;
+    if (!SAFE_HOSTS.test(u)) { let h = u; try { h = new URL(u).host; } catch (e) { /* keep raw */ } return `lockfile has packages from a registry other than npmjs.org (${h})`; }
+  }
+  return null;
+}
+function npmrcProblem(text) {
+  for (const line of String(text).split('\n')) {
+    const m = /^\s*(?:@[^:=\s]+:)?registry\s*=\s*(\S+)/i.exec(line);
+    if (m && !SAFE_HOSTS.test(m[1].replace(/\/?$/, '/'))) return `.npmrc points to a custom registry (${m[1]})`;
+  }
+  return null;
+}
+// Returns { severe: reason|null, warnings: [] }. Severe ones make the folder "not offered".
+function projectSignals(dir, kindId, opts = {}) {
+  const fsx = opts.fsx || fs;
+  const out = { severe: null, warnings: [] };
+  const sev = (r) => { if (!out.severe) out.severe = r; };
+  const up = path.dirname(dir);
+  const ents = entriesOf(up, fsx);
+  const names = new Set(ents.map(e => e.name));
+  if (kindId === 'node_modules') {
+    const pkgText = readCapped(path.join(up, 'package.json'), 2 * 1024 * 1024, fsx);
+    let pkg = null;
+    try { pkg = pkgText ? JSON.parse(pkgText) : null; } catch (e) { /* unparsable: ignore */ }
+    if (pkg) {
+      const deps = Object.assign({}, pkg.dependencies, pkg.devDependencies, pkg.optionalDependencies);
+      for (const v of Object.values(deps)) {
+        if (typeof v !== 'string') continue;
+        if (/^(file:|link:|git\+|git:|github:|git@)/i.test(v) || (v.startsWith('workspace:') && !pkg.workspaces)) { sev(`package.json has a local, git or workspace dependency (${v}) that may not be reinstallable`); break; }
+      }
+      if (pkg.patchedDependencies || (pkg.pnpm && pkg.pnpm.patchedDependencies)) sev('the project patches its dependencies (patchedDependencies)');
+    }
+    if (ents.some(e => e.name === 'patches' && e.isDirectory())) sev('the project has a patches/ folder (patched dependencies)');
+    for (const lock of LOCKFILES.filter(n => names.has(n) && !n.startsWith('bun'))) {
+      const t = readCapped(path.join(up, lock), 25 * 1024 * 1024, fsx);
+      if (t === false) sev(`${lock} is too large to verify`);
+      else if (t) { const p = lockfileProblem(t); if (p) sev(p); }
+    }
+    for (const rc of [path.join(up, '.npmrc'), path.join(opts.home || os.homedir(), '.npmrc')]) {
+      const t = readCapped(rc, 256 * 1024, fsx);
+      const p = t && npmrcProblem(t);
+      if (p) sev(p);
+    }
+    for (const n of names) {
+      if (/^(ecosystem|pm2)\.config\.[a-z]+$/i.test(n)) sev(`${n} suggests this project is managed by pm2 / a service`);
+      else if (/^docker-compose.*\.ya?ml$/i.test(n)) { const t = readCapped(path.join(up, n), 512 * 1024, fsx); if (t && /node_modules/.test(t)) sev(`${n} mounts node_modules into a container`); else out.warnings.push(`${n} found: containers may depend on this folder`); }
+      else if (/^dockerfile/i.test(n)) out.warnings.push('a Dockerfile is next to it: image builds may expect this folder');
+      else if (/\.service$/.test(n)) { const t = readCapped(path.join(up, n), 128 * 1024, fsx); if (t && (t.includes(up) || /node_modules/.test(t))) sev(`${n} (a service unit) refers to this folder`); }
+    }
+  }
+  // Recently edited project files (not just the folder itself) mean active work.
+  let newest = 0;
+  for (const e of ents.slice(0, 300)) {
+    if (e.name === path.basename(dir) || e.name.startsWith('.')) continue;
+    try { const st = fsx.lstatSync(path.join(up, e.name)); if (st.mtimeMs > newest) newest = st.mtimeMs; } catch (er) { /* gone */ }
+  }
+  if (newest && Date.now() - newest < RECENT_DAYS * 86400000) out.warnings.push(`project files were modified ${Math.floor((Date.now() - newest) / 86400000) === 0 ? 'today' : Math.floor((Date.now() - newest) / 86400000) + ' day(s) ago'}: you are probably working on it`);
+  // A running process whose working directory is inside the folder (best effort).
+  if (Array.isArray(opts.cwds)) {
+    const ci = process.platform !== 'linux';
+    const d = ci ? dir.toLowerCase() : dir;
+    const hit = opts.cwds.find(c => { const x = ci ? c.toLowerCase() : c; return x === d || x.startsWith(d + path.sep); });
+    if (hit) sev(`a running process is using this folder (working directory ${hit})`);
+  } else if (opts.cwds === null) out.warnings.push('could not check for running processes');
+  return out;
+}
+// Working directories of running processes; null when it cannot be determined.
+function runningCwds() {
+  try {
+    if (process.platform === 'linux') {
+      const out = [];
+      for (const pid of fs.readdirSync('/proc').filter(x => /^\d+$/.test(x))) { try { out.push(fs.readlinkSync('/proc/' + pid + '/cwd')); } catch (e) { /* not ours */ } }
+      return out;
+    }
+    if (process.platform === 'darwin') {
+      const txt = require('child_process').execFileSync('/usr/sbin/lsof', ['-a', '-d', 'cwd', '-Fn'], { encoding: 'utf8', timeout: 8000, maxBuffer: 32 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'] });
+      return txt.split('\n').filter(l => l.startsWith('n/')).map(l => l.slice(1));
+    }
+  } catch (e) {
+    if (e && e.stdout) return String(e.stdout).split('\n').filter(l => l.startsWith('n/')).map(l => l.slice(1)); // lsof exits 1 when some processes are unreadable
+  }
+  return null;
+}
+
 function isInside(child, parent, ci) {
   const c = ci ? child.toLowerCase() : child;
   const p = ci ? parent.toLowerCase() : parent;
@@ -289,7 +418,7 @@ function dedupeNested(paths, ci) {
 // Find candidate folders in the full scan list. `files` entries need
 // {path, size, mtime}. Marker checks hit the real filesystem, but only for
 // folders whose name could qualify, so this stays cheap on huge scans.
-function findCandidates(files, scanRoot, ci, fsx = fs, mounts = getMountPoints()) {
+function findCandidates(files, scanRoot, ci, fsx = fs, mounts = getMountPoints(), cwds = runningCwds()) {
   const root = path.resolve(scanRoot);
   const possible = new Set();
   const dirKey = (d) => ci ? d.toLowerCase() : d;
@@ -312,6 +441,11 @@ function findCandidates(files, scanRoot, ci, fsx = fs, mounts = getMountPoints()
   for (const d of possible) {
     const c = classifyFolder(d, fsx);
     if (c && c.kind) valid.set(dirKey(d), { dir: d, ...c });
+    else if (c && c.unreadable) {
+      // Unreadable after the scan (permissions changed): still listed, greyed out with the reason.
+      const k = KINDS.find(x => x.name(path.basename(d)) || x.byMarkerFile);
+      if (k) valid.set(dirKey(d), { dir: d, kind: k.id, label: k.label, icon: k.icon, reason: k.reason, restore: k.restore, defaultOff: !!k.defaultOff, denyDocs: !!k.denyDocs, forbidNames: k.forbidNames || null });
+    }
   }
   const { kept } = dedupeNested([...valid.values()].map(v => v.dir), ci);
   const owners = new Map(kept.map(d => [dirKey(d), { ...valid.get(dirKey(d)), path: d, size: 0, files: 0, newest: 0, hasGit: false, dirs: new Set(), refusedReason: null }]));
@@ -333,13 +467,18 @@ function findCandidates(files, scanRoot, ci, fsx = fs, mounts = getMountPoints()
     o.files++;
     if ((f.mtime || 0) > o.newest) o.newest = f.mtime;
     const rel = path.relative(o.path, f.path).split(path.sep);
-    if (rel.slice(0, -1).includes('.git') || rel[rel.length - 1] === '.git') o.hasGit = true;
+    if (rel.some(x => VCS_NAMES.has(x.toLowerCase()))) o.hasGit = true;
+    if (o.denyDocs && !o.userDoc && USER_DOC_EXT.test(f.name || '')) o.userDoc = f.path;
+    if (o.forbidNames && !o.forbidden && rel.some(x => o.forbidNames(x))) o.forbidden = f.path;
   }
   // One lstat per distinct folder: unreadable folders and mount points inside a candidate are flagged now, not only at delete time.
   for (const o of owners.values()) {
     // Independent of what the scan happened to visit: use the OS mount table and the parent's device.
     o.refusedReason = mountConflict([o.path, realOf(o.path, fsx)], mounts, ci)
       || (deviceDiffersFromParent(o.path, fsx) ? 'is on a different device than its parent folder (mount or volume boundary)' : null);
+    const sig = projectSignals(o.path, o.kind, { fsx, cwds });
+    o.signals = sig.warnings;
+    if (!o.refusedReason && sig.severe) o.refusedReason = sig.severe;
     if (o.refusedReason) { o.dirs = undefined; continue; }
     let rootDev;
     try { rootDev = fsx.lstatSync(o.path, { bigint: true }).dev; fsx.readdirSync(o.path); } catch (e) { o.refusedReason = 'cannot be read (' + (e.code || e.message) + ')'; continue; }
@@ -353,4 +492,4 @@ function findCandidates(files, scanRoot, ci, fsx = fs, mounts = getMountPoints()
   return [...owners.values()];
 }
 
-module.exports = { parseMountinfo, parseMacMount, getMountPoints, mountConflict, deviceDiffersFromParent, blockedLocation, KINDS, CANDIDATE_NAMES, RECENT_DAYS, MANY_FILES, classifyFolder, inspectFolder, dedupeNested, findCandidates, isInside };
+module.exports = { projectSignals, runningCwds, lockfileProblem, npmrcProblem, setElevated, cloudSyncedReason, trashReason, VCS_NAMES, parseMountinfo, parseMacMount, getMountPoints, mountConflict, deviceDiffersFromParent, blockedLocation, KINDS, CANDIDATE_NAMES, RECENT_DAYS, MANY_FILES, classifyFolder, inspectFolder, dedupeNested, findCandidates, isInside };

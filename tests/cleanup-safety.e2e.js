@@ -4,7 +4,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const cf = require('../cleanup-folders');
-const { launch, scanViaUi, fixtureParent, linkOrSkip } = require('./helpers');
+const { launch, scanViaUi, fixtureParent, linkOrSkip, autoMarkers } = require('./helpers');
 const link = (target, p, type) => linkOrSkip(test, target, p, type);
 
 const OLD = new Date(Date.now() - 90 * 86400000);
@@ -14,6 +14,7 @@ function mk(root, rel, content) {
   fs.mkdirSync(path.dirname(p), { recursive: true });
   if (rel.endsWith('/')) { fs.mkdirSync(p, { recursive: true }); return p; }
   fs.writeFileSync(p, content === undefined ? 'x'.repeat(2048) : content);
+  autoMarkers(root, rel);
   return p;
 }
 function age(root) {
@@ -387,9 +388,10 @@ test('R3-1/6. file presets use whole-name anchors and offer only clearly regener
     mk(r, '.yarn/releases/yarn.cjs'); mk(r, 'stuff/cache/data.bin');
   }, {}, async ({ page, root }) => {
     const c = catPaths(await page.evaluate(() => window.api.cleanupScan()), root);
-    expect(c.thumbs).toEqual(['ok/Thumbs.db', 'ok/desktop.ini']);
+    expect(c.thumbs).toEqual(['ok/Thumbs.db']);
+    expect(c.desktopini).toEqual(['ok/desktop.ini']);   // its own unticked preset
     expect(c.dsstore).toEqual(['ok/.DS_Store']);
-    expect(c.junkdirs).toEqual(['vol/.Spotlight-V100/x', 'vol/.Trashes/501/x']);
+    expect(c.junkdirs).toEqual(['vol/.Spotlight-V100/x']);   // .Trashes content is already trash: never re-offered
     expect(c.crash).toEqual(['sys/CrashDumps/a.dmp', 'sys/Crashpad/b.dmp']);
     expect(c.aimodels).toEqual(['.cache/huggingface/hub/x.bin']);
     expect(c.logs).toEqual(['Library/Application Support/App/logs/app.log', 'proj/app.log']);
@@ -492,7 +494,7 @@ test('R3-8. there is no permanent-delete fallback anywhere in the delete handler
   const region = src.slice(a, b);
   expect(region).not.toMatch(/\b(rmSync|rmdirSync|unlinkSync|\.rm\(|\.unlink\(|\.rmdir\(|rimraf|emptyTrash)\b/);
   expect(region.match(/Recycle Bin \(Windows\); nothing is permanently deleted/g)).toHaveLength(2);
-  expect(region).toMatch(/status: 'failed', reason: e\.message/);
+  expect(region.match(/status: 'failed', finalState: gone \? 'gone' : 'untouched', reason: osErrorReason\(e\)/g)).toHaveLength(2);
 });
 
 // ---- bind mounts (same st_dev, so only the OS mount table reveals them) ----
@@ -601,7 +603,7 @@ test('W5. progress is reported to the UI while folders are verified and moved, a
     await expect(page.locator('#cleanup-folders-execute')).toHaveText('Cancel');
     await expect(page.locator('#cleanup-progress')).toContainText(/Moving to Trash 1 of 1: .*node_modules/);
     expect(await page.evaluate(() => 1 + 1)).toBe(2);   // renderer stays responsive during the work
-    await expect(page.locator('#cleanup-result')).toContainText(/moved/, { timeout: 15000 });
+    await expect(page.locator('#cleanup-result')).toContainText(/Moved 1 folder/, { timeout: 15000 });
     const prog = await page.evaluate(() => window.__prog);
     expect(prog.some(p => p.phase === 'verify')).toBe(true);
     expect(prog.some(p => p.phase === 'trash' && p.total === 1)).toBe(true);
@@ -610,7 +612,7 @@ test('W5. progress is reported to the UI while folders are verified and moved, a
 
 test('W6. after a move the folder disappears from the tree at once, and the summary is honest', async () => {
   await withApp((r) => { proj(r, 'a'); proj(r, 'b'); }, {}, async ({ page, root, userData }) => {
-    await expect(page.locator('#stats')).toContainText('Files: 6');
+    await expect(page.locator('#stats')).toContainText('Files: 8');
     await page.locator('#tools-btn').click();
     await page.locator('[data-tool="cleanup"]').click();
     await page.locator('.cleanup-folder', { hasText: 'a/node_modules' }).locator('input').check();
@@ -618,17 +620,17 @@ test('W6. after a move the folder disappears from the tree at once, and the summ
     await expect(page.locator('#cleanup-result')).toBeVisible({ timeout: 15000 });
     const entry = readLog(userData).find(e => e.path.endsWith(path.join('a', 'node_modules')));
     if (entry.status === 'trashed') {
-      await expect(page.locator('#cleanup-result')).toContainText('1 folder moved to the Trash');
+      await expect(page.locator('#cleanup-result')).toContainText('Moved 1 folder to the Trash');
       await page.locator('#cleanup-close').click();
       const text = await page.locator('#folder-tree').innerText();
       expect(text).not.toMatch(/node_modules/);       // the moved folder is gone from the tree
-      await expect(page.locator('#stats')).toContainText('Files: 5');      // 6 before; the moved folder's file is gone
+      await expect(page.locator('#stats')).toContainText('Files: 6');      // 8 before; the moved folder's two files are gone
       await page.locator('#tools-btn').click();
       await page.locator('[data-tool="cleanup"]').click();
       await expect(page.locator('.cleanup-folder')).toHaveCount(1);        // only b/node_modules is still offered
       await expect(page.locator('.cleanup-folder')).not.toContainText('a/node_modules');
     } else {
-      await expect(page.locator('#cleanup-result')).toContainText('1 failed');   // trash unavailable: reported, not hidden
+      await expect(page.locator('#cleanup-result')).toContainText('failed 1');   // trash unavailable: reported, not hidden
     }
   });
 });
@@ -651,7 +653,8 @@ test('W6b. a mixed batch is reported as "N moved, M failed" with the reason and 
     const log = readLog(userData);
     const eb = log.find(e => e.path.endsWith(path.join('b', 'node_modules')));
     if (eb.status === 'failed' || eb.status === 'blocked') {
-      expect(txt).toMatch(/1 failed/);
+      expect(txt).toMatch(/failed 1, skipped 0/);
+      expect(eb.finalState).toBe('untouched');
       expect(txt).toContain(eb.reason);
       expect(eb.reason.length).toBeGreaterThan(5);
     }

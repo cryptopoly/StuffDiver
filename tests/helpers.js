@@ -44,9 +44,20 @@ async function launch(folder, extraEnv = {}) {
   return { app, page, userData };
 }
 
-async function scanViaUi(page) {
+// Developer-folder cleanup is off by default; most tests need it on (pass { dev: false } to keep the default).
+async function scanViaUi(page, { dev = true } = {}) {
   await page.locator('#empty-state-btn').click();
   await expect(page.locator('#stats')).toContainText('Files:', { timeout: 30000 });
+  if (dev) await page.evaluate(() => window.api.saveSettings({ developerFolderCleanup: true }));
+}
+
+// Tool-written markers that real installs/builds leave inside these folders, so fixtures look like the real thing.
+function autoMarkers(root, rel) {
+  const r = rel.split('\\').join('/');
+  const put = (relDir, name) => { const f = path.join(root, relDir, name); if (!fs.existsSync(f)) { fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, ''); } };
+  let m = /^(.*?node_modules)\//.exec(r); if (m) put(m[1], '.package-lock.json');
+  m = /^(.*?)\/target\//.exec(r); if (m && fs.existsSync(path.join(root, m[1], 'Cargo.toml'))) put(m[1] + '/target', 'CACHEDIR.TAG');
+  m = /^(.*?\/\.next)\//.exec(r); if (m) put(m[1], 'BUILD_ID');
 }
 
 // Run the headless CLI (`electron . --scan ...`) and return { status, stdout, stderr }.
@@ -69,4 +80,4 @@ function linkOrSkip(test, target, linkPath, type) {
   }
 }
 
-module.exports = { linkOrSkip, fixtureParent, makeFixture, launch, scanViaUi, runCli };
+module.exports = { autoMarkers, linkOrSkip, fixtureParent, makeFixture, launch, scanViaUi, runCli };

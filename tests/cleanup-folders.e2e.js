@@ -3,7 +3,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const cf = require('../cleanup-folders');
-const { launch, scanViaUi, fixtureParent, linkOrSkip } = require('./helpers');
+const { launch, scanViaUi, fixtureParent, linkOrSkip, autoMarkers } = require('./helpers');
 const link = (target, p, type) => linkOrSkip(test, target, p, type);
 
 const OLD = new Date(Date.now() - 90 * 86400000);
@@ -12,6 +12,7 @@ function mk(root, rel, content) {
   fs.mkdirSync(path.dirname(p), { recursive: true });
   if (rel.endsWith('/')) { fs.mkdirSync(p, { recursive: true }); return p; }
   fs.writeFileSync(p, content === undefined ? 'x'.repeat(2048) : content);
+  autoMarkers(root, rel);
   return p;
 }
 function age(root) { // make everything old so nothing counts as "recent"
@@ -118,7 +119,7 @@ test.describe('classifier', () => {
     const found = cf.findCandidates(files, root, false);
     const byRel = Object.fromEntries(found.map(c => [path.relative(root, c.path), c]));
     expect(Object.keys(byRel).sort()).toEqual([path.join('p', 'node_modules'), path.join('q', 'node_modules')]);
-    expect(byRel[path.join('p', 'node_modules')]).toMatchObject({ kind: 'node_modules', files: 3, hasGit: false });
+    expect(byRel[path.join('p', 'node_modules')]).toMatchObject({ kind: 'node_modules', files: 4, hasGit: false });
     expect(byRel[path.join('q', 'node_modules')].hasGit).toBe(true);
     const P = (...x) => path.resolve(root, ...x);
     const d = cf.dedupeNested([P('a/b/c'), P('a/b'), P('a/bc'), P('a/b')], false);
@@ -151,7 +152,7 @@ test('folder scan offers only marker-verified folders, with details and defaults
     const rel = res.candidates.map(c => c.relPath).sort();
     expect(rel).toEqual(['proj/node_modules', 'pyenvs/env', 'rust/target']); // lonely/ and nolock/ are not offered
     const nm = res.candidates.find(c => c.kind === 'node_modules');
-    expect(nm).toMatchObject({ files: 1, defaultChecked: false, refused: null }); // nothing is pre-ticked
+    expect(nm).toMatchObject({ files: 2, defaultChecked: false, refused: null }); // nothing is pre-ticked
     expect(nm.size).toBeGreaterThan(0);
     expect(nm.reason).toMatch(/package\.json/);
     expect(nm.restore).toMatch(/npm install/);
@@ -191,7 +192,7 @@ test('a valid folder is moved as one unit and logged with category, size and fil
     const res = await del(page, [target]);
     expect(res.error).toBeUndefined();
     const entry = readLog(userData).find(e => e.path === target);
-    expect(entry).toMatchObject({ type: 'folder', category: 'node_modules', source: 'test', files: 2 });
+    expect(entry).toMatchObject({ type: 'folder', category: 'node_modules', source: 'test', files: 3 });
     expect(entry.size).toBeGreaterThan(0);
     expect(['trashed', 'failed']).toContain(entry.status);   // trash may be unavailable on CI
     if (entry.status === 'trashed') { expect(fs.existsSync(target)).toBe(false); expect(res.deleted).toBe(1); }
@@ -330,10 +331,11 @@ test('wizard shows folder rows with size/age/files/reason, greys out refused one
     await page.locator('#tools-btn').click();
     await page.locator('[data-tool="cleanup"]').click();
     const body = page.locator('#cleanup-body');
-    await expect(body).toContainText('Folders you can regenerate');
+    await expect(body).toContainText('Developer folders (advanced)');
     const ok = page.locator('.cleanup-folder', { hasText: 'proj/node_modules' });
     await expect(ok).toContainText('node_modules next to package.json');
-    await expect(ok).toContainText('files');
+    await expect(ok).toContainText('files in the scan');
+    await expect(ok).toContainText('on disk');
     await expect(ok).toContainText('last modified');
     await expect(ok).toContainText('If you restore or regenerate');
     await expect(ok.locator('input')).not.toBeChecked();
