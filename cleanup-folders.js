@@ -47,12 +47,18 @@ function blockedLocation(dir, opts = {}) {
     if (segs[i] === 'appdata' && segs[i + 1] === 'roaming' && segs[i + 2] === 'npm') return 'is a global npm install location';
   }
   if (/^[a-z]:\/(program files( \(x86\))?|programdata|windows)(\/|$)/.test(norm)) return 'is inside a Windows system or program folder';
+  // On the system drive only user folders qualify; tool installs like C:\node22 or C:\tools are not projects.
+  const win = opts.win !== undefined ? opts.win : process.platform === 'win32';
+  const sysDrive = (opts.systemDrive || process.env.SystemDrive || 'C:').toLowerCase().replace(/[\\/]+$/, '');
+  if (win && norm.startsWith(sysDrive + '/') && !/^[a-z]:\/users\/[^/]+\//.test(norm) && !tmps.some(t => norm.startsWith(t + '/'))) return 'is outside your user folders';
   for (const r of ['/opt', '/usr', '/srv', '/var/www', '/snap', '/lib', '/lib64', '/var/lib']) {
     if (norm === r || norm.startsWith(r + '/')) return `is under ${r}, which holds system or server software`;
   }
   if (homes.includes(parent) || /^(\/users\/[^/]+|\/home\/[^/]+|[a-z]:\/users\/[^/]+|\/root)$/.test(parent)) return 'sits directly in a user home folder, not in a project';
   // Allow-by-location: folder cleanup is for project areas, not for where tools, apps and sync clients live.
   const inTmp = tmps.some(t => norm.startsWith(t + '/'));
+  // Already-trashed items are never candidates (the Recycle Bin / Trash presets handle them as files).
+  if (segs.some(x => x === '$recycle.bin' || x === 'recycler' || /^\.trash(-\d+)?$/.test(x) || x === '.trashes') || /\/\.local\/share\/trash(\/|$)/.test(norm)) return 'is already in a Trash or Recycle Bin';
   if (segs.some(x => /^(cloudstorage|mobile documents|icloud drive.*|dropbox.*|google drive.*|googledrive|my drive|box|box sync|onedrive.*)$/.test(x))) return 'is a cloud-synced folder: deleting here deletes it everywhere';
   if (/^\/(volumes|mnt|media|run\/media)\//.test(norm) || /^(\\\\|\/\/)/.test(dir)) return 'is on an external, network or mounted volume';
   if (segs.some(x => /^(linuxbrew|\.linuxbrew|homebrew|cellar)$/.test(x))) return 'is inside a Homebrew install';

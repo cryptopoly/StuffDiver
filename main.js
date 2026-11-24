@@ -904,6 +904,13 @@ function containsProtected(folder) {
 
 const walkFs = () => (E2E && global.__e2eFs) || rawFs; // E2E tests can inject a fake filesystem (mount-point simulation)
 const mountList = () => (E2E && typeof global.__e2eMounts === 'function') ? global.__e2eMounts() : cleanupFolders.getMountPoints(); // fresh on every call
+const sendFolderProgress = (phase, done, total, p) => {
+  try { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('folder-delete-progress', { phase, done, total, path: p }); } catch (e) { /* UI gone */ }
+};
+const osErrorReason = (e) => {
+  const code = e.code || (/\b(E[A-Z]{3,}|ERROR_[A-Z_]+)\b/.exec(e.message || '') || [])[1];
+  return (code && !String(e.message).includes(code) ? code + ': ' : '') + (e.message || String(e));
+};
 const FOLDER_BATCH_CAP = 500;
 const FOLDER_SCAN_CAP = 2000;
 
@@ -946,7 +953,7 @@ async function evaluateFolder(fp) {
     const dr = protectedReason(d, true);
     if (dr) return fail(`contains ${d}, which is ${dr}`);
   }
-  return { ok: true, path: resolved, kind: c.kind, label: c.label, reason: c.reason, size: w.bytes, files: w.files, newest: w.newest };
+  return { ok: true, path: resolved, logPath: realNow || resolved, kind: c.kind, label: c.label, reason: c.reason, size: w.bytes, files: w.files, newest: w.newest };
 }
 
 handleTrusted('cleanup-folders-scan', async () => {
@@ -997,6 +1004,7 @@ handleTrusted('delete-folders', async (event, folderPaths, source) => {
     folderDeleteCancel = false;
     const checks = [];
     for (const k of kept) {
+      sendFolderProgress('verify', checks.length, kept.length, k);
       checks.push(await evaluateFolder(k));
       if (folderDeleteCancel) return { ...nothing, cancelled: true, error: 'Cancelled. Nothing was moved.' };
     }
@@ -1026,6 +1034,7 @@ handleTrusted('delete-folders', async (event, folderPaths, source) => {
     // The dialog can sit open for a long time: verify everything again before touching anything.
     const again = [];
     for (const c of checks) {
+      sendFolderProgress('verify', again.length, checks.length, c.path);
       again.push(await evaluateFolder(c.path));
       if (folderDeleteCancel) return { ...nothing, cancelled: true, error: 'Cancelled. Nothing was moved.' };
     }
@@ -1035,18 +1044,19 @@ handleTrusted('delete-folders', async (event, folderPaths, source) => {
       await logDeletion(changed.map(b => ({ t: now, path: b.path, status: 'blocked', reason: 'changed before delete: ' + b.reason, source: src, type: 'folder' })));
       return { ...nothing, blocked: changed.map(b => ({ path: b.path, reason: b.reason })), error: `Refused: ${changed[0].path} changed before it could be deleted (${changed[0].reason}). Nothing was moved.` };
     }
-    const deletedPaths = [], failed = [];
+    const deletedPaths = [], failed = [], failures = [];
     let freedBytes = 0, logError = null;
     for (const c of checks) {
-      const entry = { t: Date.now(), path: c.path, type: 'folder', size: c.size, files: c.files, category: c.kind, source: src };
+      sendFolderProgress('trash', deletedPaths.length + failed.length, checks.length, c.path);
+      const entry = { t: Date.now(), path: c.logPath || c.path, type: 'folder', size: c.size, files: c.files, category: c.kind, source: src };
       let rec;
       // Full re-verification (symlinks, real location, marker, .git, protected paths) immediately before EVERY move.
       if (E2E && typeof global.__e2eBeforeTrash === 'function') await global.__e2eBeforeTrash(c.path); // test hook, E2E only
-      if (folderDeleteCancel) { failed.push(c.path); continue; } // cancelled: remaining folders are left untouched
+      if (folderDeleteCancel) { failed.push(c.path); failures.push({ path: c.path, reason: 'cancelled before it was moved' }); continue; } // cancelled: remaining folders are left untouched
       const last = await evaluateFolder(c.path);
       if (!last.ok) {
         rec = { ...entry, status: 'blocked', reason: 'changed just before delete: ' + last.reason };
-        failed.push(c.path);
+        failed.push(c.path); failures.push({ path: c.path, reason: rec.reason });
       } else {
         try {
           await shell.trashItem(c.path);
@@ -1054,7 +1064,8 @@ handleTrusted('delete-folders', async (event, folderPaths, source) => {
           rec = { ...entry, status: 'trashed', reason: c.reason };
         } catch (e) {
           failed.push(c.path);
-          rec = { ...entry, status: 'failed', reason: e.message };
+          rec = { ...entry, status: 'failed', reason: osErrorReason(e) };
+          failures.push({ path: c.path, reason: rec.reason });
         }
       }
       logError = (await logDeletion([rec])) || logError; // per item, right after the move
@@ -1065,7 +1076,7 @@ handleTrusted('delete-folders', async (event, folderPaths, source) => {
       const goneL = gone.map(lc);
       lastScanAllFiles = lastScanAllFiles.filter(f => { const fl = lc(f.path); return !goneL.some(g => fl.startsWith(g)); });
     }
-    return { deleted: deletedPaths.length, deletedPaths, freedBytes, failed, cancelled: folderDeleteCancel || undefined, dedupedNested: dropped, ...(logError ? { logError } : {}) };
+    return { deleted: deletedPaths.length, deletedPaths, freedBytes, failed, failures, cancelled: folderDeleteCancel || undefined, dedupedNested: dropped, ...(logError ? { logError } : {}) };
   } finally {
     folderDeleteBusy = false;
   }

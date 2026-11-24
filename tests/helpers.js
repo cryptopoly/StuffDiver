@@ -59,4 +59,14 @@ function runCli(args, extraEnv = {}) {
   return { status: r.status, stdout: r.stdout, stderr: r.stderr };
 }
 
-module.exports = { fixtureParent, makeFixture, launch, scanViaUi, runCli };
+// Symlinks need Developer Mode/admin on Windows: skip the calling test with a clear reason instead of failing.
+// Directory links use junctions on Windows (no privilege needed).
+function linkOrSkip(test, target, linkPath, type) {
+  try { fs.symlinkSync(target, linkPath, process.platform === 'win32' && type === 'dir' ? 'junction' : type); }
+  catch (e) {
+    if (e.code === 'EPERM' || e.code === 'EACCES') test.skip(true, 'creating links needs Developer Mode or admin on this Windows account');
+    throw e;
+  }
+}
+
+module.exports = { linkOrSkip, fixtureParent, makeFixture, launch, scanViaUi, runCli };

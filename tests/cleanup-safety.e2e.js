@@ -4,7 +4,8 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const cf = require('../cleanup-folders');
-const { launch, scanViaUi, fixtureParent } = require('./helpers');
+const { launch, scanViaUi, fixtureParent, linkOrSkip } = require('./helpers');
+const link = (target, p, type) => linkOrSkip(test, target, p, type);
 
 const OLD = new Date(Date.now() - 90 * 86400000);
 const tmp = () => fs.realpathSync(fs.mkdtempSync(path.join(fixtureParent(), 'sd-cs-')));
@@ -131,7 +132,7 @@ test('6. __pycache__ must hold only regular .pyc files (no sneaky.pyc folder, no
     mk(root, 'b/__pycache__/sneaky.pyc/thesis.docx');
     expect(cls(path.join(root, 'b/__pycache__'))).toBeNull();
     mk(root, 'c/real.txt'); fs.mkdirSync(path.join(root, 'c/__pycache__'));
-    fs.symlinkSync(path.join(root, 'c/real.txt'), path.join(root, 'c/__pycache__/link.pyc'));
+    link(path.join(root, 'c/real.txt'), path.join(root, 'c/__pycache__/link.pyc'));
     expect(cls(path.join(root, 'c/__pycache__'))).toBeNull();
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
@@ -178,7 +179,7 @@ test('2. loose-file presets never match LevelDB logs, .bak/.old/.swp or dist; on
 test('7. delete-files refuses folders (and links to folders); a link to a file is trashed as a link', async () => {
   await withApp((r) => {
     mk(r, 'repo/.git/HEAD'); mk(r, 'repo/src/a.js'); mk(r, 'plain/a.txt');
-    mk(r, 'f/real.txt'); fs.symlinkSync(path.join(r, 'plain'), path.join(r, 'f/dirlink'), 'dir'); fs.symlinkSync(path.join(r, 'f/real.txt'), path.join(r, 'f/filelink'));
+    mk(r, 'f/real.txt'); link(path.join(r, 'plain'), path.join(r, 'f/dirlink'), 'dir'); link(path.join(r, 'f/real.txt'), path.join(r, 'f/filelink'));
   }, {}, async ({ page, root, userData }) => {
     const call = (p) => page.evaluate((x) => window.api.deleteFiles(x, 'test'), p);
     const a = await call([path.join(root, 'plain/a.txt'), path.join(root, 'repo')]);
@@ -205,7 +206,7 @@ test('8. every folder is fully re-verified immediately before its own trash call
     await app.evaluate((_e, args) => {
       const fsx = global.__e2eRequire('fs');
       global.__e2eBeforeTrash = (p) => {
-        if (p === args.a) { fsx.rmSync(args.b, { recursive: true }); fsx.symlinkSync(args.precious, args.b, 'dir'); }
+        if (p === args.a) { fsx.rmSync(args.b, { recursive: true }); fsx.symlinkSync(args.precious, args.b, process.platform === 'win32' ? 'junction' : 'dir'); }
       };
     }, { a, b, precious: path.join(root, 'precious') });
     const res = await del(page, [a, b]);
@@ -309,9 +310,9 @@ test('A. Windows: a directory link/junction anywhere inside is refused; file lin
   try {
     proj(root, 'p'); mk(root, 'other/x.txt'); mk(root, 'p/node_modules/dep/real.txt');
     const dir = path.join(root, 'p/node_modules');
-    fs.symlinkSync(path.join(root, 'p/node_modules/dep/real.txt'), path.join(dir, 'filelink'));
+    link(path.join(root, 'p/node_modules/dep/real.txt'), path.join(dir, 'filelink'));
     expect((await cf.inspectFolder(dir, fs, true)).error).toBeNull();
-    fs.symlinkSync(path.join(root, 'other'), path.join(dir, 'dep/dirlink'), 'dir');
+    link(path.join(root, 'other'), path.join(dir, 'dep/dirlink'), 'dir');
     expect((await cf.inspectFolder(dir, fs, true)).error).toBe(`contains ${path.join(dir, 'dep/dirlink')}, a junction or directory link`);
     expect((await cf.inspectFolder(dir, fs, false)).error).toBeNull(); // POSIX: symlinks are not followed, so they are harmless
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
@@ -443,7 +444,7 @@ test('R3-3. a scan through a symlink cannot hide a blocked location (real path i
   const root = tmp();
   proj(root, 'real/.nvm/versions/p');   // real path sits inside .nvm
   mk(root, 'real/.nvm/versions/p/x.txt');
-  fs.symlinkSync(path.join(root, 'real/.nvm/versions'), path.join(root, 'link'), 'dir');
+  link(path.join(root, 'real/.nvm/versions'), path.join(root, 'link'), 'dir');
   age(root);
   const { app, page } = await launch(path.join(root, 'link'));
   try {
@@ -557,4 +558,114 @@ test('M2. a candidate on a different device than its parent is refused (does not
     expect(cf.findCandidates(files, root, false, fake, ['/'])[0].refusedReason).toBe('is on a different device than its parent folder (mount or volume boundary)');
     expect(cf.findCandidates(files, root, false, fs, ['/'])[0].refusedReason).toBeNull();
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+// ---- Windows-VM round ----
+test('W3. on the system drive only user folders qualify; per-user apps and global npm stay refused', () => {
+  const o = { win: true, systemDrive: 'C:', home: 'C:\\Users\\bob', tmp: 'C:\\Users\\bob\\AppData\\Local\\Temp', uid: null };
+  for (const p of ['C:\\node22\\node_modules', 'C:\\tools\\x\\target', 'C:\\dev\\app\\node_modules', 'C:\\work\\app\\node_modules'])
+    expect(cf.blockedLocation(p, o), p).toBe('is outside your user folders');
+  expect(cf.blockedLocation('C:\\node22\\node_modules\\npm\\node_modules', o)).toBeTruthy();
+  for (const p of ['D:\\dev\\app\\node_modules', 'E:\\app\\target', 'C:\\Users\\bob\\work\\app\\node_modules', 'C:\\Users\\alice\\code\\x\\node_modules', 'C:\\Users\\bob\\AppData\\Local\\Temp\\sd-1\\p\\node_modules'])
+    expect(cf.blockedLocation(p, o), p).toBeNull();
+  expect(cf.blockedLocation('C:\\Users\\bob\\AppData\\Local\\Programs\\Code\\resources\\app\\node_modules', o)).toBe('is inside an installed Windows program');
+  expect(cf.blockedLocation('C:\\Users\\bob\\AppData\\Roaming\\npm\\node_modules', o)).toBe('is a global npm install location');
+  expect(cf.blockedLocation('C:\\Users\\bob\\AppData\\Roaming\\npm\\node_modules\\x\\node_modules', o)).toBeTruthy();
+  expect(cf.blockedLocation('C:\\Program Files\\App\\resources\\app\\node_modules', o)).toBe('is inside a Windows system or program folder');
+  expect(cf.blockedLocation('C:\\ProgramData\\x\\node_modules', o)).toBe('is inside a Windows system or program folder');
+  expect(cf.blockedLocation('C:\\Users\\bob\\node_modules', o)).toBe('sits directly in a user home folder, not in a project');
+  // not applied on other systems
+  expect(cf.blockedLocation('/work/app/node_modules', { win: false, uid: 501, home: '/Users/bob' })).toBeNull();
+});
+
+test('W4. anything already inside a Trash / Recycle Bin is never a candidate', async () => {
+  const why = 'is already in a Trash or Recycle Bin';
+  const o = { uid: 501, home: '/Users/bob', tmp: '/nope' };
+  for (const p of ['C:\\$Recycle.Bin\\S-1-5-21-1\\$R1ABC\\.venv', '/Users/bob/.Trash/proj/node_modules', '/home/bob/.local/share/Trash/files/p/node_modules', '/mnt/usb/.Trash-1000/files/p/node_modules', '/Volumes/X/.Trashes/501/p/node_modules'])
+    expect(cf.blockedLocation(p, o), p).toBe(why);
+  await withApp((r) => { proj(r, '$Recycle.Bin/S-1-5-21/$R1ABC'); proj(r, '.Trash/old'); proj(r, 'real'); }, {}, async ({ page, root }) => {
+    const scan = await page.evaluate(() => window.api.cleanupFoldersScan());
+    expect(scan.candidates.map(c => c.relPath)).toEqual(['real/node_modules']);
+  });
+});
+
+test('W5. progress is reported to the UI while folders are verified and moved, and the button becomes Cancel', async () => {
+  await withApp((r) => { proj(r, 'a'); proj(r, 'b'); }, {}, async ({ app, page, root }) => {
+    await page.evaluate(() => { window.__prog = []; window.api.onFolderDeleteProgress(d => window.__prog.push(d)); });
+    await app.evaluate(() => { global.__e2eBeforeTrash = () => new Promise(r => setTimeout(r, 1200)); });
+    await page.locator('#tools-btn').click();
+    await page.locator('[data-tool="cleanup"]').click();
+    await expect(page.locator('.cleanup-folder')).toHaveCount(2);
+    await page.locator('.cleanup-folder-check').first().check();
+    await page.locator('#cleanup-folders-execute').click();
+    await expect(page.locator('#cleanup-folders-execute')).toHaveText('Cancel');
+    await expect(page.locator('#cleanup-progress')).toContainText(/Moving to Trash 1 of 1: .*node_modules/);
+    expect(await page.evaluate(() => 1 + 1)).toBe(2);   // renderer stays responsive during the work
+    await expect(page.locator('#cleanup-result')).toContainText(/moved/, { timeout: 15000 });
+    const prog = await page.evaluate(() => window.__prog);
+    expect(prog.some(p => p.phase === 'verify')).toBe(true);
+    expect(prog.some(p => p.phase === 'trash' && p.total === 1)).toBe(true);
+  });
+});
+
+test('W6. after a move the folder disappears from the tree at once, and the summary is honest', async () => {
+  await withApp((r) => { proj(r, 'a'); proj(r, 'b'); }, {}, async ({ page, root, userData }) => {
+    await expect(page.locator('#stats')).toContainText('Files: 6');
+    await page.locator('#tools-btn').click();
+    await page.locator('[data-tool="cleanup"]').click();
+    await page.locator('.cleanup-folder', { hasText: 'a/node_modules' }).locator('input').check();
+    await page.locator('#cleanup-folders-execute').click();
+    await expect(page.locator('#cleanup-result')).toBeVisible({ timeout: 15000 });
+    const entry = readLog(userData).find(e => e.path.endsWith(path.join('a', 'node_modules')));
+    if (entry.status === 'trashed') {
+      await expect(page.locator('#cleanup-result')).toContainText('1 folder moved to the Trash');
+      await page.locator('#cleanup-close').click();
+      const text = await page.locator('#folder-tree').innerText();
+      expect(text).not.toMatch(/node_modules/);       // the moved folder is gone from the tree
+      await expect(page.locator('#stats')).toContainText('Files: 5');      // 6 before; the moved folder's file is gone
+      await page.locator('#tools-btn').click();
+      await page.locator('[data-tool="cleanup"]').click();
+      await expect(page.locator('.cleanup-folder')).toHaveCount(1);        // only b/node_modules is still offered
+      await expect(page.locator('.cleanup-folder')).not.toContainText('a/node_modules');
+    } else {
+      await expect(page.locator('#cleanup-result')).toContainText('1 failed');   // trash unavailable: reported, not hidden
+    }
+  });
+});
+
+test('W6b. a mixed batch is reported as "N moved, M failed" with the reason and never as a cancellation', async () => {
+  test.skip(process.platform === 'win32' || (process.getuid && process.getuid() === 0), 'needs POSIX permission semantics');
+  await withApp((r) => { proj(r, 'a'); proj(r, 'b'); }, {}, async ({ app, page, root, userData }) => {
+    const a = path.join(root, 'a/node_modules'), b = path.join(root, 'b/node_modules');
+    // Make the second folder impossible to move AFTER verification passed (parent loses write permission).
+    await app.evaluate((_e, args) => { global.__e2eBeforeTrash = (p) => { if (p === args.b) global.__e2eRequire('fs').chmodSync(args.parent, 0o555); }; }, { b, parent: path.join(root, 'b') });
+    await page.locator('#tools-btn').click();
+    await page.locator('[data-tool="cleanup"]').click();
+    await page.locator('.cleanup-folder-check').nth(0).check();
+    await page.locator('.cleanup-folder-check').nth(1).check();
+    await page.locator('#cleanup-folders-execute').click();
+    await expect(page.locator('#cleanup-result')).toBeVisible({ timeout: 15000 });
+    fs.chmodSync(path.join(root, 'b'), 0o755);
+    const txt = await page.locator('#cleanup-result').innerText();
+    expect(txt).not.toMatch(/Cancel/i);
+    const log = readLog(userData);
+    const eb = log.find(e => e.path.endsWith(path.join('b', 'node_modules')));
+    if (eb.status === 'failed' || eb.status === 'blocked') {
+      expect(txt).toMatch(/1 failed/);
+      expect(txt).toContain(eb.reason);
+      expect(eb.reason.length).toBeGreaterThan(5);
+    }
+  });
+});
+
+test('W6c. logs carry the on-disk case of the path (case-insensitive file systems)', async () => {
+  test.skip(process.platform === 'linux', 'only meaningful on case-insensitive file systems');
+  await withApp((r) => { proj(r, 'proj'); }, {}, async ({ page, root, userData }) => {
+    const typed = path.join(root, 'PROJ', 'node_modules');
+    const real = path.join(root, 'proj', 'node_modules');
+    const res = await del(page, [typed]);
+    expect(res.error).toBeUndefined();
+    const entry = readLog(userData).find(e => e.path.toLowerCase() === real.toLowerCase());
+    expect(entry.path).toBe(real);
+  });
 });

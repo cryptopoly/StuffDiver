@@ -3202,6 +3202,7 @@ body.light .cache-prompt-actions button:first-child {
 
 /* Folder cleanup + deletion log */
 .cleanup-section-title { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-secondary); margin: 12px 0 6px; }
+.cleanup-result { padding: 10px 14px; border-radius: 8px; background: var(--bg-raised); border: 1px solid var(--border-medium); font-size: 12px; margin-bottom: 10px; color: var(--text-primary); }
 .cleanup-note { font-size: 11px; color: var(--text-muted); margin-bottom: 8px; }
 .cleanup-refused { opacity: 0.5; }
 .cleanup-refused .cleanup-size { color: var(--text-muted); }

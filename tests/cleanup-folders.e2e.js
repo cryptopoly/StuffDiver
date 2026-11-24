@@ -3,7 +3,8 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const cf = require('../cleanup-folders');
-const { launch, scanViaUi, fixtureParent } = require('./helpers');
+const { launch, scanViaUi, fixtureParent, linkOrSkip } = require('./helpers');
+const link = (target, p, type) => linkOrSkip(test, target, p, type);
 
 const OLD = new Date(Date.now() - 90 * 86400000);
 function mk(root, rel, content) {
@@ -78,7 +79,7 @@ test.describe('classifier', () => {
     mk(root, 'real/package.json', '{}'); mk(root, 'real/yarn.lock', ''); mk(root, 'real/node_modules/x');
     mk(root, 'p/package.json', '{}'); mk(root, 'p/yarn.lock', ''); mk(root, 'p/node_modules', 'file, not folder');
     mk(root, 'q/package.json', '{}'); mk(root, 'q/yarn.lock', '');
-    fs.symlinkSync(path.join(root, 'real/node_modules'), path.join(root, 'q/node_modules'), 'dir');
+    link(path.join(root, 'real/node_modules'), path.join(root, 'q/node_modules'), 'dir');
     expect(kind('q/node_modules')).toMatch(/^refused:.*symlink/);
     expect(kind('p/node_modules')).toMatch(/^refused:.*not a folder/);
     expect(kind('missing/node_modules')).toMatch(/^refused:.*no longer exists/);
@@ -119,9 +120,10 @@ test.describe('classifier', () => {
     expect(Object.keys(byRel).sort()).toEqual([path.join('p', 'node_modules'), path.join('q', 'node_modules')]);
     expect(byRel[path.join('p', 'node_modules')]).toMatchObject({ kind: 'node_modules', files: 3, hasGit: false });
     expect(byRel[path.join('q', 'node_modules')].hasGit).toBe(true);
-    const d = cf.dedupeNested(['/a/b/c', '/a/b', '/a/bc', '/a/b'], false);
-    expect(d.kept.sort()).toEqual(['/a/b', '/a/bc']);
-    expect(d.dropped).toEqual(['/a/b/c']);
+    const P = (...x) => path.resolve(root, ...x);
+    const d = cf.dedupeNested([P('a/b/c'), P('a/b'), P('a/bc'), P('a/b')], false);
+    expect(d.kept.sort()).toEqual([P('a/b'), P('a/bc')].sort());
+    expect(d.dropped).toEqual([P('a/b/c')]);
   });
 });
 
@@ -233,7 +235,7 @@ test('a symlink to a folder is refused, and the real target is untouched', async
     expect(fs.existsSync(path.join(root, 'proj/node_modules/dep/index.js'))).toBe(true);
   }, { prepare: (r) => {
     project(r, 'proj'); mk(r, 'link-proj/package.json', '{}'); mk(r, 'link-proj/yarn.lock', '');
-    fs.symlinkSync(path.join(r, 'proj/node_modules'), path.join(r, 'link-proj/node_modules'), 'dir');
+    link(path.join(r, 'proj/node_modules'), path.join(r, 'link-proj/node_modules'), 'dir');
   } });
 });
 
@@ -244,7 +246,7 @@ test('TOCTOU: folder swapped for a symlink after the scan is refused', async () 
     expect(scan.candidates.some(c => c.path === target && !c.refused)).toBe(true);
     // Attacker/race: replace the scanned folder by a link to precious data.
     fs.rmSync(target, { recursive: true });
-    fs.symlinkSync(path.join(root, 'precious'), target, 'dir');
+    link(path.join(root, 'precious'), target, 'dir');
     const res = await del(page, [target]);
     expect(res.deleted).toBe(0);
     expect(res.blocked[0].reason).toMatch(/symlink/);
@@ -258,7 +260,7 @@ test('TOCTOU: ancestor swapped for a symlink after the scan is refused', async (
     const target = path.join(root, 'proj/node_modules');
     await page.evaluate(() => window.api.cleanupFoldersScan());
     fs.renameSync(path.join(root, 'proj'), path.join(root, 'moved'));
-    fs.symlinkSync(path.join(root, 'decoy'), path.join(root, 'proj'), 'dir');
+    link(path.join(root, 'decoy'), path.join(root, 'proj'), 'dir');
     const res = await del(page, [target]);
     expect(res.deleted).toBe(0);
     expect(res.blocked[0].reason).toMatch(/different location|symlink/);

@@ -3668,7 +3668,39 @@
   // Only these loose-file presets start ticked; everything else is the user's explicit choice.
   const CLEANUP_PRETICKED = new Set(['dsstore', 'thumbs']);
 
-  async function openCleanupWizard() {
+  function removeFoldersFromTree(relPaths) {
+    if (!folderTree) return;
+    for (const rel of relPaths) {
+      const segs = String(rel).split('/').filter(Boolean);
+      if (!segs.length) continue;
+      const chain = [folderTree];
+      let node = folderTree;
+      for (const sg of segs) {
+        if (!node.children || !Object.prototype.hasOwnProperty.call(node.children, sg)) { node = null; break; }
+        node = node.children[sg]; chain.push(node);
+      }
+      if (!node) continue;
+      for (const anc of chain.slice(0, -1)) {
+        anc.size -= node.size; anc.logicalSize -= node.logicalSize; anc.fileCount -= node.fileCount;
+      }
+      totalFiles = Math.max(0, totalFiles - node.fileCount);
+      totalSize = Math.max(0, totalSize - node.size);
+      delete chain[chain.length - 2].children[segs[segs.length - 1]];
+    }
+    bubblePath = []; bubbleCurrentNode = folderTree; selectedFolderPath = null;
+    renderFolderTree();
+    renderVisualization();
+    updateStats();
+  }
+
+  window.api.onFolderDeleteProgress(function(d) {
+    const el = document.getElementById('cleanup-progress');
+    if (!el) return;
+    const name = String(d.path || '').split(/[\\/]/).slice(-2).join('/');
+    el.textContent = (d.phase === 'trash' ? 'Moving to Trash' : 'Verifying') + ' ' + Math.min(d.done + 1, d.total) + ' of ' + d.total + ': ' + name;
+  });
+
+  async function openCleanupWizard(notice) {
     if (!allFiles.length) { alert('Please scan a folder first.'); return; }
     const overlay = document.getElementById('cleanup-overlay');
     overlay.classList.remove('hidden');
@@ -3687,7 +3719,7 @@
       return;
     }
 
-    let html = '';
+    let html = notice ? '<div class="cleanup-result" id="cleanup-result">' + escHtml(notice).replace(/\n/g, '<br>') + '</div>' : '';
     if (cands.length) {
       const shown = cands.slice(0, CLEANUP_FOLDER_RENDER_CAP);
       html += '<div class="cleanup-section-title">Folders you can regenerate</div>';
@@ -3709,7 +3741,7 @@
           + c.warnings.map(function(w) { return '<div class="cleanup-detail cleanup-warn">&#9888; ' + escHtml(w) + '</div>'; }).join('')
           + '</div><span class="cleanup-size">' + formatSize(Number(c.size) || 0) + '</span></div>';
       });
-      html += '<div class="cleanup-actions"><button class="cleanup-btn-clean" id="cleanup-folders-execute">Move Selected Folders to Trash</button></div>';
+      html += '<div class="cleanup-actions"><button class="cleanup-btn-clean" id="cleanup-folders-execute">Move Selected Folders to Trash</button></div><div class="cleanup-note" id="cleanup-progress"></div>';
     }
     if (found.length) {
       const grandTotal = found.reduce(function(sum, c) { return sum + c.totalSize; }, 0);
@@ -3735,16 +3767,29 @@
         if (btn.dataset.busy) { window.api.cancelFolderDelete(); btn.textContent = 'Cancelling...'; return; }
         const picked = [...body.querySelectorAll('.cleanup-folder-check:checked')].map(function(c) { return cands[Number(c.dataset.idx)].path; });
         if (!picked.length) return;
-        btn.dataset.busy = '1'; btn.textContent = 'Checking... (click to cancel)';
+        btn.dataset.busy = '1'; btn.textContent = 'Cancel';
+        document.getElementById('cleanup-progress').textContent = 'Verifying 1 of ' + picked.length + '...';
+        const pickedRel = cands.filter(function(c) { return picked.indexOf(c.path) >= 0; }).map(function(c) { return c.relPath; });
         const result = await window.api.deleteFolders(picked, 'smart-cleanup-folders');
         delete btn.dataset.busy; btn.textContent = 'Move Selected Folders to Trash';
-        if (result && result.error) { alert(result.error); return; }
+        document.getElementById('cleanup-progress').textContent = '';
+        if (result && result.error && !result.cancelled) { alert(result.error); return; }
         if (result && result.logError) alert(result.logError);
-        if (result && result.deleted > 0) {
+        const moved = (result && result.deleted) || 0;
+        const failures = (result && result.failures) || [];
+        let msg = '';
+        if (result && result.cancelled) msg = 'Cancelled: ' + moved + ' folder' + (moved === 1 ? '' : 's') + ' moved to the Trash before cancelling; the others were left untouched.';
+        else if (failures.length) msg = moved + ' moved, ' + failures.length + ' failed (the batch is not all-or-nothing once moving has started):\n' + failures.slice(0, 5).map(function(f) { return f.path + ': ' + f.reason; }).join('\n');
+        else if (moved) msg = moved + ' folder' + (moved === 1 ? '' : 's') + ' moved to the Trash (' + formatSize(result.freedBytes || 0) + '). You can restore them from the Trash or Recycle Bin.';
+        if (moved > 0) {
+          const movedSet = new Set(result.deletedPaths || []);
           const prefixes = (result.deletedPaths || []).map(function(p) { return p + (p.indexOf('\\') >= 0 ? '\\' : '/'); });
           allFiles = allFiles.filter(function(f) { return !prefixes.some(function(p) { return f.path.startsWith(p); }); });
+          removeFoldersFromTree(cands.filter(function(c) { return movedSet.has(c.path); }).map(function(c) { return c.relPath; }));
           applyFilters();
-          openCleanupWizard();
+          openCleanupWizard(msg);
+        } else if (msg) {
+          openCleanupWizard(msg);
         }
       });
     }
