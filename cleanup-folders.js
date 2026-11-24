@@ -19,6 +19,25 @@ const LOCKFILES = ['package-lock.json', 'yarn.lock', 'pnpm-lock.yaml', 'bun.lock
 const VCS_NAMES = new Set(['.git', '.hg', '.jj', '.svn', '.bzr', '.fossil', '_fossil_']);
 // Documents people write by hand: never found in tool output such as target/, .next/, __pycache__ or DerivedData.
 const USER_DOC_EXT = /\.(docx?|xlsx?|pptx?|odt|ods|odp|pdf|pages|numbers|key|psd|ai|sketch|fig|md|markdown|rtf)$/i;
+const USER_DOC_STRICT = /\.(docx?|xlsx?|pptx?|odt|ods|odp|pages|numbers|key|psd|ai|sketch|fig|rtf)$/i; // node_modules legitimately ships README.md / pdf docs
+const docRe = (mode) => mode === 'strict' ? USER_DOC_STRICT : USER_DOC_EXT;
+const BUNDLE_EXT = /\.(app|framework|bundle|plugin|component|vst|vst3|appex|kext|xpc|prefpane|saver|mdimporter|qlgenerator|wdgt|xcarchive|photoslibrary|musiclibrary|imovielibrary|tvlibrary|band|logicx|fcpbundle|sparsebundle|pkg)$/i;
+// Files inside signed bundles and installed-app locations: removing even junk-looking files breaks signatures/installs.
+function installedAppReason(p, bundleOnly = false) {
+  const norm = String(p).replace(/\\/g, '/').toLowerCase();
+  const segs = norm.split('/').filter(Boolean);
+  if (segs.slice(0, -1).some(x => BUNDLE_EXT.test(x))) return 'inside an application bundle';
+  if (bundleOnly) return null;
+  if (segs.some(x => x === 'windowsapps' || x === 'program files' || x === 'program files (x86)') || /\/programdata\/package cache(\/|$)/.test(norm)) return 'inside an installed Windows application folder';
+  if (/^\/(usr|opt|snap)(\/|$)/.test(norm) || /^\/var\/lib\/flatpak(\/|$)/.test(norm) || /^\/tmp\/\.mount_[^/]+(\/|$)/.test(norm) || /^\/app(\/|$)/.test(norm)) return 'inside an installed application location';
+  return null;
+}
+// Text safe to put in a native dialog: no control or bidi-override characters, one line, long names shortened in the middle.
+function safeText(v, max = 160) {
+  let t = String(v).replace(/[\u0000-\u001f\u007f\u200e\u200f\u202a-\u202e\u2066-\u2069]+/g, ' ').replace(/\s+/g, ' ').trim();
+  if (t.length > max) { const k = Math.floor((max - 1) / 2); t = t.slice(0, k) + '\u2026' + t.slice(t.length - k); }
+  return t;
+}
 let elevated = false; // set by the app: Windows Administrator / POSIX root
 function setElevated(v) { elevated = !!v; }
 const CLOUD_RE = /^(cloudstorage|mobile documents|icloud drive.*|iclouddrive|dropbox.*|google drive.*|googledrive|my drive|box|box sync|onedrive.*|nextcloud.*|owncloud.*|pcloud.*|mega.*|synologydrive.*|syncthing.*|sync|seafile.*|creative cloud files.*|yandex\.disk.*|resilio.*|insync.*|tresorit.*|spideroak.*|backblaze.*|idrive.*)$/;
@@ -96,7 +115,7 @@ function blockedLocation(dir, opts = {}) {
 // marker test (structural, run against the real filesystem).
 const KINDS = [
   {
-    id: 'node_modules', label: 'node_modules', icon: '\u{1F4E6}',
+    id: 'node_modules', label: 'node_modules', icon: '\u{1F4E6}', denyDocs: 'strict',
     name: n => n === 'node_modules',
     marker: (d, fsx) => {
       if (!(anyFile(path.dirname(d), ['package.json'], fsx) && anyFile(path.dirname(d), LOCKFILES, fsx))) return false;
@@ -118,7 +137,7 @@ const KINDS = [
     restore: 'Python rebuilds it automatically the next time the code runs.'
   },
   {
-    id: 'pytest_cache', label: 'pytest cache', icon: '\u{1F9EA}',
+    id: 'pytest_cache', label: 'pytest cache', icon: '\u{1F9EA}', denyDocs: true,
     name: n => n === '.pytest_cache',
     marker: (d, fsx) => exists(path.join(d, 'CACHEDIR.TAG'), fsx),
     reason: '.pytest_cache with a CACHEDIR.TAG marker',
@@ -153,7 +172,7 @@ const KINDS = [
     restore: 'Rebuild with cargo build or mvn package.'
   },
   {
-    id: 'gradle_cache', label: 'Gradle project cache', icon: '\u{1F418}',
+    id: 'gradle_cache', label: 'Gradle project cache', icon: '\u{1F418}', denyDocs: true,
     name: n => n === '.gradle',
     marker: (d, fsx) => anyFile(path.dirname(d), ['build.gradle', 'build.gradle.kts', 'settings.gradle', 'settings.gradle.kts'], fsx),
     reason: '.gradle next to a Gradle build file',
@@ -168,7 +187,7 @@ const KINDS = [
     restore: 'Rebuild with next build (or next dev).'
   },
   {
-    id: 'nuxt', label: 'Nuxt build cache', icon: '\u{1F3D7}',
+    id: 'nuxt', label: 'Nuxt build cache', icon: '\u{1F3D7}', denyDocs: true,
     name: n => n === '.nuxt',
     marker: (d, fsx) => anyFile(path.dirname(d), ['nuxt.config.js', 'nuxt.config.mjs', 'nuxt.config.cjs', 'nuxt.config.ts'], fsx),
     reason: '.nuxt next to nuxt.config.*',
@@ -212,7 +231,7 @@ function classifyFolder(dir, fsx = fs) {
     let ok = false;
     try { ok = k.marker(dir, fsx); } catch (e) { ok = false; }
     if (typeof ok === 'string') return { refused: ok };
-    if (ok) return { kind: k.id, label: k.label, icon: k.icon, reason: k.reason, restore: k.restore, defaultOff: !!k.defaultOff, denyDocs: !!k.denyDocs, forbidNames: k.forbidNames || null };
+    if (ok) return { kind: k.id, label: k.label, icon: k.icon, reason: k.reason, restore: k.restore, defaultOff: !!k.defaultOff, denyDocs: k.denyDocs || false, forbidNames: k.forbidNames || null };
   }
   return null;
 }
@@ -237,7 +256,7 @@ async function inspectFolder(dir, fsx = fs, isWin = process.platform === 'win32'
       if (++seen > WALK_ENTRY_CAP) { out.error = 'too many entries to verify safely'; return out; }
       const full = path.join(cur, e.name);
       if (VCS_NAMES.has(e.name.toLowerCase()) && !out.git) out.git = full;
-      if (kindInfo && kindInfo.denyDocs && !out.userDoc && !e.isDirectory() && USER_DOC_EXT.test(e.name)) out.userDoc = full;
+      if (kindInfo && kindInfo.denyDocs && !out.userDoc && !e.isDirectory() && docRe(kindInfo.denyDocs).test(e.name)) out.userDoc = full;
       if (kindInfo && kindInfo.forbidNames && !out.forbidden && kindInfo.forbidNames(e.name)) out.forbidden = full;
       if (e.isSymbolicLink()) {
         // Windows junctions and directory links report as links: refuse them anywhere inside.
@@ -311,6 +330,13 @@ function readCapped(p, max, fsx) {
   try { const st = fsx.statSync(p); if (!st.isFile()) return null; if (st.size > max) return false; return fsx.readFileSync(p, 'utf8'); } catch (e) { return null; }
 }
 function lockfileProblem(text) {
+  // pnpm: a resolution without an npm tarball/integrity is a git, local or hosted-tarball dependency.
+  let rm;
+  const rr = /resolution:\s*\{([^}]*)\}/g;
+  while ((rm = rr.exec(text))) {
+    if (/\b(commit|repo|directory|type)\s*:/.test(rm[1]) || !/\b(integrity|tarball)\s*:/.test(rm[1])) return 'lockfile has a dependency without an npm registry tarball (git or local)';
+  }
+  if (/resolution:\s*\n\s+(commit|repo|directory|type)\s*:/.test(text)) return 'lockfile has a dependency without an npm registry tarball (git or local)';
   const re = /(?:resolved|tarball)["']?\s*[:=]?\s*["']?((?:[a-z+]+:\/\/|file:|link:|git\+)[^\s"',)]*)/gi;
   let m;
   while ((m = re.exec(text))) {
@@ -371,13 +397,18 @@ function projectSignals(dir, kindId, opts = {}) {
     if (e.name === path.basename(dir) || e.name.startsWith('.')) continue;
     try { const st = fsx.lstatSync(path.join(up, e.name)); if (st.mtimeMs > newest) newest = st.mtimeMs; } catch (er) { /* gone */ }
   }
-  if (newest && Date.now() - newest < RECENT_DAYS * 86400000) out.warnings.push(`project files were modified ${Math.floor((Date.now() - newest) / 86400000) === 0 ? 'today' : Math.floor((Date.now() - newest) / 86400000) + ' day(s) ago'}: you are probably working on it`);
+  if (newest && Date.now() - newest < RECENT_DAYS * 86400000) out.warnings.push(`project files were modified ${Math.max(0, Math.floor((Date.now() - newest) / 86400000)) === 0 ? 'today' : Math.floor((Date.now() - newest) / 86400000) + ' day(s) ago'}: you are probably working on it`);
   // A running process whose working directory is inside the folder (best effort).
   if (Array.isArray(opts.cwds)) {
     const ci = process.platform !== 'linux';
     const d = ci ? dir.toLowerCase() : dir;
     const hit = opts.cwds.find(c => { const x = ci ? c.toLowerCase() : c; return x === d || x.startsWith(d + path.sep); });
     if (hit) sev(`a running process is using this folder (working directory ${hit})`);
+    else {
+      const u = ci ? up.toLowerCase() : up;
+      const proj = opts.cwds.find(c => { const x = ci ? c.toLowerCase() : c; return x === u || x.startsWith(u + path.sep); });
+      if (proj) out.warnings.push(`a running process has its working directory in this project (${proj})`);
+    }
   } else if (opts.cwds === null) out.warnings.push('could not check for running processes');
   return out;
 }
@@ -444,7 +475,7 @@ function findCandidates(files, scanRoot, ci, fsx = fs, mounts = getMountPoints()
     else if (c && c.unreadable) {
       // Unreadable after the scan (permissions changed): still listed, greyed out with the reason.
       const k = KINDS.find(x => x.name(path.basename(d)) || x.byMarkerFile);
-      if (k) valid.set(dirKey(d), { dir: d, kind: k.id, label: k.label, icon: k.icon, reason: k.reason, restore: k.restore, defaultOff: !!k.defaultOff, denyDocs: !!k.denyDocs, forbidNames: k.forbidNames || null });
+      if (k) valid.set(dirKey(d), { dir: d, kind: k.id, label: k.label, icon: k.icon, reason: k.reason, restore: k.restore, defaultOff: !!k.defaultOff, denyDocs: k.denyDocs || false, forbidNames: k.forbidNames || null });
     }
   }
   const { kept } = dedupeNested([...valid.values()].map(v => v.dir), ci);
@@ -468,7 +499,7 @@ function findCandidates(files, scanRoot, ci, fsx = fs, mounts = getMountPoints()
     if ((f.mtime || 0) > o.newest) o.newest = f.mtime;
     const rel = path.relative(o.path, f.path).split(path.sep);
     if (rel.some(x => VCS_NAMES.has(x.toLowerCase()))) o.hasGit = true;
-    if (o.denyDocs && !o.userDoc && USER_DOC_EXT.test(f.name || '')) o.userDoc = f.path;
+    if (o.denyDocs && !o.userDoc && docRe(o.denyDocs).test(f.name || '')) o.userDoc = f.path;
     if (o.forbidNames && !o.forbidden && rel.some(x => o.forbidNames(x))) o.forbidden = f.path;
   }
   // One lstat per distinct folder: unreadable folders and mount points inside a candidate are flagged now, not only at delete time.
@@ -492,4 +523,4 @@ function findCandidates(files, scanRoot, ci, fsx = fs, mounts = getMountPoints()
   return [...owners.values()];
 }
 
-module.exports = { projectSignals, runningCwds, lockfileProblem, npmrcProblem, setElevated, cloudSyncedReason, trashReason, VCS_NAMES, parseMountinfo, parseMacMount, getMountPoints, mountConflict, deviceDiffersFromParent, blockedLocation, KINDS, CANDIDATE_NAMES, RECENT_DAYS, MANY_FILES, classifyFolder, inspectFolder, dedupeNested, findCandidates, isInside };
+module.exports = { installedAppReason, safeText, projectSignals, runningCwds, lockfileProblem, npmrcProblem, setElevated, cloudSyncedReason, trashReason, VCS_NAMES, parseMountinfo, parseMacMount, getMountPoints, mountConflict, deviceDiffersFromParent, blockedLocation, KINDS, CANDIDATE_NAMES, RECENT_DAYS, MANY_FILES, classifyFolder, inspectFolder, dedupeNested, findCandidates, isInside };

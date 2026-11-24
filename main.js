@@ -418,7 +418,7 @@ handleTrusted('cleanup-scan', async () => {
         const full = f.path.replace(/\\/g, '/');
         if (c.skip && c.skip(full, ctx)) break;
         // Files in cloud-synced folders or already in a Trash are never offered (a delete there is felt everywhere / is meaningless).
-        if (cleanupFolders.cloudSyncedReason(f.path) || cleanupFolders.trashReason(f.path)) break;
+        if (cleanupFolders.cloudSyncedReason(f.path) || cleanupFolders.trashReason(f.path) || cleanupFolders.installedAppReason(f.path)) break;
         // Never offer paths the delete guard would refuse (a single one refuses the whole request).
         if (protectedReason(f.path, true)) break;
         c.count++;
@@ -811,26 +811,17 @@ handleTrusted('reveal-deletion-log', async () => {
   return fs.existsSync(p);
 });
 
-handleTrusted('delete-files', async (event, filePaths, source) => {
-  if (!Array.isArray(filePaths) || !filePaths.length) return { deleted: 0, deletedPaths: [] };
-  const safePaths = [];
-  if (!filePaths.every(p => typeof p === 'string' && path.isAbsolute(p))) {
-    return { deleted: 0, deletedPaths: [], error: 'Refused: file paths must be absolute. Nothing was moved.' };
-  }
-  try {
-    for (const fp of filePaths) {
-      safePaths.push(assertAllowedFilePath(fp));
-    }
-  } catch (e) {
-    return { deleted: 0, deletedPaths: [], error: e.message || 'Invalid file path' };
-  }
-
-  // All-or-nothing: one protected path refuses the whole request.
+const FILE_REQUEST_CAP = 50000;
+const trashFn = (p) => (E2E && typeof global.__e2eTrash === 'function') ? global.__e2eTrash(p) : shell.trashItem(p); // E2E-only hook can simulate platform quirks
+// Per-file checks shared by the first pass and the re-check after the confirmation dialog.
+function checkFilePaths(paths) {
   const blocked = [];
-  for (const fp of safePaths) {
+  for (const fp of paths) {
     const reason = protectedReason(fp);
     if (reason) { blocked.push({ path: fp, reason }); continue; }
     if (cleanupFolders.trashReason(fp)) { blocked.push({ path: fp, reason: 'already in a Trash or Recycle Bin (it cannot be moved to the Trash again)' }); continue; }
+    const bundle = cleanupFolders.installedAppReason(fp, true);
+    if (bundle) { blocked.push({ path: fp, reason: bundle + ' (removing files there breaks the app\'s signature or install)' }); continue; }
     // This handler only trashes files. Folders go through delete-folders and its safeguards.
     try {
       const st = fs.lstatSync(fp);
@@ -843,12 +834,41 @@ handleTrusted('delete-files', async (event, filePaths, source) => {
       }
     } catch (e) { /* missing: trashItem will report it as failed */ }
   }
+  return blocked;
+}
+
+handleTrusted('delete-files', async (event, filePaths, source) => {
+  if (!Array.isArray(filePaths) || !filePaths.length) return { deleted: 0, deletedPaths: [] };
+  // Cheap request-level checks first, before any per-path work.
+  if (filePaths.length > FILE_REQUEST_CAP) return { deleted: 0, deletedPaths: [], error: `Refused: ${filePaths.length} files in one request, the limit is ${FILE_REQUEST_CAP}. Nothing was moved.` };
+  if (!filePaths.every(p => typeof p === 'string')) return { deleted: 0, deletedPaths: [], error: 'Refused: invalid file path in request. Nothing was moved.' };
+  if (filePaths.some(p => p.includes('\0'))) return { deleted: 0, deletedPaths: [], error: 'Refused: a path contains a NUL character. Nothing was moved.' };
+  if (!filePaths.every(p => path.isAbsolute(p))) {
+    return { deleted: 0, deletedPaths: [], error: 'Refused: file paths must be absolute. Nothing was moved.' };
+  }
+  const safePaths = [];
+  const seen = new Set();
+  const ciFiles = process.platform === 'win32' || process.platform === 'darwin';
+  try {
+    for (const fp of filePaths) {
+      const r = assertAllowedFilePath(fp);
+      const key = ciFiles ? r.toLowerCase() : r;
+      if (seen.has(key)) continue; // the same file listed twice is one file
+      seen.add(key);
+      safePaths.push(r);
+    }
+  } catch (e) {
+    return { deleted: 0, deletedPaths: [], error: e.message || 'Invalid file path' };
+  }
+
+  // All-or-nothing: one protected path refuses the whole request.
+  const blocked = checkFilePaths(safePaths);
   if (blocked.length) {
     const now = Date.now();
     const logError = await logDeletion(blocked.map(b => ({ t: now, path: b.path, status: 'blocked', reason: b.reason, source: source || 'collector' })));
     return {
       deleted: 0, deletedPaths: [], blocked, ...(logError ? { logError } : {}),
-      error: `Refused: ${blocked[0].path} is ${blocked[0].reason}.` + (blocked.length > 1 ? ` (+${blocked.length - 1} more refused)` : '') + ' Nothing was moved.'
+      error: `Refused: ${cleanupFolders.safeText(blocked[0].path)} is ${blocked[0].reason}.` + (blocked.length > 1 ? ` (+${blocked.length - 1} more refused)` : '') + ' Nothing was moved.'
     };
   }
 
@@ -856,6 +876,7 @@ handleTrusted('delete-files', async (event, filePaths, source) => {
   const want = new Set(safePaths);
   for (const f of lastScanAllFiles) if (want.has(f.path)) sizeByPath.set(f.path, f.size);
 
+  const hidden = safePaths.some(p => /(^|[\\/])(\.DS_Store|Thumbs\.db)$/i.test(p));
   const result = E2E ? { response: 1 } : await dialog.showMessageBox(mainWindow, {
     type: 'warning',
     buttons: ['Cancel', 'Move to Trash'],
@@ -863,35 +884,50 @@ handleTrusted('delete-files', async (event, filePaths, source) => {
     cancelId: 0,
     title: 'Delete Files',
     message: `Move ${safePaths.length} file${safePaths.length > 1 ? 's' : ''} (${formatSizeMain(safePaths.reduce((a, p) => a + (sizeByPath.get(p) || 0), 0))}) to trash?`,
-    detail: `Largest ${Math.min(10, safePaths.length)}:\n` + [...safePaths].sort((a, b) => (sizeByPath.get(b) || 0) - (sizeByPath.get(a) || 0)).slice(0, 10).map(p => `${formatSizeMain(sizeByPath.get(p) || 0)}  ${p}`).join('\n') +
+    detail: (hidden ? 'This includes hidden metadata files (.DS_Store / Thumbs.db) that the system recreates when needed.\n\n' : '') +
+      `Largest ${Math.min(10, safePaths.length)}:\n` + [...safePaths].sort((a, b) => (sizeByPath.get(b) || 0) - (sizeByPath.get(a) || 0)).slice(0, 10).map(p => `${formatSizeMain(sizeByPath.get(p) || 0)}  ${cleanupFolders.safeText(p)}`).join('\n') +
       '\n\nThey are moved to the Trash (macOS/Linux) or Recycle Bin (Windows); nothing is permanently deleted, and you can restore them from there. Each one is recorded in the deletion log.'
   });
 
   if (result.response !== 1) return { deleted: 0, deletedPaths: [] };
 
-  const deletedPaths = [], failures = [];
+  // The dialog can sit open for a long time: check everything again before touching anything.
+  if (E2E && typeof global.__e2eAfterDialog === 'function') await global.__e2eAfterDialog();
+  const changed = checkFilePaths(safePaths);
+  if (changed.length) {
+    const now = Date.now();
+    const logError = await logDeletion(changed.map(b => ({ t: now, path: b.path, status: 'blocked', reason: 'changed before delete: ' + b.reason, source: source || 'collector' })));
+    return { deleted: 0, deletedPaths: [], blocked: changed, ...(logError ? { logError } : {}), error: `Refused: ${cleanupFolders.safeText(changed[0].path)} changed before it could be deleted (${changed[0].reason}). Nothing was moved.` };
+  }
+
+  const deletedPaths = [], removedPaths = [], failures = [];
   let logError = null;
   for (const fp of safePaths) {
     const entry = { t: Date.now(), path: fp, size: sizeByPath.get(fp) ?? null, source: source || 'collector' };
     let rec;
     try {
-      await shell.trashItem(fp);
+      await trashFn(fp);
       deletedPaths.push(fp);
       rec = { ...entry, status: 'trashed' };
     } catch (e) {
       console.error('Failed to trash:', fp, e.message);
-      // macOS can report "doesn't exist" for an item it did remove: record what is really there now.
+      // Some platforms (macOS with .DS_Store) report an error although the file is gone: record what is really there now.
       let gone = false; try { fs.lstatSync(fp); } catch (er) { gone = er.code === 'ENOENT'; }
-      rec = { ...entry, status: 'failed', finalState: gone ? 'gone' : 'untouched', reason: osErrorReason(e) };
-      failures.push({ path: fp, reason: rec.reason, state: 'failed', finalState: rec.finalState });
+      if (gone) {
+        removedPaths.push(fp);
+        rec = { ...entry, status: 'removed', reason: 'the system reported an error but the file is gone; it may not be in the Trash (' + osErrorReason(e) + ')' };
+      } else {
+        rec = { ...entry, status: 'failed', finalState: 'untouched', reason: osErrorReason(e) };
+        failures.push({ path: fp, reason: rec.reason, state: 'failed', finalState: 'untouched' });
+      }
     }
     logError = (await logDeletion([rec])) || logError; // written per item: a crash mid-batch loses nothing
   }
-  if (deletedPaths.length) {
-    const gone = new Set(deletedPaths);
+  if (deletedPaths.length || removedPaths.length) {
+    const gone = new Set([...deletedPaths, ...removedPaths]);
     lastScanAllFiles = lastScanAllFiles.filter(f => !gone.has(f.path));
   }
-  return { deleted: deletedPaths.length, deletedPaths, failures, ...(logError ? { logError } : {}) };
+  return { deleted: deletedPaths.length, deletedPaths, removed: removedPaths.length, removedPaths, failures, ...(logError ? { logError } : {}) };
 });
 
 
@@ -997,7 +1033,7 @@ handleTrusted('cleanup-folders-scan', async () => {
     if (!refused && c.hasGit) refused = 'contains a .git or other version-control folder, so it may hold a repository';
     if (!refused && c.userDoc) refused = `contains ${c.userDoc}, a document that does not belong in ${c.label}`;
     if (!refused && c.forbidden) refused = `contains ${c.forbidden}, an Xcode archive that cannot be rebuilt`;
-    const ageDays = c.newest ? Math.floor((now - c.newest) / 86400000) : null;
+    const ageDays = c.newest ? Math.max(0, Math.floor((now - c.newest) / 86400000)) : null;
     const recent = ageDays !== null && ageDays < cleanupFolders.RECENT_DAYS;
     const many = c.files > cleanupFolders.MANY_FILES;
     const warnings = [...(c.signals || [])];
@@ -1022,6 +1058,8 @@ handleTrusted('delete-folders', async (event, folderPaths, source) => {
   const src = source || 'smart-cleanup-folders';
   const nothing = { deleted: 0, deletedPaths: [], freedBytes: 0 };
   if (!Array.isArray(folderPaths) || !folderPaths.length) return nothing;
+  // Request-level checks first, before any per-path work (a huge array must not freeze the main process).
+  if (folderPaths.length > FOLDER_BATCH_CAP) return { ...nothing, error: `Refused: ${folderPaths.length} folders selected, the limit is ${FOLDER_BATCH_CAP} per run. Nothing was changed.` };
   if (!devFoldersOn()) return { ...nothing, error: 'Refused: developer folder cleanup is switched off. Nothing was moved.' };
   if (folderDeleteBusy) return { ...nothing, error: 'Another folder cleanup is already running.' };
   folderDeleteBusy = true;
@@ -1029,6 +1067,7 @@ handleTrusted('delete-folders', async (event, folderPaths, source) => {
     const ci = process.platform === 'win32' || process.platform === 'darwin';
     const strings = folderPaths.filter(p => typeof p === 'string' && p);
     if (strings.length !== folderPaths.length) return { ...nothing, error: 'Refused: invalid folder path in request.' };
+    if (strings.some(p => p.includes('\0'))) return { ...nothing, error: 'Refused: a path contains a NUL character. Nothing was moved.' };
     if (!strings.every(p => path.isAbsolute(p))) return { ...nothing, error: 'Refused: folder paths must be absolute. Nothing was moved.' };
     const { kept, dropped } = cleanupFolders.dedupeNested(strings.map(p => path.resolve(p)), ci);
     if (kept.length > FOLDER_BATCH_CAP) {
@@ -1059,7 +1098,7 @@ handleTrusted('delete-folders', async (event, folderPaths, source) => {
     }
     const total = checks.reduce((a, c) => a + c.size, 0);
     if (!E2E) {
-      const top = [...checks].sort((a, b) => b.size - a.size).slice(0, 10).map(c => `${formatSizeMain(c.size)}  ${c.path}`);
+      const top = [...checks].sort((a, b) => b.size - a.size).slice(0, 10).map(c => `${formatSizeMain(c.size)}  ${cleanupFolders.safeText(c.path)}`);
       const recent = checks.filter(c => c.newest && Date.now() - c.newest < cleanupFolders.RECENT_DAYS * 86400000).length;
       const warned = checks.filter(c => c.warnings && c.warnings.length);
       const r = await dialog.showMessageBox(mainWindow, {
@@ -1067,7 +1106,7 @@ handleTrusted('delete-folders', async (event, folderPaths, source) => {
         title: 'Clean up folders',
         message: `Move ${checks.length} folder${checks.length > 1 ? 's' : ''} (${formatSizeMain(total)} logical size, ${checks.reduce((a, c) => a + c.files, 0).toLocaleString()} entries counted just now) to the trash?`,
         detail: (recent ? `${recent} of them were modified in the last ${cleanupFolders.RECENT_DAYS} days.\n\n` : '') +
-          (warned.length ? `Warnings (${warned.length} folder${warned.length > 1 ? 's' : ''}):\n` + warned.slice(0, 5).map(c => `- ${c.path}: ${c.warnings.join('; ')}`).join('\n') + (warned.length > 5 ? `\n(+${warned.length - 5} more)` : '') + '\n\n' : '') +
+          (warned.length ? `Warnings (${warned.length} folder${warned.length > 1 ? 's' : ''}):\n` + warned.slice(0, 5).map(c => `- ${cleanupFolders.safeText(c.path)}: ${cleanupFolders.safeText(c.warnings.join('; '), 300)}`).join('\n') + (warned.length > 5 ? `\n(+${warned.length - 5} more)` : '') + '\n\n' : '') +
           `Largest ${top.length}:\n${top.join('\n')}\n\nSizes are logical sizes; space actually freed can be less (shared or compressed files). They are moved to the Trash (macOS/Linux) or Recycle Bin (Windows); nothing is permanently deleted, and you can restore them from there. Each one is recorded in the deletion log.`
       });
       if (r.response !== 1) return nothing;
@@ -1085,7 +1124,7 @@ handleTrusted('delete-folders', async (event, folderPaths, source) => {
       await logDeletion(changed.map(b => ({ t: now, path: b.path, status: 'blocked', reason: 'changed before delete: ' + b.reason, source: src, type: 'folder' })));
       return { ...nothing, blocked: changed.map(b => ({ path: b.path, reason: b.reason })), error: `Refused: ${changed[0].path} changed before it could be deleted (${changed[0].reason}). Nothing was moved.` };
     }
-    const deletedPaths = [], failed = [], failures = [];
+    const deletedPaths = [], removedPaths = [], failed = [], failures = [];
     let freedBytes = 0, logError = null;
     for (const c of checks) {
       sendFolderProgress('trash', deletedPaths.length + failed.length, checks.length, c.path);
@@ -1103,27 +1142,32 @@ handleTrusted('delete-folders', async (event, folderPaths, source) => {
           failed.push(c.path); failures.push({ path: c.path, reason: rec.reason, state: 'blocked' });
         } else {
           try {
-            await shell.trashItem(c.path);
+            await trashFn(c.path);
             deletedPaths.push(c.path); freedBytes += c.size;
             rec = { ...entry, status: 'trashed', reason: c.reason };
           } catch (e) {
-            failed.push(c.path);
             // Some platforms report an error although the item was moved: record what is really there now.
             let gone = false; try { fs.lstatSync(c.path); } catch (er) { gone = er.code === 'ENOENT'; }
-            rec = { ...entry, status: 'failed', finalState: gone ? 'gone' : 'untouched', reason: osErrorReason(e) };
-            failures.push({ path: c.path, reason: rec.reason, state: 'failed', finalState: rec.finalState });
+            if (gone) {
+              removedPaths.push(c.path);
+              rec = { ...entry, status: 'removed', reason: 'the system reported an error but the folder is gone; it may not be in the Trash (' + osErrorReason(e) + ')' };
+            } else {
+              failed.push(c.path);
+              rec = { ...entry, status: 'failed', finalState: 'untouched', reason: osErrorReason(e) };
+              failures.push({ path: c.path, reason: rec.reason, state: 'failed', finalState: 'untouched' });
+            }
           }
         }
       }
       logError = (await logDeletion([rec])) || logError; // per item, right after the move
     }
-    if (deletedPaths.length) {
-      const gone = deletedPaths.map(p => p + path.sep);
+    if (deletedPaths.length || removedPaths.length) {
+      const gone = [...deletedPaths, ...removedPaths].map(p => p + path.sep);
       const lc = ci ? (v) => v.toLowerCase() : (v) => v;
       const goneL = gone.map(lc);
       lastScanAllFiles = lastScanAllFiles.filter(f => { const fl = lc(f.path); return !goneL.some(g => fl.startsWith(g)); });
     }
-    return { deleted: deletedPaths.length, deletedPaths, freedBytes, failed, failures, cancelled: folderDeleteCancel || undefined, dedupedNested: dropped, ...(logError ? { logError } : {}) };
+    return { deleted: deletedPaths.length, deletedPaths, removed: removedPaths.length, removedPaths, freedBytes, failed, failures, cancelled: folderDeleteCancel || undefined, dedupedNested: dropped, ...(logError ? { logError } : {}) };
   } finally {
     folderDeleteBusy = false;
   }
@@ -1135,10 +1179,10 @@ handleTrusted('query-deletion-log', async (event, opts) => {
   const limit = Math.max(1, Math.min(Number(o.limit) || 200, 1000));
   const offset = Math.max(0, Number(o.offset) || 0);
   const file = Math.max(0, Math.min(Number(o.file) || 0, LOG_KEEP - 1));
-  const status = ['trashed', 'failed', 'blocked', 'skipped'].includes(o.status) ? o.status : null;
+  const status = ['trashed', 'failed', 'blocked', 'skipped', 'removed'].includes(o.status) ? o.status : null;
   const q = typeof o.search === 'string' ? o.search.trim().toLowerCase() : '';
   const all = await readLogEntries(file);
-  const counts = { trashed: 0, failed: 0, blocked: 0, skipped: 0 };
+  const counts = { trashed: 0, failed: 0, blocked: 0, skipped: 0, removed: 0 };
   const matched = [];
   for (let i = all.length - 1; i >= 0; i--) {
     const e = all[i];

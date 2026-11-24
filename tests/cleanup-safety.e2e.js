@@ -494,7 +494,7 @@ test('R3-8. there is no permanent-delete fallback anywhere in the delete handler
   const region = src.slice(a, b);
   expect(region).not.toMatch(/\b(rmSync|rmdirSync|unlinkSync|\.rm\(|\.unlink\(|\.rmdir\(|rimraf|emptyTrash)\b/);
   expect(region.match(/Recycle Bin \(Windows\); nothing is permanently deleted/g)).toHaveLength(2);
-  expect(region.match(/status: 'failed', finalState: gone \? 'gone' : 'untouched', reason: osErrorReason\(e\)/g)).toHaveLength(2);
+  expect(region.match(/status: 'failed', finalState: 'untouched', reason: osErrorReason\(e\)/g)).toHaveLength(2);
 });
 
 // ---- bind mounts (same st_dev, so only the OS mount table reveals them) ----

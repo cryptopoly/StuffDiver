@@ -2487,7 +2487,7 @@
     if (result && result.error) alert(result.error);
     if (result && result.deleted > 0) {
       // Remove deleted files from allFiles and displayFiles
-      const deletedSet = new Set(result.deletedPaths || paths);
+      const deletedSet = new Set((result.deletedPaths || paths).concat(result.removedPaths || []));
       allFiles = allFiles.filter(f => !deletedSet.has(f.path));
       collectorItems = collectorItems.filter(f => !deletedSet.has(f.path));
       applyFilters();
@@ -3706,8 +3706,9 @@
     const moved = (result && result.deleted) || 0;
     const skipped = failures.filter(function(f) { return f.state === 'skipped'; }).length + ((result && !result.failures && result.skipped) || 0);
     const failed = failures.length - failures.filter(function(f) { return f.state === 'skipped'; }).length;
-    if (!moved && !failures.length && !skipped) return '';
-    let msg = (result && result.cancelled ? 'Cancelled. ' : '') + 'Moved ' + moved + ' ' + noun + (moved === 1 ? '' : 's') + ' to the Trash' + (moved && result.freedBytes ? ' (up to ' + formatSize(result.freedBytes) + ' freed; shared files may free less)' : '') + ', failed ' + failed + ', skipped ' + skipped + '.';
+    const removed = (result && result.removed) || 0;
+    if (!moved && !failures.length && !skipped && !removed) return '';
+    let msg = (result && result.cancelled ? 'Cancelled. ' : '') + 'Moved ' + moved + ' ' + noun + (moved === 1 ? '' : 's') + ' to the Trash' + (moved && result.freedBytes ? ' (up to ' + formatSize(result.freedBytes) + ' freed; shared files may free less)' : '') + (removed ? ', removed ' + removed + ' (gone, but not confirmed to be in the Trash: the system reported an error although the ' + noun + (removed === 1 ? ' is' : 's are') + ' gone)' : '') + ', failed ' + failed + ', skipped ' + skipped + '.';
     if (failures.length) {
       msg += '\n' + failures.slice(0, 8).map(function(f) {
         return '- ' + (f.state === 'skipped' ? 'skipped' : 'failed') + ': ' + f.path + ' (' + f.reason + ')' + (f.finalState === 'gone' ? ' - the system reported an error but the item is already gone' : '');
@@ -3719,7 +3720,7 @@
   }
 
   async function openCleanupWizard(notice, noticeIsError) {
-    if (!allFiles.length) { alert('Please scan a folder first.'); return; }
+    if (!allFiles.length && !notice) { alert('Please scan a folder first.'); return; }
     const overlay = document.getElementById('cleanup-overlay');
     overlay.classList.remove('hidden');
     const body = document.getElementById('cleanup-body');
@@ -3810,9 +3811,10 @@
         let msg = cleanupSummary(result, 'folder');
         if (result && result.logError) msg += (msg ? '\n' : '') + result.logError;
         if (result && result.error && !moved) { showNotice(msg ? result.error + '\n' + msg : result.error, !result.cancelled); return; }
-        if (moved > 0) {
-          const movedSet = new Set(result.deletedPaths || []);
-          const prefixes = (result.deletedPaths || []).map(function(p) { return p + (p.indexOf('\\') >= 0 ? '\\' : '/'); });
+        if (moved > 0 || (result && result.removed > 0)) {
+          const goneAll = (result.deletedPaths || []).concat(result.removedPaths || []);
+          const movedSet = new Set(goneAll);
+          const prefixes = goneAll.map(function(p) { return p + (p.indexOf('\\') >= 0 ? '\\' : '/'); });
           allFiles = allFiles.filter(function(f) { return !prefixes.some(function(p) { return f.path.startsWith(p); }); });
           removeFoldersFromTree(cands.filter(function(c) { return movedSet.has(c.path); }).map(function(c) { return c.relPath; }));
           applyFilters();
@@ -3836,11 +3838,11 @@
       if (result && result.error) { showNotice(result.error, true); return; }
       let msg = cleanupSummary(result, 'file');
       if (result && result.logError) msg += (msg ? '\n' : '') + result.logError;
-      if (result && result.deleted > 0) {
-        const deletedSet = new Set(result.deletedPaths || []);
+      if (result && (result.deleted > 0 || result.removed > 0)) {
+        const deletedSet = new Set((result.deletedPaths || []).concat(result.removedPaths || []));
         allFiles = allFiles.filter(function(f) { return !deletedSet.has(f.path); });
         applyFilters();
-        openCleanupWizard(msg, !!(result.failures && result.failures.length));
+        openCleanupWizard(msg, !!((result.failures && result.failures.length) || result.removed));
       } else if (msg) showNotice(msg, true);
     });
   }
@@ -3891,7 +3893,7 @@
     const empty = document.getElementById('dellog-empty');
     const c = res.counts || {};
     document.getElementById('dellog-summary').textContent = res.total
-      ? 'Showing ' + st.entries.length.toLocaleString() + ' of ' + res.matched.toLocaleString() + ' matching (' + res.total.toLocaleString() + ' total: ' + (c.trashed || 0) + ' trashed, ' + (c.failed || 0) + ' failed, ' + (c.blocked || 0) + ' blocked, ' + (c.skipped || 0) + ' skipped)'
+      ? 'Showing ' + st.entries.length.toLocaleString() + ' of ' + res.matched.toLocaleString() + ' matching (' + res.total.toLocaleString() + ' total: ' + (c.trashed || 0) + ' trashed, ' + (c.failed || 0) + ' failed, ' + (c.blocked || 0) + ' blocked, ' + (c.skipped || 0) + ' skipped, ' + (c.removed || 0) + ' removed)'
       : '';
     list.innerHTML = st.entries.map(function(e, i) {
       return '<div class="dellog-row" data-i="' + i + '"><span class="dellog-badge dellog-' + escHtml(e.status) + '">' + escHtml(e.status) + '</span>'

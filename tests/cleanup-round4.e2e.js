@@ -97,7 +97,7 @@ test('R9. a capped category says so in the row; summary labels freed space "up t
     await page.locator('[data-tool="cleanup"]').click();
     await expect(page.locator('#cleanup-body')).toContainText('handles only the first 2 found; run it again for the rest');
     await page.locator('#cleanup-execute').click();
-    await expect(page.locator('#cleanup-result')).toContainText(/Moved 2 files to the Trash|failed 2/, { timeout: 15000 });
+    await expect(page.locator('#cleanup-result')).toContainText(/Moved 2 files to the Trash|removed 2|failed 2/, { timeout: 15000 });
   });
 });
 
@@ -384,7 +384,7 @@ test('R4. a clean file run reports "Moved N files" inline', async () => {
     await page.locator('[data-tool="cleanup"]').click();
     await expect(page.locator('.cleanup-check:checked')).toHaveCount(1);
     await page.locator('#cleanup-execute').click();
-    await expect(page.locator('#cleanup-result')).toContainText(/Moved 2 files to the Trash|failed 2/, { timeout: 15000 });
+    await expect(page.locator('#cleanup-result')).toContainText(/Moved 2 files to the Trash|removed 2|failed 2/, { timeout: 15000 });
     expect(dialogs).toEqual([]);
   });
 });
