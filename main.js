@@ -394,7 +394,7 @@ const CLEANUP_PATTERNS = [
   { id: 'junkdirs', label: 'Spotlight index & thumbnail caches', icon: '\u{1F5C2}', re: /(\/\.Spotlight-V100\/|\/\.cache\/thumbnails\/)/ },
   // desktop.ini names Documents/Start Menu folders and sets their icons: never pre-ticked, never in special folders.
   { id: 'desktopini', label: 'desktop.ini files', icon: '\u{1F5D1}', re: /(^|\/)desktop\.ini$/i,
-    skip: (full) => /\/(Documents|My Documents|Start Menu|Desktop|Pictures|Music|Videos|Downloads|Favorites|Links|Saved Games|Searches|Contacts|AppData|Windows|Program Files[^/]*|ProgramData)\//i.test(full) || /^[A-Za-z]:\/Users\/[^/]+\/desktop\.ini$/i.test(full) },
+    skip: (full) => /\/(Documents|My Documents|Start Menu|Desktop|Pictures|Music|Videos|Downloads|Favorites|Links|Saved Games|Searches|Contacts|AppData|Windows|Program Files[^/]*|ProgramData)\//i.test(full) || /\/(Users|home)\/[^/]+\/desktop\.ini$/i.test(full) },
   // Pre-ticked presets: whole-name anchors only, so "MyThumbs.dbs" or "x.Spotlight.project" can never match.
   { id: 'dsstore', label: '.DS_Store files', icon: '\u{1F47B}', re: /(^|\/)\.DS_Store$/ },
   { id: 'thumbs', label: 'Thumbs.db files', icon: '\u{1F5D1}', re: /(^|\/)Thumbs\.db$/i }
