@@ -21,6 +21,7 @@ Accuracy and safety update. Scans are more accurate on all three platforms, dele
 - The folder monitor no longer reports false growth caused by bad file sizes.
 - A quick rescan can no longer corrupt the saved scan.
 - Exclusions accept `~` for your home folder.
+- Scans no longer fail on folders named `constructor`, `toString`, `valueOf` or `hasOwnProperty` (found inside some npm packages).
 
 ## Notes
 
