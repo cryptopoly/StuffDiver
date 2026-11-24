@@ -154,6 +154,7 @@ npx electron . --scan ~/Projects --export report.csv --export report.json --expo
 - **JSON / HTML** hold totals plus the largest folders, largest files and size by extension. Folder paths are relative to the scanned folder; the folder list comes from the same tree the app shows, which prunes tiny folders on very large scans.
 - Same scanner as the app: same exclusion rules, hard-link/firmlink dedupe and size-on-disk accounting.
 - Progress and errors go to stderr. Exit code `0` = success, `1` = scan or export failed, `2` = bad usage.
+- On Windows the app is a GUI program, so `cmd` and PowerShell return immediately. To get the exit code, use `Start-Process -Wait -PassThru` (then read `.ExitCode`), or run it as `& 'Stuff Diver.exe' --scan ... ; $LASTEXITCODE`. Do not pipe the output through `more`.
 - On macOS, grant Full Disk Access to the app (or the terminal running it) to read protected folders; unreadable folders are counted as skipped.
 
 ### Build
