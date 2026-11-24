@@ -190,7 +190,7 @@ async function runScan(folderPath, options = {}) {
   const darwinZeroBlock = [];
 
   // Folder tree for bubble map — accumulates sizes during walk
-  const folderTree = { name: path.basename(folderPath), size: 0, logicalSize: 0, fileCount: 0, mtime: 0, children: {}, extSizes: {} };
+  const folderTree = { name: path.basename(folderPath), size: 0, logicalSize: 0, fileCount: 0, mtime: 0, children: Object.create(null), extSizes: Object.create(null) };
 
   function addToTree(relativePath, diskSize, logSize, ext, mtime) {
     const parts = relativePath.replace(/\\/g, '/').split('/');
@@ -200,7 +200,7 @@ async function runScan(folderPath, options = {}) {
       const name = parts[i];
       if (!node.children[name]) {
         const nodePath = parts.slice(0, i + 1).join('/');
-        node.children[name] = { name, path: nodePath, size: 0, logicalSize: 0, fileCount: 0, mtime: 0, children: {}, extSizes: {} };
+        node.children[name] = { name, path: nodePath, size: 0, logicalSize: 0, fileCount: 0, mtime: 0, children: Object.create(null), extSizes: Object.create(null) };
       }
       node = node.children[name];
     }

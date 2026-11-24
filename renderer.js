@@ -362,7 +362,7 @@
     if (!normalized) return folderTree;
     let node = folderTree;
     for (const seg of normalized.split('/')) {
-      if (!node.children || !node.children[seg]) return null;
+      if (!node.children || !Object.prototype.hasOwnProperty.call(node.children, seg)) return null;
       node = node.children[seg];
     }
     return node;
@@ -404,7 +404,7 @@
       bubblePath = segments;
       let node = folderTree;
       for (const seg of segments) {
-        if (node.children && node.children[seg]) node = node.children[seg];
+        if (node.children && Object.prototype.hasOwnProperty.call(node.children, seg)) node = node.children[seg];
       }
       bubbleCurrentNode = node;
     } else {
@@ -1308,7 +1308,7 @@
     bubblePath = pathSegments;
     let node = folderTree;
     for (const seg of pathSegments) {
-      if (node.children && node.children[seg]) {
+      if (node.children && Object.prototype.hasOwnProperty.call(node.children, seg)) {
         node = node.children[seg];
       }
     }
@@ -1856,7 +1856,7 @@
   // Build a folder tree from duplicate file paths with dup group counts
   function buildDupFolderTree() {
     if (!duplicateResults || !duplicateResults.length) return null;
-    const root = { name: folderTree ? folderTree.name : '(root)', path: '', dupGroups: 0, dupFiles: 0, wasted: 0, children: {} };
+    const root = { name: folderTree ? folderTree.name : '(root)', path: '', dupGroups: 0, dupFiles: 0, wasted: 0, children: Object.create(null) };
 
     for (const group of duplicateResults) {
       // Track which folders this group touches
@@ -1869,7 +1869,7 @@
           const seg = parts[i];
           const nodePath = parts.slice(0, i + 1).join('/');
           if (!node.children[seg]) {
-            node.children[seg] = { name: seg, path: nodePath, dupGroups: 0, dupFiles: 0, wasted: 0, children: {} };
+            node.children[seg] = { name: seg, path: nodePath, dupGroups: 0, dupFiles: 0, wasted: 0, children: Object.create(null) };
           }
           node = node.children[seg];
           node.dupFiles++;

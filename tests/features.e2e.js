@@ -258,3 +258,22 @@ test('macOS .icloud placeholders show as cloud-only files with no local size', a
     expect(res.files.find(x => x.name === '.Report.pdf.icloud')).toBeUndefined();
   }, { prepare: (fx) => fs.writeFileSync(path.join(fx.root, 'docs', '.Report.pdf.icloud'), 'x') });
 });
+
+test('folders named like Object.prototype members do not break scans', async () => {
+  await withApp(async ({ page, fx }) => {
+    await scanViaUi(page);
+    const res = await page.evaluate((r) => window.api.scanFolder(r, {}), fx.root);
+    expect(res.totalFiles).toBe(fx.fileCount + 4);
+    expect(res.skippedDirs).toBe(0);
+    const names = Object.keys(res.folderTree.children);
+    // '__proto__' files are counted; the cloned tree object may not list a '__proto__' key
+    for (const n of ['constructor', 'toString', 'hasOwnProperty']) expect(names).toContain(n);
+  }, {
+    prepare: (fx) => {
+      for (const n of ['constructor', 'toString', '__proto__', 'hasOwnProperty']) {
+        fs.mkdirSync(path.join(fx.root, n), { recursive: true });
+        fs.writeFileSync(path.join(fx.root, n, 'a.txt'), 'x');
+      }
+    }
+  });
+});
