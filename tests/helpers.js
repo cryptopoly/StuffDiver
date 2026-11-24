@@ -19,7 +19,9 @@ function fixtureParent() {
     } catch (e) { /* fall through */ }
     return os.tmpdir();   // no suitable profile: fixtures will be refused by the product, which the failures will make obvious
   }
-  return process.getuid && process.getuid() === 0 ? os.homedir() : os.tmpdir();
+  // Linux: the desktop trash refuses tmpfs (/tmp), so fixtures must sit on the user's real disk. macOS trashes from the temp folder fine.
+  if (process.platform === 'linux' || (process.getuid && process.getuid() === 0)) { const d = path.join(os.homedir(), 'StuffDiverTestFixtures'); fs.mkdirSync(d, { recursive: true }); return d; }
+  return os.tmpdir();
 }
 
 // Build a small fixture tree with known sizes.

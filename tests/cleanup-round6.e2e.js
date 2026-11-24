@@ -126,3 +126,36 @@ test('T2(a). the last scanned file being cleaned still shows the summary (no "sc
     expect(dialogs).toEqual([]);
   });
 });
+
+test('X1. delete-files refuses cloud-synced files at delete time (all-or-nothing), using the same rule as the scan list', async () => {
+  const names = ['Dropbox', 'MEGA', 'Nextcloud', 'ownCloud', 'pCloudDrive', 'Sync', 'Seafile', 'Syncthing', 'Insync', 'Tresorit', 'SpiderOak', 'iDrive', 'Backblaze', 'OneDrive - Corp', 'Google Drive', 'iCloud Drive', 'Box', 'Team Site - Documents'];
+  await withApp((r) => { for (const n of names) mk(r, `${n}/x/a.log`); mk(r, 'plain/ok.tmp'); }, async ({ page, root, userData }) => {
+    const cloud = names.map(n => path.join(root, n, 'x/a.log'));
+    const ok = path.join(root, 'plain/ok.tmp');
+    const res = await page.evaluate((x) => window.api.deleteFiles(x, 'test'), [ok, ...cloud]);
+    expect(res.deleted).toBe(0);
+    expect(res.blocked).toHaveLength(names.length);
+    expect(res.blocked.every(b => b.reason === 'in a cloud-synced folder: deleting here deletes it everywhere')).toBe(true);
+    expect(res.error).toContain('Nothing was moved');
+    for (const f of [ok, ...cloud]) expect(fs.existsSync(f), f).toBe(true);
+    const log = fs.readFileSync(path.join(userData, 'deletion-log.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+    expect(log.filter(e => e.status === 'blocked')).toHaveLength(names.length);
+    // the scan list never offers them either, and the plain file is deletable on its own
+    const cats = await page.evaluate(() => window.api.cleanupScan());
+    expect(cats.flatMap(c => c.paths).filter(p => cloud.includes(p))).toEqual([]);
+    const solo = await page.evaluate((x) => window.api.deleteFiles(x, 'test'), [ok]);
+    expect(solo.error).toBeUndefined();
+  });
+});
+
+test('X1. the OneDrive environment roots are enforced by delete-files too', async () => {
+  const root = tmp(); mk(root, 'Contoso/Docs/b.tmp'); mk(root, 'plain/c.tmp'); age(root);
+  const { app, page } = await launch(root, { OneDriveCommercial: path.join(root, 'Contoso') });
+  try {
+    await scanViaUi(page);
+    const res = await page.evaluate((x) => window.api.deleteFiles(x, 'test'), [path.join(root, 'plain/c.tmp'), path.join(root, 'Contoso/Docs/b.tmp')]);
+    expect(res.deleted).toBe(0);
+    expect(res.blocked[0].reason).toBe('in a cloud-synced folder: deleting here deletes it everywhere');
+    expect(fs.existsSync(path.join(root, 'Contoso/Docs/b.tmp'))).toBe(true);
+  } finally { await app.close(); fs.rmSync(root, { recursive: true, force: true }); }
+});

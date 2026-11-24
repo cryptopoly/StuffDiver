@@ -422,7 +422,7 @@ handleTrusted('cleanup-scan', async () => {
         const full = f.path.replace(/\\/g, '/');
         if (c.skip && c.skip(full, ctx)) break;
         // Files in cloud-synced folders or already in a Trash are never offered (a delete there is felt everywhere / is meaningless).
-        if (cleanupFolders.cloudSyncedReason(f.path) || cleanupFolders.trashReason(f.path) || cleanupFolders.installedAppReason(f.path)) break;
+        if (fileLocationReason(f.path, false)) break;
         // Never offer paths the delete guard would refuse (a single one refuses the whole request).
         if (protectedReason(f.path, true)) break;
         c.count++;
@@ -817,15 +817,23 @@ handleTrusted('reveal-deletion-log', async () => {
 
 const FILE_REQUEST_CAP = 50000;
 const trashFn = (p) => (E2E && typeof global.__e2eTrash === 'function') ? global.__e2eTrash(p) : shell.trashItem(p); // E2E-only hook can simulate platform quirks
+// Location rules shared by the Smart Cleanup file list and delete-files (one function, no duplicated logic).
+// bundleOnly: delete-files applies only the always-wrong places (bundles); the scan also skips installed-app locations.
+function fileLocationReason(fp, bundleOnly) {
+  if (cleanupFolders.cloudSyncedReason(fp)) return 'in a cloud-synced folder: deleting here deletes it everywhere';
+  if (cleanupFolders.trashReason(fp)) return 'already in a Trash or Recycle Bin (it cannot be moved to the Trash again)';
+  const app = cleanupFolders.installedAppReason(fp, bundleOnly);
+  if (app) return bundleOnly ? app + ' (removing files there breaks the app\'s signature or install)' : app;
+  return null;
+}
 // Per-file checks shared by the first pass and the re-check after the confirmation dialog.
 function checkFilePaths(paths) {
   const blocked = [];
   for (const fp of paths) {
     const reason = protectedReason(fp);
     if (reason) { blocked.push({ path: fp, reason }); continue; }
-    if (cleanupFolders.trashReason(fp)) { blocked.push({ path: fp, reason: 'already in a Trash or Recycle Bin (it cannot be moved to the Trash again)' }); continue; }
-    const bundle = cleanupFolders.installedAppReason(fp, true);
-    if (bundle) { blocked.push({ path: fp, reason: bundle + ' (removing files there breaks the app\'s signature or install)' }); continue; }
+    const loc = fileLocationReason(fp, true);
+    if (loc) { blocked.push({ path: fp, reason: loc }); continue; }
     // This handler only trashes files. Folders go through delete-folders and its safeguards.
     try {
       const st = fs.lstatSync(fp);
