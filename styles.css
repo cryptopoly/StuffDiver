@@ -3220,6 +3220,13 @@ body.light .cache-prompt-actions button:first-child {
 .dellog-failed { background: rgba(245, 165, 36, 0.15); color: #f5a524; }
 .dellog-blocked { background: rgba(248, 113, 113, 0.15); color: #f87171; }
 .dellog-restore { margin-top: 10px; }
+.dellog-controls select, .dellog-controls input, .dellog-controls button, .dellog-copy, #dellog-more {
+  background: var(--bg-raised); color: var(--text-primary); border: 1px solid var(--border-medium); border-radius: 8px; padding: 6px 10px; font-size: 12px; cursor: pointer;
+}
+.dellog-controls input { cursor: text; }
+.dellog-copy { align-self: center; white-space: nowrap; }
+.dellog-controls select:hover, .dellog-controls button:hover, .dellog-copy:hover, #dellog-more:hover { border-color: #00b4d8; }
+#dellog-more { display: block; margin: 8px auto; }
 
 /* === Forecast Modal === */
 

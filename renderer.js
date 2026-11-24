@@ -3815,7 +3815,7 @@
       : '';
     list.innerHTML = st.entries.map(function(e, i) {
       return '<div class="dellog-row" data-i="' + i + '"><span class="dellog-badge dellog-' + escHtml(e.status) + '">' + escHtml(e.status) + '</span>'
-        + '<div class="dellog-main"><div class="dellog-path">' + escHtml(e.path) + '</div>'
+        + '<div class="dellog-main"><div class="dellog-path">' + (e.path ? escHtml(e.path) : '<i>(no path recorded)</i>') + '</div>'
         + '<div class="dellog-meta">' + escHtml(formatLogTime(e.t))
         + (e.size != null ? ' &middot; ' + escHtml(formatSize(Number(e.size) || 0)) : '')
         + (e.files != null ? ' &middot; ' + (Number(e.files) || 0).toLocaleString() + ' files' : '')
@@ -4938,7 +4938,7 @@
       const b = e.target.closest('.dellog-copy');
       if (!b) return;
       const entry = dellogState.entries[Number(b.dataset.i)];
-      if (entry) { try { navigator.clipboard.writeText(entry.path); } catch (er) { /* ignore */ } b.textContent = 'Copied'; setTimeout(() => { b.textContent = 'Copy path'; }, 1200); }
+      if (entry && entry.path) { try { navigator.clipboard.writeText(entry.path); } catch (er) { /* ignore */ } b.textContent = 'Copied'; setTimeout(() => { b.textContent = 'Copy path'; }, 1200); }
     });
 
     // === Forecast Modal ===

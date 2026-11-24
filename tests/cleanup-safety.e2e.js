@@ -275,3 +275,96 @@ test('11. wizard and log viewer escape every interpolated value', async () => {
     expect(await page.evaluate(() => window.__pwn)).toBeUndefined();
   });
 });
+
+// ---- second review round ----
+function fakeMountFs(mountSuffix) {
+  // Real fs, except directories whose path ends with mountSuffix report a different device (a mount point).
+  return {
+    readdirSync: fs.readdirSync, statSync: fs.statSync,
+    lstatSync: (p, o) => {
+      const st = fs.lstatSync(p, o);
+      if (!String(p).endsWith(mountSuffix)) return st;
+      return new Proxy(st, { get: (t, k) => k === 'dev' ? (o && o.bigint ? t.dev + 1n : t.dev + 1) : (typeof t[k] === 'function' ? t[k].bind(t) : t[k]) });
+    }
+  };
+}
+
+test('A. a mount point inside a candidate refuses it (walk and scan-time check)', () => {
+  const root = tmp();
+  try {
+    proj(root, 'p'); mk(root, 'p/node_modules/pkg/mnt/data.db');
+    const dir = path.join(root, 'p/node_modules');
+    expect(cf.inspectFolder(dir).error).toBeNull();
+    const w = cf.inspectFolder(dir, fakeMountFs(path.join('pkg', 'mnt')));
+    expect(w.error).toBe(`contains ${path.join(dir, 'pkg/mnt')}, which is on a different filesystem or a mount point`);
+    const files = [{ path: path.join(dir, 'pkg/mnt/data.db'), name: 'data.db', size: 1, mtime: 1 }, { path: path.join(dir, 'dep/index.js'), name: 'index.js', size: 1, mtime: 1 }];
+    const found = cf.findCandidates(files, root, false, fakeMountFs(path.join('pkg', 'mnt')));
+    expect(found[0].refusedReason).toMatch(/different filesystem or a mount point/);
+    expect(cf.findCandidates(files, root, false)[0].refusedReason).toBeNull();
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('A. Windows: a directory link/junction anywhere inside is refused; file links are fine', () => {
+  const root = tmp();
+  try {
+    proj(root, 'p'); mk(root, 'other/x.txt'); mk(root, 'p/node_modules/dep/real.txt');
+    const dir = path.join(root, 'p/node_modules');
+    fs.symlinkSync(path.join(root, 'p/node_modules/dep/real.txt'), path.join(dir, 'filelink'));
+    expect(cf.inspectFolder(dir, fs, true).error).toBeNull();
+    fs.symlinkSync(path.join(root, 'other'), path.join(dir, 'dep/dirlink'), 'dir');
+    expect(cf.inspectFolder(dir, fs, true).error).toBe(`contains ${path.join(dir, 'dep/dirlink')}, a junction or directory link`);
+    expect(cf.inspectFolder(dir, fs, false).error).toBeNull(); // POSIX: symlinks are not followed, so they are harmless
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('A. the app refuses a folder with a (simulated) mount inside, at scan and delete time', async () => {
+  await withApp((r) => { proj(r, 'p'); mk(r, 'p/node_modules/pkg/mnt/data.db'); proj(r, 'ok'); }, {}, async ({ app, page, root, userData }) => {
+    await app.evaluate(() => {
+      const fsx = global.__e2eRequire('fs');
+      global.__e2eFs = {
+        readdirSync: fsx.readdirSync, statSync: fsx.statSync,
+        lstatSync: (p, o) => { const st = fsx.lstatSync(p, o); return String(p).endsWith('mnt') ? new Proxy(st, { get: (t, k) => k === 'dev' ? t.dev + 1n : (typeof t[k] === 'function' ? t[k].bind(t) : t[k]) }) : st; }
+      };
+    });
+    const target = path.join(root, 'p/node_modules');
+    const scan = await page.evaluate(() => window.api.cleanupFoldersScan());
+    const c = scan.candidates.find(x => x.path === target);
+    expect(c.refused).toMatch(/different filesystem or a mount point/);
+    expect(c.defaultChecked).toBe(false);
+    expect(scan.candidates.find(x => x.relPath === 'ok/node_modules').refused).toBeNull();
+    const res = await del(page, [target]);
+    expect(res.deleted).toBe(0);
+    expect(res.blocked[0].reason).toMatch(/different filesystem or a mount point/);
+    expect(fs.existsSync(path.join(target, 'pkg/mnt/data.db'))).toBe(true);
+    expect(readLog(userData).find(e => e.path === target).status).toBe('blocked');
+  });
+});
+
+test('B. relative paths are refused by delete-folders and delete-files', async () => {
+  await withApp((r) => { proj(r, 'p'); mk(r, 'p/a.txt'); }, {}, async ({ page, root }) => {
+    const f = await page.evaluate(() => window.api.deleteFolders(['p/node_modules', './x'], 'test'));
+    expect(f.deleted).toBe(0);
+    expect(f.error).toMatch(/must be absolute/);
+    const g = await page.evaluate(() => window.api.deleteFiles(['p/a.txt'], 'test'));
+    expect(g.deleted).toBe(0);
+    expect(g.error).toMatch(/must be absolute/);
+    expect(fs.existsSync(path.join(root, 'p/a.txt'))).toBe(true);
+  });
+});
+
+test('D. log entry without a path renders a placeholder; unreadable candidates are listed as refused', async () => {
+  test.skip(process.platform === 'win32' || (process.getuid && process.getuid() === 0), 'needs chmod semantics');
+  await withApp((r) => { proj(r, 'p'); proj(r, 'q'); }, {}, async ({ page, root, userData }) => {
+    const locked = path.join(root, 'q/node_modules');
+    fs.chmodSync(locked, 0o000);
+    try {
+      const scan = await page.evaluate(() => window.api.cleanupFoldersScan());
+      expect(scan.candidates.find(c => c.path === locked).refused).toMatch(/^cannot be read \(EACCES\)/);
+    } finally { fs.chmodSync(locked, 0o755); }
+    fs.writeFileSync(path.join(userData, 'deletion-log.jsonl'), JSON.stringify({ t: 1, status: 'failed', source: 'x' }) + '\n');
+    await page.locator('#tools-btn').click();
+    await page.locator('[data-tool="dellog"]').click();
+    await expect(page.locator('.dellog-row')).toContainText('(no path recorded)');
+    await expect(page.locator('.dellog-row')).not.toContainText('undefined');
+  });
+});

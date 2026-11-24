@@ -782,6 +782,9 @@ handleTrusted('reveal-deletion-log', async () => {
 handleTrusted('delete-files', async (event, filePaths, source) => {
   if (!Array.isArray(filePaths) || !filePaths.length) return { deleted: 0, deletedPaths: [] };
   const safePaths = [];
+  if (!filePaths.every(p => typeof p === 'string' && path.isAbsolute(p))) {
+    return { deleted: 0, deletedPaths: [], error: 'Refused: file paths must be absolute. Nothing was moved.' };
+  }
   try {
     for (const fp of filePaths) {
       safePaths.push(assertAllowedFilePath(fp));
@@ -879,6 +882,7 @@ function containsProtected(folder) {
   return null;
 }
 
+const walkFs = () => (E2E && global.__e2eFs) || rawFs; // E2E tests can inject a fake filesystem (mount-point simulation)
 const FOLDER_BATCH_CAP = 500;
 const FOLDER_SCAN_CAP = 2000;
 
@@ -893,7 +897,7 @@ function evaluateFolder(fp) {
   if (pr) return fail(`is ${pr}`);
   const cp = containsProtected(resolved);
   if (cp) return fail(cp);
-  const c = cleanupFolders.classifyFolder(resolved, rawFs);
+  const c = cleanupFolders.classifyFolder(resolved, walkFs());
   if (!c) return fail('is not a recognised regenerable folder (marker missing or changed)');
   if (c.refused) return fail(c.refused);
   // Real location must be exactly where the scan saw it: no symlinked ancestor swapped in below the scanned root.
@@ -902,7 +906,7 @@ function evaluateFolder(fp) {
     const expected = path.join(fs.realpathSync.native(root), path.relative(root, resolved));
     if (!eq(fs.realpathSync.native(resolved), expected)) return fail('resolves to a different location than the scanned path (symlink or junction involved)');
   } catch (e) { return fail('cannot be resolved (' + (e.code || e.message) + ')'); }
-  const w = cleanupFolders.inspectFolder(resolved, rawFs);
+  const w = cleanupFolders.inspectFolder(resolved, walkFs());
   if (w.error) return fail(w.error);
   if (w.git) return fail(`contains a .git folder or file (${w.git}), so it may hold a repository`);
   for (const d of w.dirs) {
@@ -915,10 +919,11 @@ function evaluateFolder(fp) {
 handleTrusted('cleanup-folders-scan', async () => {
   const ci = process.platform === 'win32' || process.platform === 'darwin';
   if (!lastScanFolder) return { candidates: [], totalFound: 0, shown: 0, cap: FOLDER_SCAN_CAP };
-  const found = cleanupFolders.findCandidates(lastScanAllFiles, lastScanFolder, ci, rawFs);
+  const found = cleanupFolders.findCandidates(lastScanAllFiles, lastScanFolder, ci, walkFs());
   const now = Date.now();
   const out = found.map(c => {
     let refused = protectedReason(c.path, true) ? `is ${protectedReason(c.path, true)}` : containsProtected(c.path);
+    if (!refused && c.refusedReason) refused = c.refusedReason;
     if (!refused && c.hasGit) refused = 'contains a .git folder, so it may hold a repository';
     const ageDays = c.newest ? Math.floor((now - c.newest) / 86400000) : null;
     const recent = ageDays !== null && ageDays < cleanupFolders.RECENT_DAYS;
@@ -949,6 +954,7 @@ handleTrusted('delete-folders', async (event, folderPaths, source) => {
     const ci = process.platform === 'win32' || process.platform === 'darwin';
     const strings = folderPaths.filter(p => typeof p === 'string' && p);
     if (strings.length !== folderPaths.length) return { ...nothing, error: 'Refused: invalid folder path in request.' };
+    if (!strings.every(p => path.isAbsolute(p))) return { ...nothing, error: 'Refused: folder paths must be absolute. Nothing was moved.' };
     const { kept, dropped } = cleanupFolders.dedupeNested(strings.map(p => path.resolve(p)), ci);
     if (kept.length > FOLDER_BATCH_CAP) {
       return { ...nothing, error: `Refused: ${kept.length} folders selected, the limit is ${FOLDER_BATCH_CAP} per run. Nothing was changed.` };

@@ -152,8 +152,11 @@ function classifyFolder(dir, fsx = fs) {
 // Walk a folder without following links. Reports file count, bytes, newest
 // mtime, whether any `.git` exists inside, and every directory seen (for the
 // protected-path check). Returns {error} if the walk cannot be trusted.
-function inspectFolder(dir, fsx = fs) {
+function inspectFolder(dir, fsx = fs, isWin = process.platform === 'win32') {
   const out = { files: 0, bytes: 0, newest: 0, git: null, dirs: [], error: null };
+  const devOf = (p) => { try { return fsx.lstatSync(p, { bigint: true }).dev; } catch (e) { return null; } };
+  const rootDev = devOf(dir);
+  if (rootDev === null) { out.error = 'cannot read ' + dir; return out; }
   const stack = [dir];
   let seen = 0;
   while (stack.length) {
@@ -164,8 +167,17 @@ function inspectFolder(dir, fsx = fs) {
       if (++seen > WALK_ENTRY_CAP) { out.error = 'too many entries to verify safely'; return out; }
       const full = path.join(cur, e.name);
       if (e.name === '.git' && !out.git) out.git = full;
-      if (e.isSymbolicLink()) { out.files++; continue; }
-      if (e.isDirectory()) { out.dirs.push(full); stack.push(full); continue; }
+      if (e.isSymbolicLink()) {
+        // Windows junctions and directory links report as links: refuse them anywhere inside.
+        if (isWin) { let isDir = true; try { isDir = fsx.statSync(full).isDirectory(); } catch (er) { /* dangling: treat as unsafe */ } if (isDir) { out.error = `contains ${full}, a junction or directory link`; return out; } }
+        out.files++; continue;
+      }
+      if (e.isDirectory()) {
+        // A different device means a mount point: trashing would carry live mounted data along.
+        const d = devOf(full);
+        if (d === null || d !== rootDev) { out.error = `contains ${full}, which is on a different filesystem or a mount point`; return out; }
+        out.dirs.push(full); stack.push(full); continue;
+      }
       out.files++;
       try { const s = fsx.lstatSync(full); out.bytes += s.size; if (s.mtimeMs > out.newest) out.newest = s.mtimeMs; } catch (er) { /* vanished */ }
     }
@@ -217,7 +229,7 @@ function findCandidates(files, scanRoot, ci, fsx = fs) {
     if (c && c.kind) valid.set(dirKey(d), { dir: d, ...c });
   }
   const { kept } = dedupeNested([...valid.values()].map(v => v.dir), ci);
-  const owners = new Map(kept.map(d => [dirKey(d), { ...valid.get(dirKey(d)), path: d, size: 0, files: 0, newest: 0, hasGit: false }]));
+  const owners = new Map(kept.map(d => [dirKey(d), { ...valid.get(dirKey(d)), path: d, size: 0, files: 0, newest: 0, hasGit: false, dirs: new Set(), refusedReason: null }]));
   const ownerOf = new Map();
   const find = (d) => {
     const key = dirKey(d);
@@ -232,10 +244,22 @@ function findCandidates(files, scanRoot, ci, fsx = fs) {
     const o = find(path.dirname(f.path));
     if (!o) continue;
     o.size += f.size || 0;
+    o.dirs.add(path.dirname(f.path));
     o.files++;
     if ((f.mtime || 0) > o.newest) o.newest = f.mtime;
     const rel = path.relative(o.path, f.path).split(path.sep);
     if (rel.slice(0, -1).includes('.git') || rel[rel.length - 1] === '.git') o.hasGit = true;
+  }
+  // One lstat per distinct folder: unreadable folders and mount points inside a candidate are flagged now, not only at delete time.
+  for (const o of owners.values()) {
+    let rootDev;
+    try { rootDev = fsx.lstatSync(o.path, { bigint: true }).dev; fsx.readdirSync(o.path); } catch (e) { o.refusedReason = 'cannot be read (' + (e.code || e.message) + ')'; continue; }
+    for (const d of o.dirs) {
+      let dev;
+      try { dev = fsx.lstatSync(d, { bigint: true }).dev; } catch (e) { o.refusedReason = `contains ${d}, which cannot be read (${e.code || e.message})`; break; }
+      if (dev !== rootDev) { o.refusedReason = `contains ${d}, which is on a different filesystem or a mount point`; break; }
+    }
+    o.dirs = undefined;
   }
   return [...owners.values()];
 }
