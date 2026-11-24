@@ -216,6 +216,54 @@ async function inspectFolder(dir, fsx = fs, isWin = process.platform === 'win32'
   return out;
 }
 
+// ---- mount points (bind mounts share st_dev, so only the OS mount table can see them) ----
+const unescapeMountinfo = (v) => v.replace(/\\([0-7]{3})/g, (m, o) => String.fromCharCode(parseInt(o, 8)));
+function parseMountinfo(text) {
+  const out = [];
+  for (const line of String(text).split('\n')) {
+    const f = line.split(' ');
+    if (f.length > 5 && f[4]) out.push(unescapeMountinfo(f[4]));
+  }
+  return out;
+}
+function parseMacMount(text) {
+  const out = [];
+  for (const line of String(text).split('\n')) {
+    const m = / on (\/.*) \([^()]*\)$/.exec(line);
+    if (m) out.push(m[1]);
+  }
+  return out;
+}
+// Fresh every call (never cached): mounts can appear between scan and delete.
+function getMountPoints() {
+  try {
+    if (process.platform === 'linux') return parseMountinfo(fs.readFileSync('/proc/self/mountinfo', 'utf8'));
+    if (process.platform === 'darwin') return parseMacMount(require('child_process').execFileSync('/sbin/mount', [], { encoding: 'utf8', timeout: 5000 }));
+  } catch (e) { return null; } // unknown: callers treat null as "cannot verify" and refuse
+  return []; // Windows: reparse points/junctions and volume serials are checked instead
+}
+// Reason if `dir` is, or contains, a mount point other than "/" (checked for each given spelling of the path).
+function mountConflict(dirs, mounts, ci) {
+  if (mounts === null) return 'cannot be checked for mount points (mount table unreadable)';
+  const norm = (v) => { const x = v.replace(/\/+$/, '') || '/'; return ci ? x.toLowerCase() : x; };
+  for (const d of dirs.filter(Boolean).map(norm)) {
+    for (const m of mounts) {
+      if (m === '/') continue;
+      const n = norm(m);
+      if (n === d) return `is itself a mount point (${m})`;
+      if (n.startsWith(d + '/')) return `contains the mount point ${m}`;
+    }
+  }
+  return null;
+}
+// A candidate on a different device than its parent is a mount (or volume) boundary.
+function deviceDiffersFromParent(dir, fsx = fs) {
+  try {
+    return fsx.lstatSync(dir, { bigint: true }).dev !== fsx.lstatSync(path.dirname(dir), { bigint: true }).dev;
+  } catch (e) { return true; }
+}
+const realOf = (dir, fsx) => { try { return fsx.realpathSync && fsx.realpathSync.native ? fsx.realpathSync.native(dir) : null; } catch (e) { return null; } };
+
 function isInside(child, parent, ci) {
   const c = ci ? child.toLowerCase() : child;
   const p = ci ? parent.toLowerCase() : parent;
@@ -235,7 +283,7 @@ function dedupeNested(paths, ci) {
 // Find candidate folders in the full scan list. `files` entries need
 // {path, size, mtime}. Marker checks hit the real filesystem, but only for
 // folders whose name could qualify, so this stays cheap on huge scans.
-function findCandidates(files, scanRoot, ci, fsx = fs) {
+function findCandidates(files, scanRoot, ci, fsx = fs, mounts = getMountPoints()) {
   const root = path.resolve(scanRoot);
   const possible = new Set();
   const dirKey = (d) => ci ? d.toLowerCase() : d;
@@ -283,6 +331,10 @@ function findCandidates(files, scanRoot, ci, fsx = fs) {
   }
   // One lstat per distinct folder: unreadable folders and mount points inside a candidate are flagged now, not only at delete time.
   for (const o of owners.values()) {
+    // Independent of what the scan happened to visit: use the OS mount table and the parent's device.
+    o.refusedReason = mountConflict([o.path, realOf(o.path, fsx)], mounts, ci)
+      || (deviceDiffersFromParent(o.path, fsx) ? 'is on a different device than its parent folder (mount or volume boundary)' : null);
+    if (o.refusedReason) { o.dirs = undefined; continue; }
     let rootDev;
     try { rootDev = fsx.lstatSync(o.path, { bigint: true }).dev; fsx.readdirSync(o.path); } catch (e) { o.refusedReason = 'cannot be read (' + (e.code || e.message) + ')'; continue; }
     for (const d of o.dirs) {
@@ -295,4 +347,4 @@ function findCandidates(files, scanRoot, ci, fsx = fs) {
   return [...owners.values()];
 }
 
-module.exports = { blockedLocation, KINDS, CANDIDATE_NAMES, RECENT_DAYS, MANY_FILES, classifyFolder, inspectFolder, dedupeNested, findCandidates, isInside };
+module.exports = { parseMountinfo, parseMacMount, getMountPoints, mountConflict, deviceDiffersFromParent, blockedLocation, KINDS, CANDIDATE_NAMES, RECENT_DAYS, MANY_FILES, classifyFolder, inspectFolder, dedupeNested, findCandidates, isInside };

@@ -3,7 +3,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const cf = require('../cleanup-folders');
-const { launch, scanViaUi } = require('./helpers');
+const { launch, scanViaUi, fixtureParent } = require('./helpers');
 
 const OLD = new Date(Date.now() - 90 * 86400000);
 function mk(root, rel, content) {
@@ -17,7 +17,7 @@ function age(root) { // make everything old so nothing counts as "recent"
   const walk = (d) => { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const f = path.join(d, e.name); if (e.isSymbolicLink()) continue; if (e.isDirectory()) walk(f); try { fs.utimesSync(f, OLD, OLD); } catch (er) { /* ignore */ } } };
   walk(root);
 }
-function tmp() { return fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'sd-cf-'))); }
+function tmp() { return fs.realpathSync(fs.mkdtempSync(path.join(fixtureParent(), 'sd-cf-'))); }
 
 // ---------- classifier (no Electron) ----------
 test.describe('classifier', () => {

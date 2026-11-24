@@ -903,6 +903,7 @@ function containsProtected(folder) {
 }
 
 const walkFs = () => (E2E && global.__e2eFs) || rawFs; // E2E tests can inject a fake filesystem (mount-point simulation)
+const mountList = () => (E2E && typeof global.__e2eMounts === 'function') ? global.__e2eMounts() : cleanupFolders.getMountPoints(); // fresh on every call
 const FOLDER_BATCH_CAP = 500;
 const FOLDER_SCAN_CAP = 2000;
 
@@ -934,6 +935,10 @@ async function evaluateFolder(fp) {
     const expected = path.join(fs.realpathSync.native(root), path.relative(root, resolved));
     if (!eq(fs.realpathSync.native(resolved), expected)) return fail('resolves to a different location than the scanned path (symlink or junction involved)');
   } catch (e) { return fail('cannot be resolved (' + (e.code || e.message) + ')'); }
+  const ci2 = process.platform === 'win32' || process.platform === 'darwin';
+  const mc = cleanupFolders.mountConflict([resolved, realNow], mountList(), ci2);
+  if (mc) return fail(mc);
+  if (cleanupFolders.deviceDiffersFromParent(resolved, walkFs())) return fail('is on a different device than its parent folder (mount or volume boundary)');
   const w = await cleanupFolders.inspectFolder(resolved, walkFs(), undefined, () => folderDeleteCancel);
   if (w.error) return fail(w.error);
   if (w.git) return fail(`contains a .git folder or file (${w.git}), so it may hold a repository`);
@@ -947,7 +952,7 @@ async function evaluateFolder(fp) {
 handleTrusted('cleanup-folders-scan', async () => {
   const ci = process.platform === 'win32' || process.platform === 'darwin';
   if (!lastScanFolder) return { candidates: [], totalFound: 0, shown: 0, cap: FOLDER_SCAN_CAP };
-  const found = cleanupFolders.findCandidates(lastScanAllFiles, lastScanFolder, ci, walkFs());
+  const found = cleanupFolders.findCandidates(lastScanAllFiles, lastScanFolder, ci, walkFs(), mountList());
   const now = Date.now();
   const out = found.map(c => {
     let refused = protectedReason(c.path, true) ? `is ${protectedReason(c.path, true)}` : containsProtected(c.path);

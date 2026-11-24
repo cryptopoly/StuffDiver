@@ -4,10 +4,10 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const cf = require('../cleanup-folders');
-const { launch, scanViaUi } = require('./helpers');
+const { launch, scanViaUi, fixtureParent } = require('./helpers');
 
 const OLD = new Date(Date.now() - 90 * 86400000);
-const tmp = () => fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'sd-cs-')));
+const tmp = () => fs.realpathSync(fs.mkdtempSync(path.join(fixtureParent(), 'sd-cs-')));
 function mk(root, rel, content) {
   const p = path.join(root, rel);
   fs.mkdirSync(path.dirname(p), { recursive: true });
@@ -492,4 +492,69 @@ test('R3-8. there is no permanent-delete fallback anywhere in the delete handler
   expect(region).not.toMatch(/\b(rmSync|rmdirSync|unlinkSync|\.rm\(|\.unlink\(|\.rmdir\(|rimraf|emptyTrash)\b/);
   expect(region.match(/Recycle Bin \(Windows\); nothing is permanently deleted/g)).toHaveLength(2);
   expect(region).toMatch(/status: 'failed', reason: e\.message/);
+});
+
+// ---- bind mounts (same st_dev, so only the OS mount table reveals them) ----
+test('M1. mount table parsing: Linux mountinfo (octal escapes) and macOS mount output', () => {
+  const info = [
+    '36 35 98:0 /mnt1 /mnt2 rw,noatime master:1 - ext3 /dev/root rw,errors=continue',
+    '40 1 8:1 / / rw - ext4 /dev/sda1 rw',
+    '41 40 8:2 /data /home/u/proj/node_modules/pkg/my\\040data rw - ext4 /dev/sda2 rw',
+    '42 40 8:2 /d /srv/tab\\011x rw - ext4 /dev/sda2 rw'
+  ].join('\n');
+  expect(cf.parseMountinfo(info)).toEqual(['/mnt2', '/', '/home/u/proj/node_modules/pkg/my data', '/srv/tab\tx']);
+  const mac = '/dev/disk3s1s1 on / (apfs, sealed, local, read-only, journaled)\n/dev/disk3s5 on /System/Volumes/Data (apfs, local, journaled)\nserver:/x on /Users/u/proj/node_modules/mnt point (nfs, nodev)';
+  expect(cf.parseMacMount(mac)).toEqual(['/', '/System/Volumes/Data', '/Users/u/proj/node_modules/mnt point']);
+  const m = ['/', '/home/u/proj/node_modules/pkg/data', '/home/u/other'];
+  expect(cf.mountConflict(['/home/u/proj/node_modules'], m, false)).toBe('contains the mount point /home/u/proj/node_modules/pkg/data');
+  expect(cf.mountConflict(['/home/u/proj/node_modules/pkg/data'], m, false)).toBe('is itself a mount point (/home/u/proj/node_modules/pkg/data)');
+  expect(cf.mountConflict(['/home/u/proj/node_modules/pkg/database'], m, false)).toBeNull();   // prefix of a name is not containment
+  expect(cf.mountConflict(['/Home/U/Proj'], ['/home/u/proj/x'], true)).toMatch(/contains the mount point/);
+  expect(cf.mountConflict(['/anything'], null, false)).toMatch(/mount table unreadable/);
+  expect(cf.getMountPoints() === null || Array.isArray(cf.getMountPoints())).toBe(true);
+});
+
+test('M1/M2. a same-device mount inside, or at, a candidate is greyed out and refused (scan, delete and per-item recheck)', async () => {
+  await withApp((r) => { proj(r, 'inside'); mk(r, 'inside/node_modules/pkg/data/db.sqlite'); proj(r, 'at'); proj(r, 'fine'); proj(r, 'late'); }, {}, async ({ app, page, root, userData }) => {
+    const inside = path.join(root, 'inside/node_modules'), at = path.join(root, 'at/node_modules');
+    const fine = path.join(root, 'fine/node_modules'), late = path.join(root, 'late/node_modules');
+    await app.evaluate((_e, a) => { global.__e2eMounts = () => ['/', a.m1, a.m2]; }, { m1: path.join(inside, 'pkg/data'), m2: at });
+    const scan = await page.evaluate(() => window.api.cleanupFoldersScan());
+    const by = (p) => scan.candidates.find(c => c.path === p);
+    expect(by(inside).refused).toBe(`contains the mount point ${path.join(inside, 'pkg/data')}`);
+    expect(by(at).refused).toBe(`is itself a mount point (${at})`);
+    expect(by(fine).refused).toBeNull();
+    const bad = await del(page, [inside, at]);
+    expect(bad.deleted).toBe(0);
+    expect(bad.blocked.map(b => b.reason).sort()).toEqual([`contains the mount point ${path.join(inside, 'pkg/data')}`, `is itself a mount point (${at})`].sort());
+    expect(fs.existsSync(path.join(inside, 'pkg/data/db.sqlite'))).toBe(true);
+    expect(readLog(userData).filter(e => e.status === 'blocked').length).toBe(2);
+    // The mount table is re-read at delete time: a mount that appears after the scan, and even
+    // one that appears while the batch is already running, is caught right before that folder's move.
+    await app.evaluate((_e, a) => {
+      global.__e2eMounts = () => ['/'];
+      global.__e2eBeforeTrash = (p) => { if (p === a.fine) global.__e2eMounts = () => ['/', a.late + '/dep']; };
+    }, { fine, late });
+    const res = await del(page, [fine, late]);
+    expect(res.failed).toContain(late);
+    expect(res.deletedPaths).not.toContain(late);
+    expect(fs.existsSync(path.join(late, 'dep/index.js'))).toBe(true);
+    const e = readLog(userData).find(x => x.path === late);
+    expect(e).toMatchObject({ status: 'blocked' });
+    expect(e.reason).toBe(`changed just before delete: contains the mount point ${late}/dep`);
+  });
+});
+
+test('M2. a candidate on a different device than its parent is refused (does not depend on scan visit order)', async () => {
+  const root = tmp();
+  try {
+    proj(root, 'p');
+    const dir = path.join(root, 'p/node_modules');
+    expect(cf.deviceDiffersFromParent(dir)).toBe(false);
+    const fake = { lstatSync: (p, o) => { const st = fs.lstatSync(p, o); return p === dir ? new Proxy(st, { get: (t, k) => k === 'dev' ? t.dev + 1n : (typeof t[k] === 'function' ? t[k].bind(t) : t[k]) }) : st; }, readdirSync: fs.readdirSync, statSync: fs.statSync, realpathSync: fs.realpathSync };
+    expect(cf.deviceDiffersFromParent(dir, fake)).toBe(true);
+    const files = [{ path: path.join(dir, 'dep/index.js'), name: 'index.js', size: 1, mtime: 1 }];
+    expect(cf.findCandidates(files, root, false, fake, ['/'])[0].refusedReason).toBe('is on a different device than its parent folder (mount or volume boundary)');
+    expect(cf.findCandidates(files, root, false, fs, ['/'])[0].refusedReason).toBeNull();
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });

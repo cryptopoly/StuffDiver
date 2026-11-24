@@ -4,9 +4,12 @@ const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
 
+// Folder cleanup refuses locations outside home folders when running as root, so root fixtures live under $HOME.
+function fixtureParent() { return process.getuid && process.getuid() === 0 ? os.homedir() : os.tmpdir(); }
+
 // Build a small fixture tree with known sizes.
 function makeFixture() {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sd-fixture-'));
+  const root = fs.mkdtempSync(path.join(fixtureParent(), 'sd-fixture-'));
   const w = (rel, bytes, fill = 'a') => {
     const p = path.join(root, rel);
     fs.mkdirSync(path.dirname(p), { recursive: true });
@@ -56,4 +59,4 @@ function runCli(args, extraEnv = {}) {
   return { status: r.status, stdout: r.stdout, stderr: r.stderr };
 }
 
-module.exports = { makeFixture, launch, scanViaUi, runCli };
+module.exports = { fixtureParent, makeFixture, launch, scanViaUi, runCli };
