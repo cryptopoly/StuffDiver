@@ -1,6 +1,8 @@
 const { app, BrowserWindow, ipcMain, dialog, shell, Tray, Menu, Notification, nativeImage } = require('electron');
 const path = require('path');
 const fs = require('fs');
+// Plain filesystem access (no .asar archive handling) for hashing and size walks.
+const rawFs = process.versions.electron ? require('original-fs') : fs;
 const crypto = require('crypto');
 const zlib = require('zlib');
 const readline = require('readline');
@@ -400,7 +402,7 @@ handleTrusted('find-duplicates', async (event) => {
   function hashFile(filePath) {
     return new Promise((resolve, reject) => {
       const hash = crypto.createHash('sha256');
-      const stream = fs.createReadStream(filePath, { highWaterMark: 1024 * 1024 });
+      const stream = rawFs.createReadStream(filePath, { highWaterMark: 1024 * 1024 });
       stream.on('data', d => hash.update(d));
       stream.on('end', () => resolve(hash.digest('hex')));
       stream.on('error', reject);
@@ -411,7 +413,7 @@ handleTrusted('find-duplicates', async (event) => {
   // always differ at the head or tail, so this avoids most full reads.
   const SAMPLE = 64 * 1024;
   async function sampleHash(filePath, size) {
-    const fh = await fs.promises.open(filePath, 'r');
+    const fh = await rawFs.promises.open(filePath, 'r');
     try {
       const hash = crypto.createHash('sha256');
       const buf = Buffer.alloc(SAMPLE);
@@ -684,7 +686,7 @@ function protectedReason(inputPath, lexical) {
       const sysRoots = ['/system', '/usr', '/bin', '/sbin', '/etc', '/dev', '/cores', '/private/etc', '/private/var/db',
         '/opt/homebrew/bin', '/boot', '/proc', '/sys', '/lib', '/lib64', '/var/lib', '/var/db'];
       for (const r of sysRoots) if (insideOrEq(p, r)) return 'an operating-system folder';
-      if (p === '/users' || p === '/home' || p === '/volumes' || p === '/applications' || p === '/library' || p === '/private' || p === '/var') return 'a top-level system folder';
+      if (['/users', '/home', '/volumes', '/applications', '/library', '/private', '/var', '/opt', '/srv', '/mnt', '/media', '/snap', '/root', '/tmp', '/lost+found', '/run'].includes(p)) return 'a top-level system folder';
     }
     if (insideOrEq(p, home)) {
       const rel = p.slice(home.length + 1);
@@ -1182,7 +1184,7 @@ async function quickScanSize(folderPath) {
     if (depth > 80) return;
     let entries;
     try {
-      entries = await fs.promises.readdir(dir, { withFileTypes: true });
+      entries = await rawFs.promises.readdir(dir, { withFileTypes: true });
     } catch (e) { return; }
     for (const entry of entries) {
       const fullPath = path.join(dir, entry.name);
@@ -1191,7 +1193,7 @@ async function quickScanSize(folderPath) {
         await walk(fullPath, depth + 1);
       } else if (entry.isFile()) {
         try {
-          const stat = await fs.promises.stat(fullPath);
+          const stat = await rawFs.promises.stat(fullPath);
           let sz = stat.blocks != null ? stat.blocks * 512 : stat.size;
           if (process.platform === 'win32' && sz > stat.size + 4 * 1024 * 1024) sz = stat.size; // garbage NTFS allocation
           totalSize += sz;

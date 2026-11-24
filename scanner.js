@@ -1,4 +1,6 @@
-const fs = require('fs');
+// Electron patches `fs` to treat .asar files as archives (size 0, or an error for
+// invalid ones); the scanner must see them as the plain files they are.
+const fs = process.versions.electron ? require('original-fs') : require('fs');
 const os = require('os');
 const path = require('path');
 const { execFile, spawn } = require('child_process');

@@ -232,3 +232,15 @@ test('delete is logged, and protected paths are refused', async () => {
     await app.close();
   }
 });
+
+test('.asar files are scanned as plain files (Electron fs would hide them)', async () => {
+  await withApp(async ({ page, fx }) => {
+    await scanViaUi(page);
+    const res = await page.evaluate((r) => window.api.scanFolder(r, {}), fx.root);
+    const asar = res.files.find(f => f.name === 'bundle.asar');
+    expect(asar).toBeTruthy();
+    expect(asar.logicalSize).toBe(64 * 1024);
+    expect(res.totalFiles).toBe(fx.fileCount + 1);
+    expect(res.skippedDirs).toBe(0);
+  }, { prepare: (fx) => fs.writeFileSync(path.join(fx.root, 'bundle.asar'), Buffer.alloc(64 * 1024, 'z')) });
+});
