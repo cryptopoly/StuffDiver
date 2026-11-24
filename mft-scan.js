@@ -92,11 +92,14 @@ function readMftExtents(buf, geo) {
     const len = buf.readUInt32LE(a + 4);
     if (len < 16 || a + len > geo.frsSize) break;
     if (type === 0x80 && buf[a + 9] === 0) { // unnamed $DATA
+      if (len < 0x40) throw new Error('$MFT $DATA header truncated');
       if (buf[a + 8] !== 1) throw new Error('$MFT $DATA is resident');
       if (u64(buf, a + 0x10) !== 0) throw new Error('$MFT $DATA does not start at VCN 0');
       const allocSize = u64(buf, a + 0x28);
       const realSize = u64(buf, a + 0x30);
-      const runs = parseRuns(buf, a + buf.readUInt16LE(a + 0x20), a + len);
+      const runOff = buf.readUInt16LE(a + 0x20);
+      if (runOff < 0x40 || runOff >= len) throw new Error('$MFT runlist offset out of range');
+      const runs = parseRuns(buf, a + runOff, a + len);
       let clusters = 0;
       for (const r of runs) {
         if (r.lcn === null) throw new Error('sparse $MFT');
@@ -141,7 +144,7 @@ async function scanNtfsVolume(volumeRoot, opts = {}) {
     const real = new Float64Array(numRecords);
     const mtime = new Float64Array(numRecords);
     const names = new Array(numRecords);
-    const stats = { records: numRecords, inUse: 0, torn: 0, extension: 0 };
+    const stats = { records: numRecords, inUse: 0, torn: 0, extension: 0, badAttrs: 0 };
 
     function parseAttributes(buf, off, n, base) {
       const t = base; // record that receives the attributes
@@ -155,12 +158,16 @@ async function scanNtfsVolume(volumeRoot, opts = {}) {
         if (len < 16 || a + len > end) break;
         const nonRes = buf[a + 8];
         const nameLen = buf[a + 9];
+        const aEnd = a + len;
+        // Corrupt records: every field read below must lie inside this attribute.
+        if (nonRes === 0 ? len < 0x18 : len < 0x40) { stats.badAttrs++; a += len; continue; }
+        const c = nonRes === 0 ? a + buf.readUInt16LE(a + 0x14) : 0;
+        if (nonRes === 0 && c + (type === 0x10 ? 0x10 : type === 0x30 ? 0x42 : type === 0xC0 ? 4 : 0) > aEnd) { stats.badAttrs++; a += len; continue; }
         if (type === 0x10 && nonRes === 0) { // $STANDARD_INFORMATION
-          const c = a + buf.readUInt16LE(a + 0x14);
           const ft = u64(buf, c + 8); // last write time
           mtime[t] = ft > 0 ? (ft - FILETIME_UNIX_EPOCH) / 10000 : 0;
         } else if (type === 0x30 && nonRes === 0) { // $FILE_NAME
-          const c = a + buf.readUInt16LE(a + 0x14);
+          if (c + 0x42 + buf[c + 0x40] * 2 > aEnd) { stats.badAttrs++; a += len; continue; }
           const ns = buf[c + 0x41];
           const rank = ns === 2 ? 1 : 2; // DOS 8.3 names only if nothing else exists
           if (rank > nameRank[t]) {
@@ -171,7 +178,6 @@ async function scanNtfsVolume(volumeRoot, opts = {}) {
             flags[t] |= F_HASNAME;
           }
         } else if (type === 0xC0 && nonRes === 0) { // $REPARSE_POINT: only symlinks/junctions are skipped (as the walk does)
-          const c = a + buf.readUInt16LE(a + 0x14);
           const tag = buf.readUInt32LE(c);
           if (tag === 0xA000000C || tag === 0xA0000003) flags[t] |= F_LINK;
         } else if (type === 0x80 && nameLen === 0) { // unnamed $DATA
@@ -180,6 +186,7 @@ async function scanNtfsVolume(volumeRoot, opts = {}) {
             alloc[t] = 0; // resident in the MFT: no clusters, like the walk
           } else if (u64(buf, a + 0x10) === 0) { // segment holding VCN 0 carries the sizes
             const compUnit = buf.readUInt16LE(a + 0x22);
+            if (compUnit > 0 && len < 0x48) { stats.badAttrs++; a += len; continue; }
             real[t] = u64(buf, a + 0x30);
             alloc[t] = compUnit > 0 ? u64(buf, a + 0x40) : u64(buf, a + 0x28);
           }
