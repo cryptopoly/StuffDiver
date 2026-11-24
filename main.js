@@ -74,10 +74,13 @@ function assertAllowedFilePath(filePath) {
     throw new Error('Invalid file path');
   }
   const resolved = path.resolve(filePath);
+  // Windows and macOS volumes are case-insensitive by default
+  const ci = process.platform === 'win32' || process.platform === 'darwin';
+  const cmp = (v) => ci ? v.toLowerCase() : v;
   for (const root of approvedFolderPaths) {
-    if (resolved === root) return resolved;
+    if (cmp(resolved) === cmp(root)) return resolved;
     const prefix = root.endsWith(path.sep) ? root : root + path.sep;
-    if (resolved.startsWith(prefix)) return resolved;
+    if (cmp(resolved).startsWith(cmp(prefix))) return resolved;
   }
   throw new Error('Path is outside approved folders');
 }
@@ -649,7 +652,7 @@ handleTrusted('get-disk-space', async (event, folderPath) => {
 // no matter what the user selected, which preset matched, or which folder was
 // approved. Checked on both the given path and its symlink-resolved form.
 const PROTECTED_HOME_FOLDERS = ['Desktop', 'Documents', 'Downloads', 'Pictures', 'Music', 'Movies', 'Videos',
-  'Library', 'Applications', 'AppData', 'OneDrive', 'iCloud Drive', 'Public'];
+  'Library', 'Applications', 'AppData', 'AppData/Local', 'AppData/Roaming', 'AppData/LocalLow', 'OneDrive', 'iCloud Drive', 'Public'];
 const PROTECTED_HOME_SECRETS = ['.ssh', '.gnupg', '.aws', '.kube', '.docker', '.config/gcloud', '.azure',
   'Library/Keychains', 'Library/Mobile Documents', 'AppData/Roaming/Microsoft/Credentials',
   'AppData/Roaming/Microsoft/Protect', 'AppData/Local/Microsoft/Credentials'];
@@ -658,6 +661,11 @@ const PROTECTED_HOME_SECRETS = ['.ssh', '.gnupg', '.aws', '.kube', '.docker', '.
 function protectedReason(inputPath, lexical) {
   const stripLongPrefix = (v) => v.replace(/^\\\\[?.]\\/, '');
   const variants = new Set([path.resolve(stripLongPrefix(inputPath))]);
+  // \\host\C$\Windows is the same folder as C:\Windows
+  for (const v of [...variants]) {
+    const share = /^\\\\[^\\]+\\([a-z])\$(\\.*)?$/i.exec(v);
+    if (share) variants.add(path.resolve(share[1] + ':' + (share[2] || '\\')));
+  }
   // native realpath also expands Windows 8.3 short names (PROGRA~1)
   if (!lexical) { try { variants.add(stripLongPrefix(fs.realpathSync.native(path.resolve(stripLongPrefix(inputPath))))); } catch (e) { /* missing: judge by name */ } }
   const win = process.platform === 'win32';
@@ -688,9 +696,15 @@ function protectedReason(inputPath, lexical) {
       for (const r of sysRoots) if (insideOrEq(p, r)) return 'an operating-system folder';
       if (['/users', '/home', '/volumes', '/applications', '/library', '/private', '/var', '/opt', '/srv', '/mnt', '/media', '/snap', '/root', '/tmp', '/lost+found', '/run'].includes(p)) return 'a top-level system folder';
     }
-    if (insideOrEq(p, home)) {
-      const rel = p.slice(home.length + 1);
-      for (const f of PROTECTED_HOME_FOLDERS) if (rel === norm(f)) return `your ${f} folder`;
+    // Home-folder rules apply to every user profile, not just the current user
+    // (the app may run as SYSTEM, or the path may belong to another account).
+    const profile = win ? /^[a-z]:\/users\/[^/]+(\/.*)?$/.exec(p) : process.platform === 'darwin' ? /^\/users\/[^/]+(\/.*)?$/.exec(p) : /^\/home\/[^/]+(\/.*)?$/.exec(p);
+    let rel = null;
+    if (insideOrEq(p, home)) rel = p.slice(home.length + 1);
+    else if (profile) rel = p.split('/').slice(win || process.platform === 'darwin' ? 3 : 3).join('/');
+    if (win && pw === 'c:/programdata') return 'the ProgramData folder';
+    if (rel) {
+      for (const f of PROTECTED_HOME_FOLDERS) if (rel === norm(f)) return `a user's ${f} folder`;
       for (const f of PROTECTED_HOME_SECRETS) if (insideOrEq(rel, norm(f))) return 'a credentials or keychain location';
     }
   }
