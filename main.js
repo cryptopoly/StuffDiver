@@ -703,6 +703,7 @@ function protectedReason(inputPath, lexical) {
     if (insideOrEq(p, home)) rel = p.slice(home.length + 1);
     else if (profile) rel = p.split('/').slice(win || process.platform === 'darwin' ? 3 : 3).join('/');
     if (win && pw === 'c:/programdata') return 'the ProgramData folder';
+    if (profile && p.split('/').length === 3) return 'a user home folder';
     if (rel) {
       for (const f of PROTECTED_HOME_FOLDERS) if (rel === norm(f)) return `a user's ${f} folder`;
       for (const f of PROTECTED_HOME_SECRETS) if (insideOrEq(rel, norm(f))) return 'a credentials or keychain location';
