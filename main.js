@@ -21,6 +21,7 @@ app.setName('Stuff Diver');
 // End-to-end test mode (Playwright): isolated user data, no native dialogs,
 // no auto-updater. Never enabled unless the env var is set explicitly.
 const E2E = process.env.STUFFDIVER_E2E === '1';
+if (E2E) global.__e2eRequire = require; // lets E2E tests reach Node modules from app.evaluate
 const E2E_SCAN_DELAY = E2E ? (Number(process.env.STUFFDIVER_E2E_SCAN_DELAY_MS) || 0) : 0;
 if (E2E && process.env.STUFFDIVER_USER_DATA) {
   app.setPath('userData', process.env.STUFFDIVER_USER_DATA);
@@ -368,21 +369,24 @@ const CLEANUP_PATTERNS = [
   { id: 'aimodels', label: 'AI model caches (re-downloadable)', icon: '\u{1F9E0}', re: /(\/\.cache\/(huggingface|torch|whisper|lm-studio)\/|\/\.ollama\/models\/|\/\.lmstudio\/models\/)/i },
   { id: 'pkgcache', label: 'Package manager caches', icon: '\u{1F4E6}', re: /(\/AppData\/Local\/(pip|npm-cache|NuGet|Yarn|pnpm)\/|\/\.nuget\/packages\/|\/\.gradle\/caches\/|\/\.m2\/repository\/|\/\.cargo\/registry\/|\/Library\/Caches\/(pip|Homebrew)\/|\/var\/cache\/apt\/archives\/)/i },
   { id: 'syscache', label: 'System & app caches', icon: '\u{1F5C4}', re: /(\/(cache|\.cache|\.npm|\.yarn|INetCache|GPUCache|Code Cache)\/|\/Library\/Caches\/|\/\.local\/share\/Trash\/|\/\.Trash\/)/i },
-  { id: 'temp', label: 'Temp files', icon: '\u{1F550}', re: /\.(tmp|temp|swp|swo|bak|old)$/i },
-  { id: 'build', label: 'Build artifacts', icon: '\u{1F3D7}', re: /\/(dist|\.build)\//i },
-  { id: 'logs', label: 'Log files', icon: '\u{1F4DD}', re: /\.log$/i },
+  { id: 'temp', label: 'Temp files', icon: '\u{1F550}', re: /\.(tmp|temp)$/i },
+  // .log is also the LevelDB write-ahead file of browsers/Electron apps (extensions, wallets, Slack, VS Code state):
+  // skip those storage folders entirely, and anything in an app-data folder unless it sits in a logs folder.
+  { id: 'logs', label: 'Log files', icon: '\u{1F4DD}', re: /\.log$/i,
+    skip: (rp) => /\/(leveldb|Local Storage|IndexedDB|Local Extension Settings|Session Storage|databases|Sync Data|Service Worker|File System|blob_storage|Application Support)\//i.test(rp) && !/\/(logs?)\//i.test(rp) || /\/(leveldb|Local Storage|IndexedDB|Local Extension Settings|Session Storage|Sync Data)\//i.test(rp) },
   { id: 'dsstore', label: '.DS_Store files', icon: '\u{1F47B}', re: /\.DS_Store$/ },
   { id: 'thumbs', label: 'Thumbnails & junk', icon: '\u{1F5D1}', re: /(Thumbs\.db|desktop\.ini|\.Spotlight|\.Trashes|\/\.cache\/thumbnails\/)/i }
 ];
 const CLEANUP_PATH_CAP = 20000;
 
 handleTrusted('cleanup-scan', async () => {
-  const cats = CLEANUP_PATTERNS.map(p => ({ id: p.id, label: p.label, icon: p.icon, re: p.re, count: 0, totalSize: 0, paths: [] }));
+  const cats = CLEANUP_PATTERNS.map(p => ({ id: p.id, label: p.label, icon: p.icon, re: p.re, skip: p.skip, count: 0, totalSize: 0, paths: [] }));
   for (const f of lastScanAllFiles) {
     if (f.cloudStatus === 'icloud-only') continue;
     const rp = '/' + String(f.relativePath || f.name).replace(/\\/g, '/');
     for (const c of cats) {
       if (c.re.test(rp)) {
+        if (c.skip && c.skip(rp)) break;
         // Never offer paths the delete guard would refuse (a single one refuses the whole request).
         if (protectedReason(f.path, true)) break;
         c.count++;
@@ -392,7 +396,7 @@ handleTrusted('cleanup-scan', async () => {
       }
     }
   }
-  return cats.filter(c => c.count > 0).map(({ re, ...rest }) => rest).sort((a, b) => b.totalSize - a.totalSize);
+  return cats.filter(c => c.count > 0).map(({ re, skip, ...rest }) => rest).sort((a, b) => b.totalSize - a.totalSize);
 });
 
 handleTrusted('find-duplicates', async (event) => {
@@ -653,7 +657,8 @@ const PROTECTED_HOME_FOLDERS = ['Desktop', 'Documents', 'Downloads', 'Pictures',
   'Library', 'Applications', 'AppData', 'AppData/Local', 'AppData/Roaming', 'AppData/LocalLow', 'OneDrive', 'iCloud Drive', 'Public'];
 const PROTECTED_HOME_SECRETS = ['.ssh', '.gnupg', '.aws', '.kube', '.docker', '.config/gcloud', '.azure',
   'Library/Keychains', 'Library/Mobile Documents', 'AppData/Roaming/Microsoft/Credentials',
-  'AppData/Roaming/Microsoft/Protect', 'AppData/Local/Microsoft/Credentials'];
+  'AppData/Roaming/Microsoft/Protect', 'AppData/Local/Microsoft/Credentials',
+  '.gradle/gradle.properties', '.m2/settings.xml', '.npmrc', '.pypirc', '.netrc', '.config/gh', '.docker/config.json', '.git-credentials', '.terraform.d'];
 
 const WIN_SYS_ROOTS = ['c:/windows', 'c:/program files', 'c:/program files (x86)', 'c:/programdata/microsoft',
   'c:/system volume information', 'c:/$recycle.bin', 'c:/boot', 'c:/recovery'];
@@ -714,22 +719,58 @@ function protectedReason(inputPath, lexical) {
 }
 
 // Append-only record of everything trashed (or refused), kept in user data.
-function deletionLogPath() { return path.join(app.getPath('userData'), 'deletion-log.jsonl'); }
+// Rotated at ~20 MB (3 files: deletion-log.jsonl, .1, .2).
+const LOG_ROTATE_BYTES = 20 * 1024 * 1024;
+const LOG_KEEP = 3;
+const LOG_TAIL_BYTES = 20 * 1024 * 1024; // never load more than this from one file
+function deletionLogPath(idx = 0) { return path.join(app.getPath('userData'), 'deletion-log.jsonl' + (idx ? '.' + idx : '')); }
+let logCache = new Map(); // idx -> { key, entries (oldest first) }
+// Returns null on success, else an error message (callers surface it; logging never blocks the delete itself).
 async function logDeletion(entries) {
-  if (!entries.length) return;
+  if (!entries.length) return null;
   try {
-    await fs.promises.appendFile(deletionLogPath(), entries.map(e => JSON.stringify(e)).join('\n') + '\n');
-  } catch (e) { /* logging must never block the user */ }
+    const p = deletionLogPath();
+    let size = 0;
+    try { size = (await fs.promises.stat(p)).size; } catch (e) { /* new log */ }
+    if (size > LOG_ROTATE_BYTES) {
+      for (let i = LOG_KEEP - 1; i >= 1; i--) {
+        const from = deletionLogPath(i - 1);
+        if (fs.existsSync(from)) await fs.promises.rename(from, deletionLogPath(i));
+      }
+      logCache = new Map();
+    }
+    await fs.promises.appendFile(p, entries.map(e => JSON.stringify(e)).join('\n') + '\n');
+    return null;
+  } catch (e) { return 'Could not write the deletion log: ' + (e.message || e); }
+}
+
+// Parsed log (oldest first), cached until the file changes. Reads at most the last LOG_TAIL_BYTES.
+async function readLogEntries(idx) {
+  const p = deletionLogPath(idx);
+  let st;
+  try { st = await fs.promises.stat(p); } catch (e) { return []; }
+  const key = st.size + ':' + st.mtimeMs;
+  const hit = logCache.get(idx);
+  if (hit && hit.key === key) return hit.entries;
+  let text;
+  if (st.size > LOG_TAIL_BYTES) {
+    const fh = await fs.promises.open(p, 'r');
+    try {
+      const buf = Buffer.alloc(LOG_TAIL_BYTES);
+      await fh.read(buf, 0, LOG_TAIL_BYTES, st.size - LOG_TAIL_BYTES);
+      text = buf.toString('utf8');
+      text = text.slice(text.indexOf('\n') + 1); // drop the cut first line
+    } finally { await fh.close(); }
+  } else text = await fs.promises.readFile(p, 'utf8');
+  const entries = [];
+  for (const l of text.split('\n')) { if (!l) continue; try { entries.push(JSON.parse(l)); } catch (e) { /* skip bad line */ } }
+  logCache.set(idx, { key, entries });
+  return entries;
 }
 
 handleTrusted('get-deletion-log', async (event, limit) => {
-  try {
-    const lines = (await fs.promises.readFile(deletionLogPath(), 'utf8')).split('\n').filter(Boolean);
-    const n = Math.max(1, Math.min(Number(limit) || 500, 5000));
-    return lines.slice(-n).reverse().map(l => { try { return JSON.parse(l); } catch (e) { return null; } }).filter(Boolean);
-  } catch (e) {
-    return [];
-  }
+  const n = Math.max(1, Math.min(Number(limit) || 500, 5000));
+  return (await readLogEntries(0)).slice(-n).reverse();
 });
 
 handleTrusted('reveal-deletion-log', async () => {
@@ -753,16 +794,31 @@ handleTrusted('delete-files', async (event, filePaths, source) => {
   const blocked = [];
   for (const fp of safePaths) {
     const reason = protectedReason(fp);
-    if (reason) blocked.push({ path: fp, reason });
+    if (reason) { blocked.push({ path: fp, reason }); continue; }
+    // This handler only trashes files. Folders go through delete-folders and its safeguards.
+    try {
+      const st = fs.lstatSync(fp);
+      if (st.isSymbolicLink()) {
+        // A link is trashed as the link itself, but only when it points at a file.
+        let tstat = null; try { tstat = fs.statSync(fp); } catch (e) { /* dangling */ }
+        if (tstat && !tstat.isFile()) blocked.push({ path: fp, reason: 'a link to a folder (folders are only cleaned through Smart Cleanup folder checks)' });
+      } else if (!st.isFile()) {
+        blocked.push({ path: fp, reason: st.isDirectory() ? 'a folder, not a file (folders are only cleaned through Smart Cleanup folder checks)' : 'not a regular file' });
+      }
+    } catch (e) { /* missing: trashItem will report it as failed */ }
   }
   if (blocked.length) {
     const now = Date.now();
-    await logDeletion(blocked.map(b => ({ t: now, path: b.path, status: 'blocked', reason: b.reason, source: source || 'collector' })));
+    const logError = await logDeletion(blocked.map(b => ({ t: now, path: b.path, status: 'blocked', reason: b.reason, source: source || 'collector' })));
     return {
-      deleted: 0, deletedPaths: [], blocked,
-      error: `Refused: ${blocked[0].path} is ${blocked[0].reason}.` + (blocked.length > 1 ? ` (+${blocked.length - 1} more protected)` : '')
+      deleted: 0, deletedPaths: [], blocked, ...(logError ? { logError } : {}),
+      error: `Refused: ${blocked[0].path} is ${blocked[0].reason}.` + (blocked.length > 1 ? ` (+${blocked.length - 1} more refused)` : '') + ' Nothing was moved.'
     };
   }
+
+  const sizeByPath = new Map();
+  const want = new Set(safePaths);
+  for (const f of lastScanAllFiles) if (want.has(f.path)) sizeByPath.set(f.path, f.size);
 
   const result = E2E ? { response: 1 } : await dialog.showMessageBox(mainWindow, {
     type: 'warning',
@@ -770,36 +826,33 @@ handleTrusted('delete-files', async (event, filePaths, source) => {
     defaultId: 0,
     cancelId: 0,
     title: 'Delete Files',
-    message: `Move ${filePaths.length} file${filePaths.length > 1 ? 's' : ''} to trash?`,
-    detail: 'This will move the selected files to your system trash. You can restore them from the trash, and each one is recorded in the deletion log.'
+    message: `Move ${safePaths.length} file${safePaths.length > 1 ? 's' : ''} (${formatSizeMain(safePaths.reduce((a, p) => a + (sizeByPath.get(p) || 0), 0))}) to trash?`,
+    detail: `Largest ${Math.min(10, safePaths.length)}:\n` + [...safePaths].sort((a, b) => (sizeByPath.get(b) || 0) - (sizeByPath.get(a) || 0)).slice(0, 10).map(p => `${formatSizeMain(sizeByPath.get(p) || 0)}  ${p}`).join('\n') +
+      '\n\nThey go to your system trash and can be restored from there. Each one is recorded in the deletion log.'
   });
 
   if (result.response !== 1) return { deleted: 0, deletedPaths: [] };
 
-  const sizeByPath = new Map();
-  const want = new Set(safePaths);
-  for (const f of lastScanAllFiles) if (want.has(f.path)) sizeByPath.set(f.path, f.size);
-
   const deletedPaths = [];
-  const log = [];
-  const now = Date.now();
+  let logError = null;
   for (const fp of safePaths) {
-    const entry = { t: now, path: fp, size: sizeByPath.get(fp) ?? null, source: source || 'collector' };
+    const entry = { t: Date.now(), path: fp, size: sizeByPath.get(fp) ?? null, source: source || 'collector' };
+    let rec;
     try {
       await shell.trashItem(fp);
       deletedPaths.push(fp);
-      log.push({ ...entry, status: 'trashed' });
+      rec = { ...entry, status: 'trashed' };
     } catch (e) {
       console.error('Failed to trash:', fp, e.message);
-      log.push({ ...entry, status: 'failed', reason: e.message });
+      rec = { ...entry, status: 'failed', reason: e.message };
     }
+    logError = (await logDeletion([rec])) || logError; // written per item: a crash mid-batch loses nothing
   }
-  await logDeletion(log);
   if (deletedPaths.length) {
     const gone = new Set(deletedPaths);
     lastScanAllFiles = lastScanAllFiles.filter(f => !gone.has(f.path));
   }
-  return { deleted: deletedPaths.length, deletedPaths };
+  return { deleted: deletedPaths.length, deletedPaths, ...(logError ? { logError } : {}) };
 });
 
 
@@ -904,10 +957,10 @@ handleTrusted('delete-folders', async (event, folderPaths, source) => {
     const blocked = checks.filter(c => !c.ok);
     if (blocked.length) {
       const now = Date.now();
-      await logDeletion(blocked.map(b => ({ t: now, path: b.path, status: 'blocked', reason: b.reason, source: src, type: 'folder' })));
+      const le = await logDeletion(blocked.map(b => ({ t: now, path: b.path, status: 'blocked', reason: b.reason, source: src, type: 'folder' })));
       const list = blocked.slice(0, 10).map(b => `${b.path} ${b.reason}`);
       return {
-        ...nothing, blocked: blocked.map(b => ({ path: b.path, reason: b.reason })),
+        ...nothing, blocked: blocked.map(b => ({ path: b.path, reason: b.reason })), ...(le ? { logError: le } : {}),
         error: `Refused: ${blocked.length} of ${kept.length} folder(s) failed the safety checks, so nothing was moved.\n` + list.join('\n') + (blocked.length > 10 ? `\n(+${blocked.length - 10} more)` : '')
       };
     }
@@ -932,61 +985,62 @@ handleTrusted('delete-folders', async (event, folderPaths, source) => {
       await logDeletion(changed.map(b => ({ t: now, path: b.path, status: 'blocked', reason: 'changed before delete: ' + b.reason, source: src, type: 'folder' })));
       return { ...nothing, blocked: changed.map(b => ({ path: b.path, reason: b.reason })), error: `Refused: ${changed[0].path} changed before it could be deleted (${changed[0].reason}). Nothing was moved.` };
     }
-    const deletedPaths = [], log = [], failed = [];
-    let freedBytes = 0;
+    const deletedPaths = [], failed = [];
+    let freedBytes = 0, logError = null;
     for (const c of checks) {
       const entry = { t: Date.now(), path: c.path, type: 'folder', size: c.size, files: c.files, category: c.kind, source: src };
-      // Last-moment check, immediately before the move.
-      const last = cleanupFolders.classifyFolder(c.path, rawFs);
-      if (!last || last.refused) {
-        log.push({ ...entry, status: 'blocked', reason: 'changed just before delete: ' + ((last && last.refused) || 'marker lost') });
+      let rec;
+      // Full re-verification (symlinks, real location, marker, .git, protected paths) immediately before EVERY move.
+      if (E2E && typeof global.__e2eBeforeTrash === 'function') await global.__e2eBeforeTrash(c.path); // test hook, E2E only
+      const last = evaluateFolder(c.path);
+      if (!last.ok) {
+        rec = { ...entry, status: 'blocked', reason: 'changed just before delete: ' + last.reason };
         failed.push(c.path);
-        continue;
+      } else {
+        try {
+          await shell.trashItem(c.path);
+          deletedPaths.push(c.path); freedBytes += c.size;
+          rec = { ...entry, status: 'trashed', reason: c.reason };
+        } catch (e) {
+          failed.push(c.path);
+          rec = { ...entry, status: 'failed', reason: e.message };
+        }
       }
-      try {
-        await shell.trashItem(c.path);
-        deletedPaths.push(c.path); freedBytes += c.size;
-        log.push({ ...entry, status: 'trashed', reason: c.reason });
-      } catch (e) {
-        failed.push(c.path);
-        log.push({ ...entry, status: 'failed', reason: e.message });
-      }
+      logError = (await logDeletion([rec])) || logError; // per item, right after the move
     }
-    await logDeletion(log);
     if (deletedPaths.length) {
       const gone = deletedPaths.map(p => p + path.sep);
       const lc = ci ? (v) => v.toLowerCase() : (v) => v;
       const goneL = gone.map(lc);
       lastScanAllFiles = lastScanAllFiles.filter(f => { const fl = lc(f.path); return !goneL.some(g => fl.startsWith(g)); });
     }
-    return { deleted: deletedPaths.length, deletedPaths, freedBytes, failed, dedupedNested: dropped };
+    return { deleted: deletedPaths.length, deletedPaths, freedBytes, failed, dedupedNested: dropped, ...(logError ? { logError } : {}) };
   } finally {
     folderDeleteBusy = false;
   }
 });
 
-// Filtered, paginated view of the deletion log (newest first).
+// Filtered, paginated view of the deletion log (newest first). opts.file: 0 = current, 1..2 = rotated.
 handleTrusted('query-deletion-log', async (event, opts) => {
   const o = opts || {};
   const limit = Math.max(1, Math.min(Number(o.limit) || 200, 1000));
   const offset = Math.max(0, Number(o.offset) || 0);
+  const file = Math.max(0, Math.min(Number(o.file) || 0, LOG_KEEP - 1));
   const status = ['trashed', 'failed', 'blocked'].includes(o.status) ? o.status : null;
   const q = typeof o.search === 'string' ? o.search.trim().toLowerCase() : '';
-  let lines = [];
-  try { lines = (await fs.promises.readFile(deletionLogPath(), 'utf8')).split('\n'); } catch (e) { /* no log yet */ }
+  const all = await readLogEntries(file);
   const counts = { trashed: 0, failed: 0, blocked: 0 };
   const matched = [];
-  let total = 0;
-  for (let i = lines.length - 1; i >= 0; i--) {
-    if (!lines[i]) continue;
-    let e; try { e = JSON.parse(lines[i]); } catch (er) { continue; }
-    total++;
+  for (let i = all.length - 1; i >= 0; i--) {
+    const e = all[i];
     if (counts[e.status] !== undefined) counts[e.status]++;
     if (status && e.status !== status) continue;
     if (q && !`${e.path || ''} ${e.reason || ''} ${e.source || ''} ${e.category || ''}`.toLowerCase().includes(q)) continue;
     matched.push(e);
   }
-  return { entries: matched.slice(offset, offset + limit), matched: matched.length, total, counts, logPath: deletionLogPath() };
+  const rotated = [];
+  for (let i = 1; i < LOG_KEEP; i++) if (fs.existsSync(deletionLogPath(i))) rotated.push(i);
+  return { entries: matched.slice(offset, offset + limit), matched: matched.length, total: all.length, counts, rotated, file, logPath: deletionLogPath(file) };
 });
 
 // === Scan cache ===

@@ -27,7 +27,7 @@ test.describe('classifier', () => {
   const kind = (rel) => { const c = cf.classifyFolder(path.join(root, rel)); return c && (c.kind || ('refused:' + c.refused)); };
 
   test('accepts every allowlisted kind with its structural marker', () => {
-    mk(root, 'a/package.json', '{}'); mk(root, 'a/node_modules/x/i.js');
+    mk(root, 'a/package.json', '{}'); mk(root, 'a/yarn.lock', ''); mk(root, 'a/node_modules/x/i.js');
     mk(root, 'b/__pycache__/m.cpython-311.pyc');
     mk(root, 'c/.pytest_cache/CACHEDIR.TAG');
     mk(root, 'd/.mypy_cache/CACHEDIR.TAG');
@@ -75,9 +75,9 @@ test.describe('classifier', () => {
   });
 
   test('refuses a symlink to a folder and a plain file', () => {
-    mk(root, 'real/package.json', '{}'); mk(root, 'real/node_modules/x');
-    mk(root, 'p/package.json', '{}'); mk(root, 'p/node_modules', 'file, not folder');
-    mk(root, 'q/package.json', '{}');
+    mk(root, 'real/package.json', '{}'); mk(root, 'real/yarn.lock', ''); mk(root, 'real/node_modules/x');
+    mk(root, 'p/package.json', '{}'); mk(root, 'p/yarn.lock', ''); mk(root, 'p/node_modules', 'file, not folder');
+    mk(root, 'q/package.json', '{}'); mk(root, 'q/yarn.lock', '');
     fs.symlinkSync(path.join(root, 'real/node_modules'), path.join(root, 'q/node_modules'), 'dir');
     expect(kind('q/node_modules')).toMatch(/^refused:.*symlink/);
     expect(kind('p/node_modules')).toMatch(/^refused:.*not a folder/);
@@ -86,8 +86,8 @@ test.describe('classifier', () => {
 
   test('refuses a Windows junction', () => {
     test.skip(process.platform !== 'win32', 'junctions are Windows-only');
-    mk(root, 'real/package.json', '{}'); mk(root, 'real/node_modules/x');
-    mk(root, 'q/package.json', '{}');
+    mk(root, 'real/package.json', '{}'); mk(root, 'real/yarn.lock', ''); mk(root, 'real/node_modules/x');
+    mk(root, 'q/package.json', '{}'); mk(root, 'q/yarn.lock', '');
     fs.symlinkSync(path.join(root, 'real/node_modules'), path.join(root, 'q/node_modules'), 'junction');
     expect(kind('q/node_modules')).toMatch(/^refused:/);
   });
@@ -105,11 +105,11 @@ test.describe('classifier', () => {
   });
 
   test('dedupeNested keeps the outermost; findCandidates reports sizes, nesting and .git', () => {
-    mk(root, 'p/package.json', '{}');
+    mk(root, 'p/package.json', '{}'); mk(root, 'p/pnpm-lock.yaml', '');
     mk(root, 'p/node_modules/a/index.js');
     mk(root, 'p/node_modules/a/node_modules/b/package.json', '{}');
     mk(root, 'p/node_modules/a/node_modules/b/node_modules/c/i.js');
-    mk(root, 'q/package.json', '{}'); mk(root, 'q/node_modules/repo/.git/HEAD'); mk(root, 'q/node_modules/repo/i.js');
+    mk(root, 'q/package.json', '{}'); mk(root, 'q/bun.lockb', ''); mk(root, 'q/node_modules/repo/.git/HEAD'); mk(root, 'q/node_modules/repo/i.js');
     mk(root, 'r/node_modules/x/i.js');   // no package.json: not a candidate
     const files = [];
     const walk = (d) => { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const f = path.join(d, e.name); if (e.isDirectory()) walk(f); else { const s = fs.statSync(f); files.push({ path: f, name: e.name, size: s.size, mtime: s.mtimeMs }); } } };
@@ -128,6 +128,7 @@ test.describe('classifier', () => {
 // ---------- app integration ----------
 function project(root, name, extra = {}) {
   mk(root, `${name}/package.json`, '{}');
+  mk(root, `${name}/package-lock.json`, '{}');
   mk(root, `${name}/node_modules/dep/index.js`);
   for (const [rel, c] of Object.entries(extra)) mk(root, `${name}/${rel}`, c);
 }
@@ -146,7 +147,7 @@ test('folder scan offers only marker-verified folders, with details and defaults
   await withFolders(async ({ page, root }) => {
     const res = await page.evaluate(() => window.api.cleanupFoldersScan());
     const rel = res.candidates.map(c => c.relPath).sort();
-    expect(rel).toEqual(['proj/node_modules', 'rust/target', 'venvs/env']);
+    expect(rel).toEqual(['proj/node_modules', 'rust/target', 'pyenvs/env']); // lonely/ and nolock/ are not offered
     const nm = res.candidates.find(c => c.kind === 'node_modules');
     expect(nm).toMatchObject({ files: 1, defaultChecked: true, refused: null });
     expect(nm.size).toBeGreaterThan(0);
@@ -159,8 +160,9 @@ test('folder scan offers only marker-verified folders, with details and defaults
   }, { prepare: (r) => {
     project(r, 'proj', { 'dist/out.js': 'x', 'build/o.js': 'x' });
     mk(r, 'lonely/node_modules/x/i.js');          // no package.json
+    mk(r, 'nolock/package.json', '{}'); mk(r, 'nolock/node_modules/x/i.js'); // no lockfile
     mk(r, 'rust/Cargo.toml', ''); mk(r, 'rust/target/debug/x');
-    mk(r, 'venvs/env/pyvenv.cfg', ''); mk(r, 'venvs/env/lib/x');
+    mk(r, 'pyenvs/env/pyvenv.cfg', ''); mk(r, 'pyenvs/env/lib/x');
     mk(r, 'misc/target/x'); mk(r, 'misc/.git/HEAD');
   } });
 });
@@ -230,7 +232,7 @@ test('a symlink to a folder is refused, and the real target is untouched', async
     expect(res.blocked[0].reason).toMatch(/symlink/);
     expect(fs.existsSync(path.join(root, 'proj/node_modules/dep/index.js'))).toBe(true);
   }, { prepare: (r) => {
-    project(r, 'proj'); mk(r, 'link-proj/package.json', '{}');
+    project(r, 'proj'); mk(r, 'link-proj/package.json', '{}'); mk(r, 'link-proj/yarn.lock', '');
     fs.symlinkSync(path.join(r, 'proj/node_modules'), path.join(r, 'link-proj/node_modules'), 'dir');
   } });
 });
@@ -261,7 +263,7 @@ test('TOCTOU: ancestor swapped for a symlink after the scan is refused', async (
     expect(res.deleted).toBe(0);
     expect(res.blocked[0].reason).toMatch(/different location|symlink/);
     expect(fs.existsSync(path.join(root, 'decoy/node_modules/keep.txt'))).toBe(true);
-  }, { prepare: (r) => { project(r, 'proj'); mk(r, 'decoy/package.json', '{}'); mk(r, 'decoy/node_modules/keep.txt'); } });
+  }, { prepare: (r) => { project(r, 'proj'); mk(r, 'decoy/package.json', '{}'); mk(r, 'decoy/yarn.lock', ''); mk(r, 'decoy/node_modules/keep.txt'); } });
 });
 
 test('TOCTOU: marker removed or .git added after the scan is refused', async () => {
@@ -278,7 +280,7 @@ test('TOCTOU: marker removed or .git added after the scan is refused', async () 
   }, { prepare: (r) => { project(r, 'a'); project(r, 'b'); } });
 });
 
-test('a folder that contains a protected location (fake ~/.ssh under overridden HOME) is refused', async () => {
+test('a candidate that encloses the home folder is refused with that exact reason (HOME overridden)', async () => {
   const root = tmp();
   project(root, 'proj');
   const fakeHome = path.join(root, 'proj/node_modules/fakehome');
@@ -290,29 +292,13 @@ test('a folder that contains a protected location (fake ~/.ssh under overridden 
     const target = path.join(root, 'proj/node_modules');
     const scan = await page.evaluate(() => window.api.cleanupFoldersScan());
     const cand = scan.candidates.find(c => c.path === target);
-    expect(cand.refused).toMatch(/contains/);
+    expect(cand.refused).toBe('contains your home folder (' + fakeHome + ')');
     expect(cand.defaultChecked).toBe(false);
     const res = await del(page, [target]);
     expect(res.deleted).toBe(0);
-    expect(res.blocked[0].reason).toMatch(/contains/);
+    expect(res.blocked[0].reason).toBe('contains your home folder (' + fakeHome + ')');
     expect(fs.existsSync(path.join(fakeHome, '.ssh/id_rsa'))).toBe(true);
     expect(readLog(userData).some(e => e.status === 'blocked' && e.path === target)).toBe(true);
-  } finally { await app.close(); fs.rmSync(root, { recursive: true, force: true }); }
-});
-
-test('a folder containing a protected folder deeper down (e.g. a Documents folder in a fake home) is refused', async () => {
-  const root = tmp();
-  project(root, 'proj');
-  const fakeHome = path.join(root, 'proj/node_modules/h');
-  mk(root, 'proj/node_modules/h/Documents/thesis.txt', 'precious');
-  age(root);
-  const { app, page } = await launch(root, { HOME: fakeHome, USERPROFILE: fakeHome });
-  try {
-    await scanViaUi(page);
-    const res = await del(page, [path.join(root, 'proj/node_modules')]);
-    expect(res.deleted).toBe(0);
-    expect(res.blocked[0].reason).toMatch(/contains/);
-    expect(fs.existsSync(path.join(fakeHome, 'Documents/thesis.txt'))).toBe(true);
   } finally { await app.close(); fs.rmSync(root, { recursive: true, force: true }); }
 });
 

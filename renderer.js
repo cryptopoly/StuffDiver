@@ -3665,6 +3665,8 @@
   }
 
   const CLEANUP_FOLDER_RENDER_CAP = 500;
+  // Only these loose-file presets start ticked; everything else is the user's explicit choice.
+  const CLEANUP_PRETICKED = new Set(['dsstore', 'thumbs']);
 
   async function openCleanupWizard() {
     if (!allFiles.length) { alert('Please scan a folder first.'); return; }
@@ -3697,15 +3699,15 @@
         const refused = !!c.refused;
         html += '<div class="cleanup-category cleanup-folder' + (refused ? ' cleanup-refused' : '') + '" data-idx="' + i + '">'
           + '<input type="checkbox" class="cleanup-folder-check" data-idx="' + i + '"' + (c.defaultChecked ? ' checked' : '') + (refused ? ' disabled' : '') + '>'
-          + '<span class="cleanup-icon">' + c.icon + '</span><div class="cleanup-info">'
+          + '<span class="cleanup-icon">' + escHtml(c.icon) + '</span><div class="cleanup-info">'
           + '<div class="cleanup-name" title="' + escHtml(c.path) + '">' + escHtml(c.relPath || c.path) + '</div>'
           + '<div class="cleanup-detail">' + escHtml(c.label) + ': ' + escHtml(c.reason) + '</div>'
-          + '<div class="cleanup-detail">' + c.files.toLocaleString() + ' files &middot; last modified ' + escHtml(formatAge(c.ageDays)) + '</div>'
+          + '<div class="cleanup-detail">' + Number(c.files).toLocaleString() + ' files &middot; last modified ' + escHtml(formatAge(c.ageDays)) + '</div>'
           + (refused
             ? '<div class="cleanup-detail cleanup-refuse-reason">Not offered: ' + escHtml(c.refused) + '</div>'
             : '<div class="cleanup-detail">If you restore or regenerate: ' + escHtml(c.restore) + '</div>')
           + c.warnings.map(function(w) { return '<div class="cleanup-detail cleanup-warn">&#9888; ' + escHtml(w) + '</div>'; }).join('')
-          + '</div><span class="cleanup-size">' + formatSize(c.size) + '</span></div>';
+          + '</div><span class="cleanup-size">' + formatSize(Number(c.size) || 0) + '</span></div>';
       });
       html += '<div class="cleanup-actions"><button class="cleanup-btn-clean" id="cleanup-folders-execute">Move Selected Folders to Trash</button></div>';
     }
@@ -3714,7 +3716,7 @@
       html += '<div class="cleanup-section-title">Loose files</div>';
       html += '<div class="cleanup-total"><span class="cleanup-total-label">Total reclaimable space</span><span class="cleanup-total-size">' + formatSize(grandTotal) + '</span></div>';
       for (const cat of found) {
-        html += '<div class="cleanup-category"><input type="checkbox" class="cleanup-check" data-id="' + escHtml(cat.id) + '" checked><span class="cleanup-icon">' + cat.icon + '</span><div class="cleanup-info"><div class="cleanup-name">' + escHtml(cat.label) + '</div><div class="cleanup-detail">' + cat.count.toLocaleString() + ' files</div></div><span class="cleanup-size">' + formatSize(cat.totalSize) + '</span></div>';
+        html += '<div class="cleanup-category"><input type="checkbox" class="cleanup-check" data-id="' + escHtml(cat.id) + '"' + (CLEANUP_PRETICKED.has(cat.id) ? ' checked' : '') + '><span class="cleanup-icon">' + escHtml(cat.icon) + '</span><div class="cleanup-info"><div class="cleanup-name">' + escHtml(cat.label) + '</div><div class="cleanup-detail">' + (Number(cat.count) || 0).toLocaleString() + ' files</div></div><span class="cleanup-size">' + formatSize(Number(cat.totalSize) || 0) + '</span></div>';
       }
       html += '<div class="cleanup-actions"><button class="cleanup-btn-clean" id="cleanup-execute">Clean Selected</button></div>';
     }
@@ -3733,6 +3735,7 @@
         if (!picked.length) return;
         const result = await window.api.deleteFolders(picked, 'smart-cleanup-folders');
         if (result && result.error) { alert(result.error); return; }
+        if (result && result.logError) alert(result.logError);
         if (result && result.deleted > 0) {
           const prefixes = (result.deletedPaths || []).map(function(p) { return p + (p.indexOf('\\') >= 0 ? '\\' : '/'); });
           allFiles = allFiles.filter(function(f) { return !prefixes.some(function(p) { return f.path.startsWith(p); }); });
@@ -3779,6 +3782,7 @@
     document.getElementById('dellog-overlay').classList.remove('hidden');
     document.getElementById('dellog-search').value = '';
     document.getElementById('dellog-status').value = '';
+    document.getElementById('dellog-file').value = '0';
     loadDeletionLog(true);
   }
 
@@ -3792,10 +3796,17 @@
     st.status = document.getElementById('dellog-status').value;
     st.search = document.getElementById('dellog-search').value;
     let res;
-    try { res = await window.api.queryDeletionLog({ offset: st.offset, limit: DELLOG_PAGE, status: st.status, search: st.search }); }
+    try { res = await window.api.queryDeletionLog({ offset: st.offset, limit: DELLOG_PAGE, status: st.status, search: st.search, file: Number(document.getElementById('dellog-file').value) || 0 }); }
     catch (e) { res = { entries: [], matched: 0, total: 0, counts: {} }; }
     st.entries = st.entries.concat(res.entries || []);
     st.offset = st.entries.length;
+    const fileSel = document.getElementById('dellog-file');
+    const rot = res.rotated || [];
+    fileSel.classList.toggle('hidden', !rot.length);
+    if (fileSel.dataset.n !== String(rot.length)) {
+      fileSel.innerHTML = '<option value="0">Current log</option>' + rot.map(function(n) { return '<option value="' + Number(n) + '">Older log ' + Number(n) + '</option>'; }).join('');
+      fileSel.dataset.n = String(rot.length);
+    }
     const list = document.getElementById('dellog-list');
     const empty = document.getElementById('dellog-empty');
     const c = res.counts || {};
@@ -3806,8 +3817,8 @@
       return '<div class="dellog-row" data-i="' + i + '"><span class="dellog-badge dellog-' + escHtml(e.status) + '">' + escHtml(e.status) + '</span>'
         + '<div class="dellog-main"><div class="dellog-path">' + escHtml(e.path) + '</div>'
         + '<div class="dellog-meta">' + escHtml(formatLogTime(e.t))
-        + (e.size != null ? ' &middot; ' + formatSize(e.size) : '')
-        + (e.files != null ? ' &middot; ' + e.files.toLocaleString() + ' files' : '')
+        + (e.size != null ? ' &middot; ' + escHtml(formatSize(Number(e.size) || 0)) : '')
+        + (e.files != null ? ' &middot; ' + (Number(e.files) || 0).toLocaleString() + ' files' : '')
         + (e.type === 'folder' ? ' &middot; folder' : '')
         + ' &middot; ' + escHtml(e.source || 'unknown') + '</div>'
         + (e.reason ? '<div class="dellog-reason">' + escHtml(e.reason) + '</div>' : '') + '</div>'
@@ -4916,6 +4927,7 @@
       if (e.target.id === 'dellog-overlay') closeDeletionLog();
     });
     document.getElementById('dellog-status').addEventListener('change', () => loadDeletionLog(true));
+    document.getElementById('dellog-file').addEventListener('change', () => loadDeletionLog(true));
     document.getElementById('dellog-search').addEventListener('input', () => {
       clearTimeout(dellogState.timer);
       dellogState.timer = setTimeout(() => loadDeletionLog(true), 200);

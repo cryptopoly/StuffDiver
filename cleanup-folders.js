@@ -3,14 +3,47 @@
 // recognised by a marker on disk, never by its name alone, and the same
 // classifier runs at scan time and again at delete time.
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 
 const RECENT_DAYS = 14;
 const MANY_FILES = 50000;
 const WALK_ENTRY_CAP = 1000000;
 
-const exists = (p, fsx) => { try { return fsx.lstatSync(p).isFile(); } catch (e) { return false; } };
-const anyFile = (dir, names, fsx) => names.some(n => exists(path.join(dir, n), fsx));
+// Marker lookups compare EXACT, case-sensitive names read from the directory listing,
+// so PACKAGE.JSON never counts (on any filesystem) and a symlinked marker is not trusted.
+const entriesOf = (dir, fsx) => { try { return fsx.readdirSync(dir, { withFileTypes: true }); } catch (e) { return []; } };
+const anyFile = (dir, names, fsx) => entriesOf(dir, fsx).some(e => names.includes(e.name) && e.isFile());
+const exists = (p, fsx) => anyFile(path.dirname(p), [path.basename(p)], fsx);
+const LOCKFILES = ['package-lock.json', 'yarn.lock', 'pnpm-lock.yaml', 'bun.lock', 'bun.lockb'];
+const VENV_ENTRIES = new Set(['bin', 'Scripts', 'lib', 'Lib', 'lib64', 'include', 'Include', 'share', 'pyvenv.cfg', '.gitignore', 'CACHEDIR.TAG', '.gitkeep']);
+
+// Locations where a matching folder belongs to an installed tool/app/system, or
+// where a mistake is too costly. Path-based, so it needs no filesystem access.
+function blockedLocation(dir, opts = {}) {
+  const uid = opts.uid !== undefined ? opts.uid : (process.getuid ? process.getuid() : null);
+  const home = (opts.home || os.homedir()).split(path.sep).join('/').replace(/\/+$/, '').toLowerCase();
+  const norm = dir.split(path.sep).join('/').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+  const segs = norm.split('/').filter(Boolean);
+  const parentSegs = segs.slice(0, -1);
+  const parent = norm.slice(0, norm.lastIndexOf('/')) || '/';
+  if (parentSegs.includes('node_modules')) return 'is inside another node_modules (an installed package, not your project)';
+  if (/(^|\/)lib\/node_modules$/.test(norm)) return 'is a global npm install location';
+  const tool = parentSegs.find(x => /^(\.nvm|\.volta|\.fnm|\.asdf|\.pyenv|pyenv-win|\.sdkman|\.rustup|\.cargo|\.conda|\.cursor|\.windsurf|\.vscode.*|pipx|venvs|miniconda\d*|anaconda\d*|miniforge\d*|mambaforge)$/.test(x));
+  if (tool) return `is inside ${tool}, which holds installed tools`;
+  for (let i = 0; i < segs.length - 1; i++) {
+    if (segs[i].endsWith('.app') && segs[i + 1] === 'contents') return 'is inside an application bundle';
+    if (segs[i] === 'appdata' && segs[i + 1] === 'local' && segs[i + 2] === 'programs') return 'is inside an installed Windows program';
+    if (segs[i] === 'appdata' && segs[i + 1] === 'roaming' && segs[i + 2] === 'npm') return 'is a global npm install location';
+  }
+  if (/^[a-z]:\/(program files( \(x86\))?|programdata|windows)(\/|$)/.test(norm)) return 'is inside a Windows system or program folder';
+  for (const r of ['/opt', '/usr', '/srv', '/var/www', '/snap', '/lib', '/lib64', '/var/lib']) {
+    if (norm === r || norm.startsWith(r + '/')) return `is under ${r}, which holds system or server software`;
+  }
+  if (parent === home || /^(\/users\/[^/]+|\/home\/[^/]+|[a-z]:\/users\/[^/]+|\/root)$/.test(parent)) return 'sits directly in a user home folder, not in a project';
+  if (uid === 0 && !/^(\/root|\/home\/|\/users\/|[a-z]:\/users\/)/.test(norm)) return 'is outside home folders and this app is running as root/administrator';
+  return null;
+}
 
 // Each kind: name test (cheap, used to pick candidates from the scan list) and
 // marker test (structural, run against the real filesystem).
@@ -18,16 +51,16 @@ const KINDS = [
   {
     id: 'node_modules', label: 'node_modules', icon: '\u{1F4E6}',
     name: n => n === 'node_modules',
-    marker: (d, fsx) => exists(path.join(path.dirname(d), 'package.json'), fsx),
-    reason: 'node_modules next to package.json',
+    marker: (d, fsx) => anyFile(path.dirname(d), ['package.json'], fsx) && anyFile(path.dirname(d), LOCKFILES, fsx),
+    reason: 'node_modules next to package.json and a lockfile (a project you installed, not a shipped package)',
     restore: 'Reinstall with npm install (or yarn / pnpm install). Restoring from the trash also works.'
   },
   {
     id: 'pycache', label: 'Python bytecode cache', icon: '\u{1F40D}',
     name: n => n === '__pycache__',
     marker: (d, fsx) => {
-      const entries = fsx.readdirSync(d);
-      return entries.length > 0 && entries.every(e => /\.py[co]$/i.test(e));
+      const entries = fsx.readdirSync(d, { withFileTypes: true });
+      return entries.length > 0 && entries.every(e => e.isFile() && /\.py[co]$/.test(e.name));
     },
     reason: '__pycache__ containing only .pyc/.pyo files',
     restore: 'Python rebuilds it automatically the next time the code runs.'
@@ -85,8 +118,11 @@ const KINDS = [
     // Any name: recognised by the pyvenv.cfg file Python writes into every virtualenv.
     id: 'venv', label: 'Python virtual environment', icon: '\u{1F40D}',
     name: () => false, byMarkerFile: 'pyvenv.cfg', defaultOff: true,
-    marker: (d, fsx) => exists(path.join(d, 'pyvenv.cfg'), fsx),
-    reason: 'virtualenv (contains pyvenv.cfg)',
+    marker: (d, fsx) => {
+      const es = entriesOf(d, fsx);
+      return es.some(e => e.name === 'pyvenv.cfg' && e.isFile()) && es.every(e => VENV_ENTRIES.has(e.name));
+    },
+    reason: 'virtualenv (pyvenv.cfg and only standard venv folders, no project files)',
     restore: 'Recreate with python -m venv and reinstall your requirements. Anything installed by hand is lost.'
   }
 ];
@@ -100,6 +136,8 @@ function classifyFolder(dir, fsx = fs) {
   try { st = fsx.lstatSync(dir); } catch (e) { return { refused: 'folder no longer exists' }; }
   if (st.isSymbolicLink()) return { refused: 'is a symlink or junction, not a real folder' };
   if (!st.isDirectory()) return { refused: 'is not a folder' };
+  const blocked = blockedLocation(dir);
+  if (blocked) return { refused: blocked };
   const base = path.basename(dir);
   for (const k of KINDS) {
     const named = k.name(base) || k.byMarkerFile;
@@ -202,4 +240,4 @@ function findCandidates(files, scanRoot, ci, fsx = fs) {
   return [...owners.values()];
 }
 
-module.exports = { KINDS, CANDIDATE_NAMES, RECENT_DAYS, MANY_FILES, classifyFolder, inspectFolder, dedupeNested, findCandidates, isInside };
+module.exports = { blockedLocation, KINDS, CANDIDATE_NAMES, RECENT_DAYS, MANY_FILES, classifyFolder, inspectFolder, dedupeNested, findCandidates, isInside };

@@ -121,7 +121,7 @@ test('smart cleanup scans the full file list (incl. Windows-style separators)', 
     await page.locator('#tools-btn').click();
     await page.locator('[data-tool="cleanup"]').click();
     await expect(page.locator('#cleanup-body')).toContainText('node_modules');
-  }, { prepare: (fx) => fs.writeFileSync(path.join(fx.root, 'package.json'), '{}') });
+  }, { prepare: (fx) => { fs.writeFileSync(path.join(fx.root, 'package.json'), '{}'); fs.writeFileSync(path.join(fx.root, 'package-lock.json'), '{}'); } });
 });
 
 test('duplicate finder reports the exact copy as a gold match', async () => {
