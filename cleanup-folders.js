@@ -40,11 +40,22 @@ function safeText(v, max = 160) {
 }
 let elevated = false; // set by the app: Windows Administrator / POSIX root
 function setElevated(v) { elevated = !!v; }
-const CLOUD_RE = /^(cloudstorage|mobile documents|icloud drive.*|iclouddrive|dropbox.*|google drive.*|googledrive|my drive|box|box sync|onedrive.*|nextcloud.*|owncloud.*|pcloud.*|mega.*|synologydrive.*|syncthing.*|sync|seafile.*|creative cloud files.*|yandex\.disk.*|resilio.*|insync.*|tresorit.*|spideroak.*|backblaze.*|idrive.*)$/;
+const CLOUD_RE = /^(cloudstorage|mobile documents|icloud drive.*|iclouddrive|dropbox.*|google drive.*|googledrive|my drive|box|box sync|onedrive.*|sharepoint.*|nextcloud.*|owncloud.*|pcloud.*|mega.*|synologydrive.*|syncthing.*|sync|seafile.*|creative cloud files.*|yandex\.disk.*|resilio.*|insync.*|tresorit.*|spideroak.*|backblaze.*|idrive.*)$/;
 // Reason if any path component is a cloud-synced root (trashing there deletes the cloud copy everywhere).
+const CLOUD_REASON = 'is a cloud-synced folder: deleting here deletes it everywhere';
+const slashNorm = (v) => String(v).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+// OneDrive/SharePoint libraries live in tenant-named folders: the sync client publishes their real roots in the environment.
+function cloudEnvRoots() {
+  const out = [];
+  for (const [k, v] of Object.entries(process.env)) if (/^onedrive/i.test(k) && v) out.push(slashNorm(v));
+  return out;
+}
 function cloudSyncedReason(p) {
-  const segs = String(p).replace(/\\/g, '/').toLowerCase().split('/').filter(Boolean);
-  return segs.some(x => CLOUD_RE.test(x)) ? 'is a cloud-synced folder: deleting here deletes it everywhere' : null;
+  const norm = slashNorm(p);
+  const segs = norm.split('/').filter(Boolean);
+  if (segs.some(x => CLOUD_RE.test(x) || / - (shared )?documents$/.test(x))) return CLOUD_REASON;   // "Team Site - Documents"
+  if (cloudEnvRoots().some(r => norm === r || norm.startsWith(r + '/'))) return CLOUD_REASON;
+  return null;
 }
 const TRASH_RE_TEST = (norm, segs) => segs.some(x => x === '$recycle.bin' || x === 'recycler' || /^\.trash(-\d+)?$/.test(x) || x === '.trashes') || /\/\.local\/share\/trash(\/|$)/.test(norm);
 function trashReason(p) {
@@ -74,7 +85,7 @@ function blockedLocation(dir, opts = {}) {
   const parent = norm.slice(0, norm.lastIndexOf('/')) || '/';
   if (parentSegs.includes('node_modules')) return 'is inside another node_modules (an installed package, not your project)';
   if (/(^|\/)lib\/node_modules$/.test(norm)) return 'is a global npm install location';
-  const tool = parentSegs.find(x => /^(\.nvm|\.volta|\.fnm|\.asdf|\.pyenv|pyenv-win|\.sdkman|\.rustup|\.cargo|\.conda|\.cursor|\.windsurf|\.vscode.*|pipx|venvs|miniconda\d*|anaconda\d*|miniforge\d*|mambaforge)$/.test(x));
+  const tool = parentSegs.find(x => /^(\.nvm|\.volta|\.fnm|\.asdf|\.pyenv|pyenv-win|\.sdkman|\.rustup|\.cargo|\.conda|\.cursor|\.windsurf|\.vscode.*|scoop|chocolatey|choco|fnm_multishells|nodejs|winget|pipx|venvs|miniconda\d*|anaconda\d*|miniforge\d*|mambaforge)$/.test(x));
   if (tool) return `is inside ${tool}, which holds installed tools`;
   for (let i = 0; i < segs.length - 1; i++) {
     if (segs[i].endsWith('.app') && segs[i + 1] === 'contents') return 'is inside an application bundle';
@@ -95,7 +106,7 @@ function blockedLocation(dir, opts = {}) {
   const inTmp = tmps.some(t => norm.startsWith(t + '/'));
   // Already-trashed items are never candidates (the Recycle Bin / Trash presets handle them as files).
   if (TRASH_RE_TEST(norm, segs)) return 'is already in a Trash or Recycle Bin';
-  if (segs.some(x => CLOUD_RE.test(x))) return 'is a cloud-synced folder: deleting here deletes it everywhere';
+  if (cloudSyncedReason(dir)) return CLOUD_REASON;
   if (/^\/(volumes|mnt|media|run\/media)\//.test(norm) || /^(\\\\|\/\/)/.test(dir)) return 'is on an external, network or mounted volume';
   if (segs.some(x => /^(linuxbrew|\.linuxbrew|homebrew|cellar)$/.test(x))) return 'is inside a Homebrew install';
   if (!inTmp && segs.includes('appdata')) return 'is inside AppData (installed apps and settings), not a project';
@@ -305,7 +316,7 @@ function getMountPoints() {
 // Reason if `dir` is, or contains, a mount point other than "/" (checked for each given spelling of the path).
 function mountConflict(dirs, mounts, ci) {
   if (mounts === null) return 'cannot be checked for mount points (mount table unreadable)';
-  const norm = (v) => { const x = v.replace(/\/+$/, '') || '/'; return ci ? x.toLowerCase() : x; };
+  const norm = (v) => { const x = String(v).replace(/\\/g, '/').replace(/\/+$/, '') || '/'; return ci ? x.toLowerCase() : x; };
   for (const d of dirs.filter(Boolean).map(norm)) {
     for (const m of mounts) {
       if (m === '/') continue;
@@ -401,12 +412,13 @@ function projectSignals(dir, kindId, opts = {}) {
   // A running process whose working directory is inside the folder (best effort).
   if (Array.isArray(opts.cwds)) {
     const ci = process.platform !== 'linux';
-    const d = ci ? dir.toLowerCase() : dir;
-    const hit = opts.cwds.find(c => { const x = ci ? c.toLowerCase() : c; return x === d || x.startsWith(d + path.sep); });
+    const nz = (v) => { const x = String(v).replace(/\\/g, '/').replace(/\/+$/, ''); return ci ? x.toLowerCase() : x; };
+    const d = nz(dir);
+    const hit = opts.cwds.find(c => { const x = nz(c); return x === d || x.startsWith(d + '/'); });
     if (hit) sev(`a running process is using this folder (working directory ${hit})`);
     else {
-      const u = ci ? up.toLowerCase() : up;
-      const proj = opts.cwds.find(c => { const x = ci ? c.toLowerCase() : c; return x === u || x.startsWith(u + path.sep); });
+      const u = nz(up);
+      const proj = opts.cwds.find(c => { const x = nz(c); return x === u || x.startsWith(u + '/'); });
       if (proj) out.warnings.push(`a running process has its working directory in this project (${proj})`);
     }
   } else if (opts.cwds === null) out.warnings.push('could not check for running processes');
@@ -427,7 +439,8 @@ function runningCwds() {
   } catch (e) {
     if (e && e.stdout) return String(e.stdout).split('\n').filter(l => l.startsWith('n/')).map(l => l.slice(1)); // lsof exits 1 when some processes are unreadable
   }
-  return null;
+  if (process.platform === 'linux' || process.platform === 'darwin') return null;   // supported but failed
+  return undefined;                                                                  // unsupported here: nothing to warn about
 }
 
 function isInside(child, parent, ci) {
@@ -523,4 +536,4 @@ function findCandidates(files, scanRoot, ci, fsx = fs, mounts = getMountPoints()
   return [...owners.values()];
 }
 
-module.exports = { installedAppReason, safeText, projectSignals, runningCwds, lockfileProblem, npmrcProblem, setElevated, cloudSyncedReason, trashReason, VCS_NAMES, parseMountinfo, parseMacMount, getMountPoints, mountConflict, deviceDiffersFromParent, blockedLocation, KINDS, CANDIDATE_NAMES, RECENT_DAYS, MANY_FILES, classifyFolder, inspectFolder, dedupeNested, findCandidates, isInside };
+module.exports = { CLOUD_REASON, installedAppReason, safeText, projectSignals, runningCwds, lockfileProblem, npmrcProblem, setElevated, cloudSyncedReason, trashReason, VCS_NAMES, parseMountinfo, parseMacMount, getMountPoints, mountConflict, deviceDiffersFromParent, blockedLocation, KINDS, CANDIDATE_NAMES, RECENT_DAYS, MANY_FILES, classifyFolder, inspectFolder, dedupeNested, findCandidates, isInside };

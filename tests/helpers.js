@@ -4,8 +4,23 @@ const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
 
-// Folder cleanup refuses locations outside home folders when running as root, so root fixtures live under $HOME.
-function fixtureParent() { return process.getuid && process.getuid() === 0 ? os.homedir() : os.tmpdir(); }
+// Folder cleanup refuses locations outside user folders (and outside home folders when running as root),
+// so fixtures must live somewhere a real project could: under the user's profile, never under AppData/Temp.
+function fixtureParent() {
+  if (process.platform === 'win32') {
+    const base = (dir) => { const d = path.join(dir, 'StuffDiverTestFixtures'); fs.mkdirSync(d, { recursive: true }); return d; };
+    const home = os.homedir();
+    if (!/[\\/]windows[\\/]|systemprofile/i.test(home)) return base(home);
+    // Running as SYSTEM: use the first real user profile (not Public/Default).
+    const usersDir = path.join(process.env.SystemDrive ? process.env.SystemDrive + '\\' : 'C:\\', 'Users');
+    try {
+      const u = fs.readdirSync(usersDir, { withFileTypes: true }).find(e => e.isDirectory() && !/^(public|default.*|all users)$/i.test(e.name));
+      if (u) return base(path.join(usersDir, u.name));
+    } catch (e) { /* fall through */ }
+    return os.tmpdir();   // no suitable profile: fixtures will be refused by the product, which the failures will make obvious
+  }
+  return process.getuid && process.getuid() === 0 ? os.homedir() : os.tmpdir();
+}
 
 // Build a small fixture tree with known sizes.
 function makeFixture() {
@@ -29,22 +44,29 @@ function makeFixture() {
 
 async function launch(folder, extraEnv = {}) {
   const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'sd-userdata-'));
-  const app = await electron.launch({
-    args: [path.join(__dirname, '..'), ...(process.platform === 'linux' ? ['--no-sandbox'] : [])],
-    env: {
-      ...process.env,
-      STUFFDIVER_E2E: '1',
-      STUFFDIVER_USER_DATA: userData,
-      STUFFDIVER_E2E_FOLDER: folder || '',
-      ...extraEnv
-    }
-  });
-  const page = await app.firstWindow();
-  await page.waitForLoadState('domcontentloaded');
-  return { app, page, userData };
+  const start = async () => {
+    const app = await electron.launch({
+      args: [path.join(__dirname, '..'), ...(process.platform === 'linux' ? ['--no-sandbox'] : [])],
+      timeout: 60000,
+      env: {
+        ...process.env,
+        STUFFDIVER_E2E: '1',
+        STUFFDIVER_USER_DATA: userData,
+        STUFFDIVER_E2E_FOLDER: folder || '',
+        ...extraEnv
+      }
+    });
+    try {
+      const page = await Promise.race([app.firstWindow(), new Promise((_, rej) => setTimeout(() => rej(new Error('firstWindow timeout')), 45000))]);
+      await page.waitForLoadState('domcontentloaded');
+      return { app, page };
+    } catch (e) { await app.close().catch(() => {}); throw e; }
+  };
+  let r;
+  try { r = await start(); } catch (e) { r = await start(); }   // one retry: first-window start-up can be slow on busy VMs
+  return { app: r.app, page: r.page, userData };
 }
 
-// Developer-folder cleanup is off by default; most tests need it on (pass { dev: false } to keep the default).
 async function scanViaUi(page, { dev = true } = {}) {
   await page.locator('#empty-state-btn').click();
   await expect(page.locator('#stats')).toContainText('Files:', { timeout: 30000 });

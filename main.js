@@ -394,7 +394,7 @@ const CLEANUP_PATTERNS = [
   { id: 'junkdirs', label: 'Spotlight index & thumbnail caches', icon: '\u{1F5C2}', re: /(\/\.Spotlight-V100\/|\/\.cache\/thumbnails\/)/ },
   // desktop.ini names Documents/Start Menu folders and sets their icons: never pre-ticked, never in special folders.
   { id: 'desktopini', label: 'desktop.ini files', icon: '\u{1F5D1}', re: /(^|\/)desktop\.ini$/i,
-    skip: (full) => /\/(Documents|My Documents|Start Menu|Desktop|Pictures|Music|Videos|Downloads|Favorites|Links|Saved Games|Searches|Contacts|AppData|Windows|Program Files[^/]*|ProgramData)\//i.test(full) || /\/(Users|home)\/[^/]+\/desktop\.ini$/i.test(full) },
+    skip: (full, ctx) => /\/(Documents|My Documents|Start Menu|Desktop|Pictures|Music|Videos|Downloads|Favorites|Links|Saved Games|Searches|Contacts|AppData|Windows|Program Files[^/]*|ProgramData)\//i.test(ctx.belowTemp(full)) || /\/(Users|home)\/[^/]+\/desktop\.ini$/i.test(full) },
   // Pre-ticked presets: whole-name anchors only, so "MyThumbs.dbs" or "x.Spotlight.project" can never match.
   { id: 'dsstore', label: '.DS_Store files', icon: '\u{1F47B}', re: /(^|\/)\.DS_Store$/ },
   { id: 'thumbs', label: 'Thumbs.db files', icon: '\u{1F5D1}', re: /(^|\/)Thumbs\.db$/i }
@@ -408,7 +408,11 @@ handleTrusted('cleanup-scan', async () => {
   for (const f of lastScanAllFiles) {
     if (f.name === 'CURRENT' || (f.name && f.name.startsWith('MANIFEST-'))) dbDirs.add(f.path.replace(/\\/g, '/').split('/').slice(0, -1).join('/'));
   }
-  const ctx = { dbDirs };
+  // %TEMP% sits inside AppData on Windows: judge special-folder names only on the part below the temp folder.
+  const tmpPrefixes = [];
+  for (const t of [require('os').tmpdir(), (() => { try { return fs.realpathSync.native(require('os').tmpdir()); } catch (e) { return ''; } })()]) if (t) tmpPrefixes.push(t.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase() + '/');
+  const belowTemp = (full) => { const l = full.toLowerCase(); const pre = tmpPrefixes.find(t => l.startsWith(t)); return pre ? '/' + full.slice(pre.length) : full; };
+  const ctx = { dbDirs, belowTemp };
   const pathCap = (E2E && global.__e2ePathCap) || CLEANUP_PATH_CAP; // E2E-only override so tests can exercise the cap cheaply
   for (const f of lastScanAllFiles) {
     if (f.cloudStatus === 'icloud-only') continue;
@@ -917,7 +921,7 @@ handleTrusted('delete-files', async (event, filePaths, source) => {
         removedPaths.push(fp);
         rec = { ...entry, status: 'removed', reason: 'the system reported an error but the file is gone; it may not be in the Trash (' + osErrorReason(e) + ')' };
       } else {
-        rec = { ...entry, status: 'failed', finalState: 'untouched', reason: osErrorReason(e) };
+        rec = { ...entry, status: 'failed', finalState: 'untouched', reason: await trashFailureReason(e, fp) };
         failures.push({ path: fp, reason: rec.reason, state: 'failed', finalState: 'untouched' });
       }
     }
@@ -964,6 +968,34 @@ const osErrorReason = (e) => {
   return (code && !String(e.message).includes(code) ? code + ': ' : '') + (e.message || String(e));
 };
 const devFoldersOn = () => loadSettings().developerFolderCleanup === true;
+// Windows' trash API only says "Operation was aborted": find out cheaply WHY (first file that cannot be opened for writing).
+async function diagnoseTrashFailure(p) {
+  const started = Date.now();
+  const generic = 'a file in the folder is open in another program, or you lack permission';
+  try {
+    const st = fs.lstatSync(p);
+    const stack = [p]; let budget = 5000;
+    while (stack.length && budget > 0 && Date.now() - started < 1500) {
+      const cur = stack.pop();
+      let ents;
+      if (cur === p && !st.isDirectory()) ents = [{ name: '', isDirectory: () => false, isSymbolicLink: () => false }];
+      else { try { ents = fs.readdirSync(cur, { withFileTypes: true }); } catch (e) { return `${e.code || 'error'} reading ${cur}`; } }
+      for (const e of ents) {
+        if (--budget < 0) break;
+        const full = e.name ? path.join(cur, e.name) : cur;
+        if (e.isSymbolicLink()) continue;
+        if (e.isDirectory()) { stack.push(full); continue; }
+        try { fs.closeSync(fs.openSync(full, 'r+')); } catch (er) { if (['EBUSY', 'EPERM', 'EACCES'].includes(er.code)) return `${er.code}: ${full} cannot be opened for writing (in use or no permission)`; }
+      }
+      if (cur !== p || st.isDirectory()) await new Promise(r => setImmediate(r));
+    }
+  } catch (e) { /* fall through */ }
+  return generic;
+}
+const trashFailureReason = async (e, p) => {
+  const base = osErrorReason(e);
+  return (process.platform === 'win32' || !(e && e.code)) ? `${base} (${await diagnoseTrashFailure(p)})` : base;
+};
 const FOLDER_BATCH_CAP = 500;
 const FOLDER_SCAN_CAP = 2000;
 
@@ -1153,7 +1185,7 @@ handleTrusted('delete-folders', async (event, folderPaths, source) => {
               rec = { ...entry, status: 'removed', reason: 'the system reported an error but the folder is gone; it may not be in the Trash (' + osErrorReason(e) + ')' };
             } else {
               failed.push(c.path);
-              rec = { ...entry, status: 'failed', finalState: 'untouched', reason: osErrorReason(e) };
+              rec = { ...entry, status: 'failed', finalState: 'untouched', reason: await trashFailureReason(e, c.path) };
               failures.push({ path: c.path, reason: rec.reason, state: 'failed', finalState: 'untouched' });
             }
           }

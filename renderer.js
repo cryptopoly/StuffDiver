@@ -3810,7 +3810,7 @@
         const moved = (result && result.deleted) || 0;
         let msg = cleanupSummary(result, 'folder');
         if (result && result.logError) msg += (msg ? '\n' : '') + result.logError;
-        if (result && result.error && !moved) { showNotice(msg ? result.error + '\n' + msg : result.error, !result.cancelled); return; }
+        if (result && result.error && !moved && !(result.removed > 0)) { showNotice(result.cancelled && msg ? msg : (msg ? result.error + '\n' + msg : result.error), !result.cancelled); return; }
         if (moved > 0 || (result && result.removed > 0)) {
           const goneAll = (result.deletedPaths || []).concat(result.removedPaths || []);
           const movedSet = new Set(goneAll);

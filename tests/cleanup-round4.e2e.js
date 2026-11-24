@@ -36,7 +36,7 @@ const catPaths = (cats, root) => Object.fromEntries(cats.map(c => [c.id, c.paths
 
 const CLOUD = 'is a cloud-synced folder: deleting here deletes it everywhere';
 test('L1/R8. every known sync client folder is refused (any path component, any case)', () => {
-  const o = { uid: 501, home: '/Users/bob', tmp: '/nope' };
+  const o = { win: false, uid: 501, home: '/Users/bob', tmp: '/nope' };
   for (const n of ['MEGA', 'MEGAsync', 'Nextcloud', 'ownCloud', 'pCloudDrive', 'pCloud Drive', 'Sync', 'Seafile', 'Syncthing', 'Resilio Sync', 'Insync', 'Tresorit', 'SpiderOak', 'iDrive', 'Backblaze', 'SynologyDrive', 'Creative Cloud Files', 'Yandex.Disk', 'iCloudDrive', 'iCloud Drive', 'Google Drive', 'OneDrive - Corp', 'Dropbox (Personal)'])
     expect(cf.blockedLocation(`/Users/bob/${n}/proj/node_modules`, o), n).toBe(CLOUD);
   expect(cf.blockedLocation('/Users/bob/MEGA/deep/er/proj/node_modules', o)).toBe(CLOUD);
@@ -301,6 +301,7 @@ test('L2/L5. cancelling logs every unmoved item as skipped, and is shown inline 
     await page.locator('#cleanup-folders-execute').click();   // Cancel
     await expect(page.locator('#cleanup-result')).toContainText(/Cancelled\. Moved 0 folders to the Trash, failed 0, skipped 3/, { timeout: 20000 });
     await expect(page.locator('#cleanup-result')).toContainText('Failed and skipped items were not changed');
+    expect((await page.locator('#cleanup-result').innerText()).match(/Cancelled\./g)).toHaveLength(1);   // said once, not twice
     expect(dialogs).toEqual([]);
     const log = readLog(userData).filter(e => e.type === 'folder');
     expect(log.map(e => e.status)).toEqual(['skipped', 'skipped', 'skipped']);
@@ -319,8 +320,9 @@ test('L2/L5. cancelling logs every unmoved item as skipped, and is shown inline 
 test('L2. a cancel that lands before the pre-move re-check is logged as skipped, never as "blocked"', async () => {
   await withApp((r) => { proj(r, 'a'); proj(r, 'b'); }, async ({ app, page, root, userData }) => {
     await app.evaluate(() => { global.__e2eBeforeTrash = () => new Promise(r => setTimeout(r, 1200)); });
+    await page.evaluate(() => { window.__prog = []; window.api.onFolderDeleteProgress(d => window.__prog.push(d)); });
     const p = page.evaluate((x) => window.api.deleteFolders(x, 'test'), [path.join(root, 'a/node_modules'), path.join(root, 'b/node_modules')]);
-    await new Promise(r => setTimeout(r, 400));
+    await expect.poll(() => page.evaluate(() => window.__prog.some(q => q.phase === 'trash')), { timeout: 30000, intervals: [50] }).toBe(true);   // (waitForFunction is blocked by the page CSP)
     await page.evaluate(() => window.api.cancelFolderDelete());
     const res = await p;
     expect(res.cancelled).toBe(true);
@@ -336,8 +338,9 @@ test('L2. cancelling during verification logs every requested folder as skipped'
     // slow the verify phase so the cancel lands inside it
     await app.evaluate(() => { global.__e2eCwds = () => { const t = Date.now(); while (Date.now() - t < 150) { /* busy wait */ } return []; }; });
     const paths = [0, 1, 2, 3, 4, 5].map(i => path.join(root, 'p' + i, 'node_modules'));
+    await page.evaluate(() => { window.__prog = []; window.api.onFolderDeleteProgress(d => window.__prog.push(d)); });
     const p = page.evaluate((x) => window.api.deleteFolders(x, 'test'), paths);
-    await new Promise(r => setTimeout(r, 300));
+    await expect.poll(() => page.evaluate(() => window.__prog.some(q => q.phase === 'verify' && q.done >= 1)), { timeout: 60000, intervals: [50] }).toBe(true);   // verification is under way
     await page.evaluate(() => window.api.cancelFolderDelete());
     const res = await p;
     expect(res).toMatchObject({ cancelled: true, deleted: 0, skipped: 6 });

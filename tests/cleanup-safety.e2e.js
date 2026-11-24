@@ -59,8 +59,8 @@ test.describe('1. node_modules of installed tools and apps is never offered', ()
       ['/usr/local/lib/node_modules/x/node_modules', /node_modules|\/usr/], ['/snap/x/current/node_modules', /under \/snap/],
       ['C:\\Program Files\\App\\resources\\app\\node_modules', /Windows system or program folder/],
       ['C:\\Users\\bob\\AppData\\Roaming\\npm\\node_modules', /global npm/]
-    ]) expect(cf.blockedLocation(p, { uid: 501, home: '/Users/bob' }), p).toMatch(re);
-    expect(cf.blockedLocation('/Users/bob/work/app/node_modules', { uid: 501, home: '/Users/bob' })).toBeNull();
+    ]) expect(cf.blockedLocation(p, { win: false, uid: 501, home: '/Users/bob' }), p).toMatch(re);
+    expect(cf.blockedLocation('/Users/bob/work/app/node_modules', { win: false, uid: 501, home: '/Users/bob' })).toBeNull();
   });
   test('a lockfile is required next to package.json', () => {
     mk(root, 'nolock/package.json', '{}'); mk(root, 'nolock/node_modules/x/i.js');
@@ -82,7 +82,7 @@ test('3. a project folder turned into a venv (python -m venv .) and tool-managed
     mk(root, 'withdoc/pyvenv.cfg', ''); mk(root, 'withdoc/lib/x'); mk(root, 'withdoc/thesis.docx');
     expect(cls(path.join(root, 'withdoc'))).toBeNull();
     for (const p of ['/h/.local/pipx/venvs/black', '/h/.pyenv/versions/3.11/envs/x', '/h/miniconda3/envs/ml', '/h/anaconda3/envs/ml'])
-      expect(cf.blockedLocation(p, { uid: 501, home: '/h' }), p).toMatch(/holds installed tools/);
+      expect(cf.blockedLocation(p, { win: false, uid: 501, home: '/h' }), p).toMatch(/holds installed tools/);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -98,8 +98,8 @@ test('4. folders directly in a home folder are not offered (~/.gradle, ~/node_mo
     await scanViaUi(page);
     const scan = await page.evaluate(() => window.api.cleanupFoldersScan());
     expect(scan.candidates.map(c => c.path)).toEqual([path.join(home, 'work/app/node_modules')]);
-    expect(cf.blockedLocation(path.join(home, '.gradle'), { uid: 501, home })).toBe('sits directly in a user home folder, not in a project');
-    expect(cf.blockedLocation('/Users/other/node_modules', { uid: 501, home })).toBe('sits directly in a user home folder, not in a project');
+    expect(cf.blockedLocation(path.join(home, '.gradle'), { win: false, uid: 501, home })).toBe('sits directly in a user home folder, not in a project');
+    expect(cf.blockedLocation('/Users/other/node_modules', { win: false, uid: 501, home })).toBe('sits directly in a user home folder, not in a project');
     // direct delete attempts are refused for the same reason, and the credentials file is protected
     const res = await del(page, [path.join(home, 'node_modules')]);
     expect(res.deleted).toBe(0);
@@ -117,12 +117,12 @@ test('4. folders directly in a home folder are not offered (~/.gradle, ~/node_mo
 });
 
 test('5. running as root refuses folders outside home folders; /opt /srv /var/www never offered', () => {
-  expect(cf.blockedLocation('/data/proj/node_modules', { uid: 0, home: '/root' })).toBe('is outside home folders and this app is running as root/administrator');
-  expect(cf.blockedLocation('/data/proj/node_modules', { uid: 501, home: '/Users/a' })).toBeNull();
-  expect(cf.blockedLocation('/home/alice/proj/node_modules', { uid: 0, home: '/root' })).toBeNull();
-  expect(cf.blockedLocation('/root/proj/node_modules', { uid: 0, home: '/root' })).toBeNull();
+  expect(cf.blockedLocation('/data/proj/node_modules', { win: false, uid: 0, home: '/root' })).toBe('is outside home folders and this app is running as root/administrator');
+  expect(cf.blockedLocation('/data/proj/node_modules', { win: false, uid: 501, home: '/Users/a' })).toBeNull();
+  expect(cf.blockedLocation('/home/alice/proj/node_modules', { win: false, uid: 0, home: '/root' })).toBeNull();
+  expect(cf.blockedLocation('/root/proj/node_modules', { win: false, uid: 0, home: '/root' })).toBeNull();
   for (const p of ['/opt/app/node_modules', '/srv/app/node_modules', '/var/www/app/node_modules', '/usr/local/app/node_modules'])
-    expect(cf.blockedLocation(p, { uid: 501, home: '/Users/a' }), p).toMatch(/holds system or server software/);
+    expect(cf.blockedLocation(p, { win: false, uid: 501, home: '/Users/a' }), p).toMatch(/holds system or server software/);
 });
 
 test('6. __pycache__ must hold only regular .pyc files (no sneaky.pyc folder, no links)', () => {
@@ -407,7 +407,7 @@ test('R3-1/6. file presets use whole-name anchors and offer only clearly regener
 });
 
 test('R3-2/5. only project areas are offered: tool, app-data, cloud and volume locations are refused with exact reasons', async () => {
-  const o = { uid: 501, home: '/Users/bob', tmp: '/nonexistent-tmp' };
+  const o = { win: false, uid: 501, home: '/Users/bob', tmp: '/nonexistent-tmp' };
   const hidden = 'is inside a hidden folder in your home (tools and settings live there)';
   const lib = 'is inside your Library folder (app data), not a project';
   const cloud = 'is a cloud-synced folder: deleting here deletes it everywhere';
@@ -452,7 +452,7 @@ test('R3-3. a scan through a symlink cannot hide a blocked location (real path i
   try {
     await scanViaUi(page);
     const typed = path.join(root, 'link/p/node_modules');
-    expect(cf.blockedLocation(typed, { uid: 501 })).toBeNull();   // the typed path alone looks fine
+    expect(cf.blockedLocation(typed, { win: false, uid: 501 })).toBeNull();   // the typed path alone looks fine
     const scan = await page.evaluate(() => window.api.cleanupFoldersScan());
     expect(scan.candidates.map(c => c.path)).not.toContain(typed);
     const res = await del(page, [typed]);
@@ -477,8 +477,10 @@ test('R3-7. folder cleanup is cancellable and nothing is moved when cancelled', 
   await withApp((r) => { proj(r, 'a'); proj(r, 'b'); }, {}, async ({ app, page, root }) => {
     expect(await page.evaluate(() => window.api.cancelFolderDelete())).toBe(false);   // idle
     await app.evaluate(() => { global.__e2eBeforeTrash = () => new Promise(r => setTimeout(r, 1500)); });
+    await page.evaluate(() => { window.__prog = []; window.api.onFolderDeleteProgress(d => window.__prog.push(d)); });
     const run = page.evaluate((p) => window.api.deleteFolders(p, 'test'), [path.join(root, 'a/node_modules'), path.join(root, 'b/node_modules')]);
-    await new Promise(r => setTimeout(r, 500));
+    // the page's CSP forbids waitForFunction (eval), so poll through evaluate: wait until the trash phase has started
+    await expect.poll(() => page.evaluate(() => window.__prog.some(p => p.phase === 'trash')), { timeout: 30000, intervals: [50] }).toBe(true);
     expect(await page.evaluate(() => window.api.cancelFolderDelete())).toBe(true);
     const res = await run;
     expect(res.deleted).toBe(0);
@@ -494,7 +496,7 @@ test('R3-8. there is no permanent-delete fallback anywhere in the delete handler
   const region = src.slice(a, b);
   expect(region).not.toMatch(/\b(rmSync|rmdirSync|unlinkSync|\.rm\(|\.unlink\(|\.rmdir\(|rimraf|emptyTrash)\b/);
   expect(region.match(/Recycle Bin \(Windows\); nothing is permanently deleted/g)).toHaveLength(2);
-  expect(region.match(/status: 'failed', finalState: 'untouched', reason: osErrorReason\(e\)/g)).toHaveLength(2);
+  expect(region.match(/status: 'failed', finalState: 'untouched', reason: await trashFailureReason\(e, /g)).toHaveLength(2);   // failure reasons carry the OS code / diagnosis
 });
 
 // ---- bind mounts (same st_dev, so only the OS mount table reveals them) ----
@@ -582,7 +584,7 @@ test('W3. on the system drive only user folders qualify; per-user apps and globa
 
 test('W4. anything already inside a Trash / Recycle Bin is never a candidate', async () => {
   const why = 'is already in a Trash or Recycle Bin';
-  const o = { uid: 501, home: '/Users/bob', tmp: '/nope' };
+  const o = { win: false, uid: 501, home: '/Users/bob', tmp: '/nope' };
   for (const p of ['C:\\$Recycle.Bin\\S-1-5-21-1\\$R1ABC\\.venv', '/Users/bob/.Trash/proj/node_modules', '/home/bob/.local/share/Trash/files/p/node_modules', '/mnt/usb/.Trash-1000/files/p/node_modules', '/Volumes/X/.Trashes/501/p/node_modules'])
     expect(cf.blockedLocation(p, o), p).toBe(why);
   await withApp((r) => { proj(r, '$Recycle.Bin/S-1-5-21/$R1ABC'); proj(r, '.Trash/old'); proj(r, 'real'); }, {}, async ({ page, root }) => {
