@@ -31,11 +31,14 @@ function runlist(runs) { // [{lcn,len}] absolute lcn
   return Buffer.concat(parts);
 }
 
-function attrNonResident({ type = 0x80, startVcn = 0, alloc, real, compressed, runs = [] }) {
+function attrNonResident({ type = 0x80, startVcn = 0, alloc, real, compressed, runs = [], name = '' }) {
   const rl = runlist(runs);
-  const b = Buffer.alloc(pad8(0x40 + (compressed !== undefined ? 8 : 0) + rl.length));
-  const runOff = 0x40 + (compressed !== undefined ? 8 : 0);
-  b.writeUInt32LE(type, 0); b.writeUInt32LE(b.length, 4); b[8] = 1; b[9] = 0;
+  const nameBytes = Buffer.from(name, 'utf16le');
+  const hdr = 0x40 + (compressed !== undefined ? 8 : 0);
+  const runOff = pad8(hdr + nameBytes.length);
+  const b = Buffer.alloc(pad8(runOff + rl.length));
+  b.writeUInt16LE(hdr, 0x0A); b[9] = name.length; nameBytes.copy(b, hdr);
+  b.writeUInt32LE(type, 0); b.writeUInt32LE(b.length, 4); b[8] = 1;
   u64(b, 0x10, startVcn); u64(b, 0x18, 0);
   b.writeUInt16LE(runOff, 0x20); b.writeUInt16LE(compressed !== undefined ? 4 : 0, 0x22);
   u64(b, 0x28, alloc); u64(b, 0x30, real); u64(b, 0x38, real);

@@ -141,6 +141,7 @@ async function scanNtfsVolume(volumeRoot, opts = {}) {
     const parentSeq = new Uint16Array(numRecords);
     const nameRank = new Uint8Array(numRecords);
     const alloc = new Float64Array(numRecords);
+    const wofAlloc = new Float64Array(numRecords); // WOF (Compact OS) payload lives in the named WofCompressedData stream
     const real = new Float64Array(numRecords);
     const mtime = new Float64Array(numRecords);
     const names = new Array(numRecords);
@@ -180,6 +181,11 @@ async function scanNtfsVolume(volumeRoot, opts = {}) {
         } else if (type === 0xC0 && nonRes === 0) { // $REPARSE_POINT: only symlinks/junctions are skipped (as the walk does)
           const tag = buf.readUInt32LE(c);
           if (tag === 0xA000000C || tag === 0xA0000003) flags[t] |= F_LINK;
+        } else if (type === 0x80 && nameLen === 17 && nonRes === 1 && u64(buf, a + 0x10) === 0 &&
+                   a + buf.readUInt16LE(a + 0x0A) + 34 <= aEnd &&
+                   buf.toString('utf16le', a + buf.readUInt16LE(a + 0x0A), a + buf.readUInt16LE(a + 0x0A) + 34) === 'WofCompressedData') {
+          // The walk's allocation (AllocationSize) counts this stream; without it WOF files look empty/cloud-only.
+          wofAlloc[t] = buf.readUInt16LE(a + 0x22) > 0 && len >= 0x48 ? u64(buf, a + 0x40) : u64(buf, a + 0x28);
         } else if (type === 0x80 && nameLen === 0) { // unnamed $DATA
           if (nonRes === 0) {
             real[t] = buf.readUInt32LE(a + 0x10);
@@ -267,7 +273,7 @@ async function scanNtfsVolume(volumeRoot, opts = {}) {
       if (p >= numRecords || !(flags[p] & F_USED) || seq[p] !== parentSeq[n]) { stats.orphans = (stats.orphans || 0) + 1; continue; }
       const dir = resolveDir(p, 0);
       if (dir === null) { stats.orphans = (stats.orphans || 0) + 1; continue; }
-      let disk = alloc[n];
+      let disk = alloc[n] + wofAlloc[n];
       let cloud = false;
       if (disk === 0 && real[n] > CLOUD_MIN_SIZE) cloud = true; // OneDrive / on-demand placeholder
       out.fullPaths.push(path.win32.join(dir, names[n]));

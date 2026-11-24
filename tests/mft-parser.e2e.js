@@ -33,6 +33,8 @@ function specs() {
     // sizes live in an extension record (attribute list case)
     { rec: 42, attrs: [S.stdInfo(MT), S.fileName(5, 1, 'ext.bin')] },
     { rec: 43, base: 42, baseSeq: 40, attrs: [data(65536, 60000)] }, // seq >= 32: a double-based u64 would corrupt the record number
+    // WOF / Compact OS file: unnamed $DATA is sparse with no clusters, payload is in the named WofCompressedData stream
+    { rec: 48, attrs: [S.stdInfo(MT), S.fileName(5, 1, 'wof.pak'), S.attrNonResident({ alloc: 1245184, real: 1232185, compressed: 0, runs: [] }), S.attrNonResident({ name: 'WofCompressedData', alloc: 397312, real: 396172, runs: [{ lcn: 100, len: 1 }] }), S.reparse(0x80000017)] },
     // torn record (fixup mismatch) is skipped
     { rec: 44, corrupt: true, attrs: [S.stdInfo(MT), S.fileName(5, 1, 'torn.txt'), data(4096, 10)] },
     // metadata area: anything under $Extend (record 11) must not appear
@@ -66,6 +68,7 @@ for (const fragmentMft of [false, true]) {
       'C:\\comp.log',
       'C:\\cloud.pdf',
       'C:\\ext.bin',
+      'C:\\wof.pak',
       'C:\\tiny.txt'
     ].sort());
     expect(byPath['C:\\Users\\dan\\big.bin']).toMatchObject({ disk: 8192, logical: 5000, cloud: false, mtime: MT });
@@ -73,6 +76,7 @@ for (const fragmentMft of [false, true]) {
     expect(byPath['C:\\Users\\linked-a.dat']).toMatchObject({ disk: 4096, logical: 4000 });
     expect(byPath['C:\\comp.log']).toMatchObject({ disk: 262144, logical: 1000000 });
     expect(byPath['C:\\cloud.pdf']).toMatchObject({ disk: 0, logical: 2000000, cloud: true });
+    expect(byPath['C:\\wof.pak']).toMatchObject({ disk: 397312, logical: 1232185, cloud: false });
     expect(byPath['C:\\ext.bin']).toMatchObject({ disk: 65536, logical: 60000 });
     expect(r.stats.torn).toBe(1);
     expect(r.stats.badAttrs).toBe(1);
