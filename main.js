@@ -20,7 +20,8 @@ app.setName('Stuff Diver');
 
 // End-to-end test mode (Playwright): isolated user data, no native dialogs,
 // no auto-updater. Never enabled unless the env var is set explicitly.
-const E2E = process.env.STUFFDIVER_E2E === '1';
+// Test mode can never be switched on in a packaged (shipped) build.
+const E2E = !app.isPackaged && process.env.STUFFDIVER_E2E === '1';
 if (E2E) global.__e2eRequire = require; // lets E2E tests reach Node modules from app.evaluate
 const E2E_SCAN_DELAY = E2E ? (Number(process.env.STUFFDIVER_E2E_SCAN_DELAY_MS) || 0) : 0;
 if (E2E && process.env.STUFFDIVER_USER_DATA) {
@@ -365,28 +366,47 @@ const CLEANUP_PATTERNS = [
   { id: 'recycle', label: 'Recycle Bin', icon: '\u{1F5D1}', re: /^\/\$Recycle\.Bin\//i },
   { id: 'wintemp', label: 'Windows temp files', icon: '\u{1F550}', re: /(^\/Windows\/Temp\/|\/AppData\/Local\/Temp\/)/i },
   { id: 'winupdate', label: 'Windows Update downloads', icon: '\u{1FA9F}', re: /^\/Windows\/SoftwareDistribution\/Download\//i },
-  { id: 'crash', label: 'Crash dumps', icon: '\u{1F4A5}', re: /(\/CrashDumps\/|\/Crashpad\/|^\/Windows\/Minidump\/|\/MEMORY\.DMP$|\.dmp$)/i },
-  { id: 'aimodels', label: 'AI model caches (re-downloadable)', icon: '\u{1F9E0}', re: /(\/\.cache\/(huggingface|torch|whisper|lm-studio)\/|\/\.ollama\/models\/|\/\.lmstudio\/models\/)/i },
+  // Crash dumps only inside known crash folders, never any *.dmp (those can be memory dumps users keep or other tools' data).
+  { id: 'crash', label: 'Crash dumps', icon: '\u{1F4A5}', re: /(\/CrashDumps\/|\/Crashpad\/|^\/Windows\/Minidump\/|(^|\/)MEMORY\.DMP$|^\/var\/crash\/)/ },
+  // Only re-downloadable caches. ~/.lmstudio/models holds models people imported by hand (may be the only copy).
+  { id: 'aimodels', label: 'AI model caches (re-downloadable)', icon: '\u{1F9E0}', re: /(\/\.cache\/(huggingface|torch|whisper)\/|\/\.ollama\/models\/)/i },
   { id: 'pkgcache', label: 'Package manager caches', icon: '\u{1F4E6}', re: /(\/AppData\/Local\/(pip|npm-cache|NuGet|Yarn|pnpm)\/|\/\.nuget\/packages\/|\/\.gradle\/caches\/|\/\.m2\/repository\/|\/\.cargo\/registry\/|\/Library\/Caches\/(pip|Homebrew)\/|\/var\/cache\/apt\/archives\/)/i },
-  { id: 'syscache', label: 'System & app caches', icon: '\u{1F5C4}', re: /(\/(cache|\.cache|\.npm|\.yarn|INetCache|GPUCache|Code Cache)\/|\/Library\/Caches\/|\/\.local\/share\/Trash\/|\/\.Trash\/)/i },
+  { id: 'syscache', label: 'System & app caches', icon: '\u{1F5C4}', re: /(\/(\.cache|\.npm|INetCache|GPUCache|Code Cache)\/|\/Library\/Caches\/|\/\.local\/share\/Trash\/|\/\.Trash\/)/i },
   { id: 'temp', label: 'Temp files', icon: '\u{1F550}', re: /\.(tmp|temp)$/i },
-  // .log is also the LevelDB write-ahead file of browsers/Electron apps (extensions, wallets, Slack, VS Code state):
-  // skip those storage folders entirely, and anything in an app-data folder unless it sits in a logs folder.
+  // .log is also the write-ahead file of LevelDB/SQLite-style stores (extensions, wallets, Slack, Chrome sync, VS Code state).
+  // Offered only when clearly a log: never in store folders, never a 6-digit counter name, never next to CURRENT/MANIFEST,
+  // and inside app-data trees only when the parent folder is literally log/logs.
   { id: 'logs', label: 'Log files', icon: '\u{1F4DD}', re: /\.log$/i,
-    skip: (rp) => /\/(leveldb|Local Storage|IndexedDB|Local Extension Settings|Session Storage|databases|Sync Data|Service Worker|File System|blob_storage|Application Support)\//i.test(rp) && !/\/(logs?)\//i.test(rp) || /\/(leveldb|Local Storage|IndexedDB|Local Extension Settings|Session Storage|Sync Data)\//i.test(rp) },
-  { id: 'dsstore', label: '.DS_Store files', icon: '\u{1F47B}', re: /\.DS_Store$/ },
-  { id: 'thumbs', label: 'Thumbnails & junk', icon: '\u{1F5D1}', re: /(Thumbs\.db|desktop\.ini|\.Spotlight|\.Trashes|\/\.cache\/thumbnails\/)/i }
+    skip: (full, ctx) => {
+      const parts = full.split('/');
+      const name = parts[parts.length - 1], parent = parts[parts.length - 2] || '';
+      if (/^\d{6}\.log$/.test(name)) return true;
+      if (/\/(leveldb|Local Storage|IndexedDB|Local Extension Settings|Sync Extension Settings|Session Storage|Sync Data|GCM Store|WebCache|databases|Service Worker|File System|blob_storage)\//i.test(full)) return true;
+      if (ctx && ctx.dbDirs.has(parts.slice(0, -1).join('/'))) return true;
+      if (/\/(Application Support|AppData|\.config|\.local\/share)\//i.test(full) && !/^(logs?)$/i.test(parent)) return true;
+      return false;
+    } },
+  { id: 'junkdirs', label: 'Spotlight index, volume trash & thumbnail caches', icon: '\u{1F5C2}', re: /(\/\.Spotlight-V100\/|\/\.Trashes\/|\/\.cache\/thumbnails\/)/ },
+  // Pre-ticked presets: whole-name anchors only, so "MyThumbs.dbs" or "x.Spotlight.project" can never match.
+  { id: 'dsstore', label: '.DS_Store files', icon: '\u{1F47B}', re: /(^|\/)\.DS_Store$/ },
+  { id: 'thumbs', label: 'Thumbs.db & desktop.ini', icon: '\u{1F5D1}', re: /(^|\/)(Thumbs\.db|desktop\.ini)$/i }
 ];
 const CLEANUP_PATH_CAP = 20000;
 
 handleTrusted('cleanup-scan', async () => {
   const cats = CLEANUP_PATTERNS.map(p => ({ id: p.id, label: p.label, icon: p.icon, re: p.re, skip: p.skip, count: 0, totalSize: 0, paths: [] }));
+  // Folders holding LevelDB/RocksDB state: any .log inside is a write-ahead log, not a log.
+  const dbDirs = new Set();
+  for (const f of lastScanAllFiles) {
+    if (f.name === 'CURRENT' || (f.name && f.name.startsWith('MANIFEST-'))) dbDirs.add(f.path.replace(/\\/g, '/').split('/').slice(0, -1).join('/'));
+  }
+  const ctx = { dbDirs };
   for (const f of lastScanAllFiles) {
     if (f.cloudStatus === 'icloud-only') continue;
     const rp = '/' + String(f.relativePath || f.name).replace(/\\/g, '/');
     for (const c of cats) {
       if (c.re.test(rp)) {
-        if (c.skip && c.skip(rp)) break;
+        if (c.skip && c.skip(f.path.replace(/\\/g, '/'), ctx)) break;
         // Never offer paths the delete guard would refuse (a single one refuses the whole request).
         if (protectedReason(f.path, true)) break;
         c.count++;
@@ -831,7 +851,7 @@ handleTrusted('delete-files', async (event, filePaths, source) => {
     title: 'Delete Files',
     message: `Move ${safePaths.length} file${safePaths.length > 1 ? 's' : ''} (${formatSizeMain(safePaths.reduce((a, p) => a + (sizeByPath.get(p) || 0), 0))}) to trash?`,
     detail: `Largest ${Math.min(10, safePaths.length)}:\n` + [...safePaths].sort((a, b) => (sizeByPath.get(b) || 0) - (sizeByPath.get(a) || 0)).slice(0, 10).map(p => `${formatSizeMain(sizeByPath.get(p) || 0)}  ${p}`).join('\n') +
-      '\n\nThey go to your system trash and can be restored from there. Each one is recorded in the deletion log.'
+      '\n\nThey are moved to the Trash (macOS/Linux) or Recycle Bin (Windows); nothing is permanently deleted, and you can restore them from there. Each one is recorded in the deletion log.'
   });
 
   if (result.response !== 1) return { deleted: 0, deletedPaths: [] };
@@ -887,7 +907,8 @@ const FOLDER_BATCH_CAP = 500;
 const FOLDER_SCAN_CAP = 2000;
 
 // Full delete-time verification of one folder. Returns {ok:true, ...info} or {ok:false, reason}.
-function evaluateFolder(fp) {
+let folderDeleteCancel = false;
+async function evaluateFolder(fp) {
   let resolved;
   try { resolved = assertAllowedFilePath(fp); } catch (e) { return { ok: false, path: String(fp), reason: 'is outside the scanned folder' }; }
   const fail = (reason) => ({ ok: false, path: resolved, reason });
@@ -897,6 +918,13 @@ function evaluateFolder(fp) {
   if (pr) return fail(`is ${pr}`);
   const cp = containsProtected(resolved);
   if (cp) return fail(cp);
+  // The real location (symlinked ancestors, 8.3 short names, subst drives) is judged by the same rules.
+  let realNow = null;
+  try { realNow = fs.realpathSync.native(resolved); } catch (e) { /* handled below */ }
+  if (realNow && realNow !== resolved) {
+    const rp2 = protectedReason(realNow, true); if (rp2) return fail(`resolves to ${realNow}, which is ${rp2}`);
+    const cp2 = containsProtected(realNow); if (cp2) return fail(`resolves to ${realNow}, which ${cp2}`);
+  }
   const c = cleanupFolders.classifyFolder(resolved, walkFs());
   if (!c) return fail('is not a recognised regenerable folder (marker missing or changed)');
   if (c.refused) return fail(c.refused);
@@ -906,7 +934,7 @@ function evaluateFolder(fp) {
     const expected = path.join(fs.realpathSync.native(root), path.relative(root, resolved));
     if (!eq(fs.realpathSync.native(resolved), expected)) return fail('resolves to a different location than the scanned path (symlink or junction involved)');
   } catch (e) { return fail('cannot be resolved (' + (e.code || e.message) + ')'); }
-  const w = cleanupFolders.inspectFolder(resolved, walkFs());
+  const w = await cleanupFolders.inspectFolder(resolved, walkFs(), undefined, () => folderDeleteCancel);
   if (w.error) return fail(w.error);
   if (w.git) return fail(`contains a .git folder or file (${w.git}), so it may hold a repository`);
   for (const d of w.dirs) {
@@ -937,13 +965,15 @@ handleTrusted('cleanup-folders-scan', async () => {
       kind: c.kind, label: c.label, icon: c.icon, reason: c.reason, restore: c.restore,
       size: c.size, files: c.files, newest: c.newest, ageDays, warnings,
       refused: refused || null,
-      defaultChecked: !refused && !recent && !many && !c.defaultOff
+      // Nothing is pre-ticked: every folder is the user's deliberate choice.
+      defaultChecked: false
     };
   }).sort((a, b) => b.size - a.size);
   return { candidates: out.slice(0, FOLDER_SCAN_CAP), totalFound: out.length, shown: Math.min(out.length, FOLDER_SCAN_CAP), cap: FOLDER_SCAN_CAP };
 });
 
 let folderDeleteBusy = false;
+handleTrusted('cancel-folder-delete', async () => { folderDeleteCancel = true; return folderDeleteBusy; });
 handleTrusted('delete-folders', async (event, folderPaths, source) => {
   const src = source || 'smart-cleanup-folders';
   const nothing = { deleted: 0, deletedPaths: [], freedBytes: 0 };
@@ -959,7 +989,12 @@ handleTrusted('delete-folders', async (event, folderPaths, source) => {
     if (kept.length > FOLDER_BATCH_CAP) {
       return { ...nothing, error: `Refused: ${kept.length} folders selected, the limit is ${FOLDER_BATCH_CAP} per run. Nothing was changed.` };
     }
-    const checks = kept.map(evaluateFolder);
+    folderDeleteCancel = false;
+    const checks = [];
+    for (const k of kept) {
+      checks.push(await evaluateFolder(k));
+      if (folderDeleteCancel) return { ...nothing, cancelled: true, error: 'Cancelled. Nothing was moved.' };
+    }
     const blocked = checks.filter(c => !c.ok);
     if (blocked.length) {
       const now = Date.now();
@@ -979,12 +1014,16 @@ handleTrusted('delete-folders', async (event, folderPaths, source) => {
         title: 'Clean up folders',
         message: `Move ${checks.length} folder${checks.length > 1 ? 's' : ''} (${formatSizeMain(total)}, ${checks.reduce((a, c) => a + c.files, 0).toLocaleString()} files) to the trash?`,
         detail: (recent ? `${recent} of them were modified in the last ${cleanupFolders.RECENT_DAYS} days.\n\n` : '') +
-          `Largest ${top.length}:\n${top.join('\n')}\n\nThey go to the system trash and can be restored from there. Each one is recorded in the deletion log.`
+          `Largest ${top.length}:\n${top.join('\n')}\n\nThey are moved to the Trash (macOS/Linux) or Recycle Bin (Windows); nothing is permanently deleted, and you can restore them from there. Each one is recorded in the deletion log.`
       });
       if (r.response !== 1) return nothing;
     }
     // The dialog can sit open for a long time: verify everything again before touching anything.
-    const again = checks.map(c => evaluateFolder(c.path));
+    const again = [];
+    for (const c of checks) {
+      again.push(await evaluateFolder(c.path));
+      if (folderDeleteCancel) return { ...nothing, cancelled: true, error: 'Cancelled. Nothing was moved.' };
+    }
     const changed = again.filter(c => !c.ok);
     if (changed.length) {
       const now = Date.now();
@@ -998,7 +1037,8 @@ handleTrusted('delete-folders', async (event, folderPaths, source) => {
       let rec;
       // Full re-verification (symlinks, real location, marker, .git, protected paths) immediately before EVERY move.
       if (E2E && typeof global.__e2eBeforeTrash === 'function') await global.__e2eBeforeTrash(c.path); // test hook, E2E only
-      const last = evaluateFolder(c.path);
+      if (folderDeleteCancel) { failed.push(c.path); continue; } // cancelled: remaining folders are left untouched
+      const last = await evaluateFolder(c.path);
       if (!last.ok) {
         rec = { ...entry, status: 'blocked', reason: 'changed just before delete: ' + last.reason };
         failed.push(c.path);
@@ -1020,7 +1060,7 @@ handleTrusted('delete-folders', async (event, folderPaths, source) => {
       const goneL = gone.map(lc);
       lastScanAllFiles = lastScanAllFiles.filter(f => { const fl = lc(f.path); return !goneL.some(g => fl.startsWith(g)); });
     }
-    return { deleted: deletedPaths.length, deletedPaths, freedBytes, failed, dedupedNested: dropped, ...(logError ? { logError } : {}) };
+    return { deleted: deletedPaths.length, deletedPaths, freedBytes, failed, cancelled: folderDeleteCancel || undefined, dedupedNested: dropped, ...(logError ? { logError } : {}) };
   } finally {
     folderDeleteBusy = false;
   }

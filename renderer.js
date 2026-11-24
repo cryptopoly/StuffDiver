@@ -3693,7 +3693,7 @@
       html += '<div class="cleanup-section-title">Folders you can regenerate</div>';
       html += '<div class="cleanup-note" id="cleanup-folder-count">' + folders.totalFound.toLocaleString() + ' folder' + (folders.totalFound === 1 ? '' : 's') + ' found'
         + (shown.length < folders.totalFound ? ', showing the ' + shown.length.toLocaleString() + ' largest' : '')
-        + '. Each is moved to the trash as a whole folder and re-checked just before that. Recently used and very large folders start unchecked.</div>';
+        + '. Each is moved to the trash as a whole folder and re-checked just before that. Nothing is pre-selected: tick each folder you want gone. Recently used and very large folders are flagged.</div>';
       html += '<div class="cleanup-total"><span class="cleanup-total-label">Selected folders</span><span class="cleanup-total-size" id="cleanup-folder-total"></span></div>';
       shown.forEach(function(c, i) {
         const refused = !!c.refused;
@@ -3731,9 +3731,13 @@
       body.querySelectorAll('.cleanup-folder-check').forEach(function(c) { c.addEventListener('change', updateTotal); });
       updateTotal();
       document.getElementById('cleanup-folders-execute').addEventListener('click', async function() {
+        const btn = document.getElementById('cleanup-folders-execute');
+        if (btn.dataset.busy) { window.api.cancelFolderDelete(); btn.textContent = 'Cancelling...'; return; }
         const picked = [...body.querySelectorAll('.cleanup-folder-check:checked')].map(function(c) { return cands[Number(c.dataset.idx)].path; });
         if (!picked.length) return;
+        btn.dataset.busy = '1'; btn.textContent = 'Checking... (click to cancel)';
         const result = await window.api.deleteFolders(picked, 'smart-cleanup-folders');
+        delete btn.dataset.busy; btn.textContent = 'Move Selected Folders to Trash';
         if (result && result.error) { alert(result.error); return; }
         if (result && result.logError) alert(result.logError);
         if (result && result.deleted > 0) {

@@ -92,16 +92,16 @@ test.describe('classifier', () => {
     expect(kind('q/node_modules')).toMatch(/^refused:/);
   });
 
-  test('inspectFolder finds a nested .git dir or file and counts honestly', () => {
+  test('inspectFolder finds a nested .git dir or file and counts honestly', async () => {
     mk(root, 'n/a.js'); mk(root, 'n/sub/b.js');
-    let w = cf.inspectFolder(path.join(root, 'n'));
+    let w = await cf.inspectFolder(path.join(root, 'n'));
     expect(w).toMatchObject({ files: 2, git: null, error: null });
     expect(w.bytes).toBe(4096);
     mk(root, 'n/pkg/.git/HEAD');
-    expect(cf.inspectFolder(path.join(root, 'n')).git).toContain('.git');
+    expect((await cf.inspectFolder(path.join(root, 'n'))).git).toContain('.git');
     fs.rmSync(path.join(root, 'n/pkg'), { recursive: true });
     mk(root, 'n/wt/.git', 'gitdir: /elsewhere');   // worktree/submodule pointer file
-    expect(cf.inspectFolder(path.join(root, 'n')).git).toContain('.git');
+    expect((await cf.inspectFolder(path.join(root, 'n'))).git).toContain('.git');
   });
 
   test('dedupeNested keeps the outermost; findCandidates reports sizes, nesting and .git', () => {
@@ -149,7 +149,7 @@ test('folder scan offers only marker-verified folders, with details and defaults
     const rel = res.candidates.map(c => c.relPath).sort();
     expect(rel).toEqual(['proj/node_modules', 'pyenvs/env', 'rust/target']); // lonely/ and nolock/ are not offered
     const nm = res.candidates.find(c => c.kind === 'node_modules');
-    expect(nm).toMatchObject({ files: 1, defaultChecked: true, refused: null });
+    expect(nm).toMatchObject({ files: 1, defaultChecked: false, refused: null }); // nothing is pre-ticked
     expect(nm.size).toBeGreaterThan(0);
     expect(nm.reason).toMatch(/package\.json/);
     expect(nm.restore).toMatch(/npm install/);
@@ -179,7 +179,7 @@ test('recently modified folders are unchecked by default', async () => {
     const stale = res.candidates.find(c => c.relPath === 'stale/node_modules');
     expect(fresh.defaultChecked).toBe(false);
     expect(fresh.warnings.join(' ')).toMatch(/modified today/);
-    expect(stale.defaultChecked).toBe(true);
+    expect(stale.defaultChecked).toBe(false); // even old folders must be ticked deliberately
   } finally { await app.close(); fs.rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -334,7 +334,9 @@ test('wizard shows folder rows with size/age/files/reason, greys out refused one
     await expect(ok).toContainText('files');
     await expect(ok).toContainText('last modified');
     await expect(ok).toContainText('If you restore or regenerate');
-    await expect(ok.locator('input')).toBeChecked();
+    await expect(ok.locator('input')).not.toBeChecked();
+    await expect(page.locator('#cleanup-folder-total')).toContainText('0 folders');
+    await ok.locator('input').check();
     const git = page.locator('.cleanup-folder', { hasText: 'q/node_modules' });
     await expect(git).toHaveClass(/cleanup-refused/);
     await expect(git.locator('input')).toBeDisabled();

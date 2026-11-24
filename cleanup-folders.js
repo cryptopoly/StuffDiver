@@ -22,7 +22,17 @@ const VENV_ENTRIES = new Set(['bin', 'Scripts', 'lib', 'Lib', 'lib64', 'include'
 // where a mistake is too costly. Path-based, so it needs no filesystem access.
 function blockedLocation(dir, opts = {}) {
   const uid = opts.uid !== undefined ? opts.uid : (process.getuid ? process.getuid() : null);
-  const home = (opts.home || os.homedir()).split(path.sep).join('/').replace(/\/+$/, '').toLowerCase();
+  const normHome = (h) => h.split(path.sep).join('/').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+  const homes = [];
+  for (const h of opts.home ? [opts.home] : [os.homedir()]) {
+    homes.push(normHome(h));
+    if (!opts.home) { try { homes.push(normHome(fs.realpathSync.native(h))); } catch (e) { /* ignore */ } }
+  }
+  const tmps = [];
+  for (const t of opts.tmp ? [opts.tmp] : [os.tmpdir()]) {
+    tmps.push(normHome(t));
+    try { tmps.push(normHome(fs.realpathSync.native(t))); } catch (e) { /* ignore */ }
+  }
   const norm = dir.split(path.sep).join('/').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
   const segs = norm.split('/').filter(Boolean);
   const parentSegs = segs.slice(0, -1);
@@ -40,7 +50,20 @@ function blockedLocation(dir, opts = {}) {
   for (const r of ['/opt', '/usr', '/srv', '/var/www', '/snap', '/lib', '/lib64', '/var/lib']) {
     if (norm === r || norm.startsWith(r + '/')) return `is under ${r}, which holds system or server software`;
   }
-  if (parent === home || /^(\/users\/[^/]+|\/home\/[^/]+|[a-z]:\/users\/[^/]+|\/root)$/.test(parent)) return 'sits directly in a user home folder, not in a project';
+  if (homes.includes(parent) || /^(\/users\/[^/]+|\/home\/[^/]+|[a-z]:\/users\/[^/]+|\/root)$/.test(parent)) return 'sits directly in a user home folder, not in a project';
+  // Allow-by-location: folder cleanup is for project areas, not for where tools, apps and sync clients live.
+  const inTmp = tmps.some(t => norm.startsWith(t + '/'));
+  if (segs.some(x => /^(cloudstorage|mobile documents|icloud drive.*|dropbox.*|google drive.*|googledrive|my drive|box|box sync|onedrive.*)$/.test(x))) return 'is a cloud-synced folder: deleting here deletes it everywhere';
+  if (/^\/(volumes|mnt|media|run\/media)\//.test(norm) || /^(\\\\|\/\/)/.test(dir)) return 'is on an external, network or mounted volume';
+  if (segs.some(x => /^(linuxbrew|\.linuxbrew|homebrew|cellar)$/.test(x))) return 'is inside a Homebrew install';
+  if (!inTmp && segs.includes('appdata')) return 'is inside AppData (installed apps and settings), not a project';
+  let rel = null;
+  for (const h of homes) if (norm.startsWith(h + '/')) { rel = norm.slice(h.length + 1).split('/'); break; }
+  if (!rel) { const m = /^(?:\/users\/[^/]+|\/home\/[^/]+|[a-z]:\/users\/[^/]+)\/(.*)$/.exec(norm); if (m) rel = m[1].split('/'); }
+  if (rel) {
+    if (rel[0].startsWith('.')) return 'is inside a hidden folder in your home (tools and settings live there)';
+    if (rel[0] === 'library' && rel[1] !== 'developer') return 'is inside your Library folder (app data), not a project';
+  }
   if (uid === 0 && !/^(\/root|\/home\/|\/users\/|[a-z]:\/users\/)/.test(norm)) return 'is outside home folders and this app is running as root/administrator';
   return null;
 }
@@ -136,7 +159,13 @@ function classifyFolder(dir, fsx = fs) {
   try { st = fsx.lstatSync(dir); } catch (e) { return { refused: 'folder no longer exists' }; }
   if (st.isSymbolicLink()) return { refused: 'is a symlink or junction, not a real folder' };
   if (!st.isDirectory()) return { refused: 'is not a folder' };
-  const blocked = blockedLocation(dir);
+  const blocked = blockedLocation(dir) || (() => {
+    // Judge the real location too: a symlinked ancestor must not hide a blocked place (also expands Windows 8.3 names).
+    try {
+      const real = fsx.realpathSync && fsx.realpathSync.native ? fsx.realpathSync.native(dir) : null;
+      return real && real !== dir ? blockedLocation(real) : null;
+    } catch (e) { return null; }
+  })();
   if (blocked) return { refused: blocked };
   const base = path.basename(dir);
   for (const k of KINDS) {
@@ -152,7 +181,7 @@ function classifyFolder(dir, fsx = fs) {
 // Walk a folder without following links. Reports file count, bytes, newest
 // mtime, whether any `.git` exists inside, and every directory seen (for the
 // protected-path check). Returns {error} if the walk cannot be trusted.
-function inspectFolder(dir, fsx = fs, isWin = process.platform === 'win32') {
+async function inspectFolder(dir, fsx = fs, isWin = process.platform === 'win32', shouldCancel = null) {
   const out = { files: 0, bytes: 0, newest: 0, git: null, dirs: [], error: null };
   const devOf = (p) => { try { return fsx.lstatSync(p, { bigint: true }).dev; } catch (e) { return null; } };
   const rootDev = devOf(dir);
@@ -161,6 +190,8 @@ function inspectFolder(dir, fsx = fs, isWin = process.platform === 'win32') {
   let seen = 0;
   while (stack.length) {
     const cur = stack.pop();
+    await new Promise(r => setImmediate(r)); // keep the app responsive during big walks
+    if (shouldCancel && shouldCancel()) { out.error = 'cancelled'; return out; }
     let entries;
     try { entries = fsx.readdirSync(cur, { withFileTypes: true }); } catch (e) { out.error = 'cannot read ' + cur + ' (' + (e.code || e.message) + ')'; return out; }
     for (const e of entries) {

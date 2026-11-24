@@ -289,13 +289,13 @@ function fakeMountFs(mountSuffix) {
   };
 }
 
-test('A. a mount point inside a candidate refuses it (walk and scan-time check)', () => {
+test('A. a mount point inside a candidate refuses it (walk and scan-time check)', async () => {
   const root = tmp();
   try {
     proj(root, 'p'); mk(root, 'p/node_modules/pkg/mnt/data.db');
     const dir = path.join(root, 'p/node_modules');
-    expect(cf.inspectFolder(dir).error).toBeNull();
-    const w = cf.inspectFolder(dir, fakeMountFs(path.join('pkg', 'mnt')));
+    expect((await cf.inspectFolder(dir)).error).toBeNull();
+    const w = await cf.inspectFolder(dir, fakeMountFs(path.join('pkg', 'mnt')));
     expect(w.error).toBe(`contains ${path.join(dir, 'pkg/mnt')}, which is on a different filesystem or a mount point`);
     const files = [{ path: path.join(dir, 'pkg/mnt/data.db'), name: 'data.db', size: 1, mtime: 1 }, { path: path.join(dir, 'dep/index.js'), name: 'index.js', size: 1, mtime: 1 }];
     const found = cf.findCandidates(files, root, false, fakeMountFs(path.join('pkg', 'mnt')));
@@ -304,16 +304,16 @@ test('A. a mount point inside a candidate refuses it (walk and scan-time check)'
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-test('A. Windows: a directory link/junction anywhere inside is refused; file links are fine', () => {
+test('A. Windows: a directory link/junction anywhere inside is refused; file links are fine', async () => {
   const root = tmp();
   try {
     proj(root, 'p'); mk(root, 'other/x.txt'); mk(root, 'p/node_modules/dep/real.txt');
     const dir = path.join(root, 'p/node_modules');
     fs.symlinkSync(path.join(root, 'p/node_modules/dep/real.txt'), path.join(dir, 'filelink'));
-    expect(cf.inspectFolder(dir, fs, true).error).toBeNull();
+    expect((await cf.inspectFolder(dir, fs, true)).error).toBeNull();
     fs.symlinkSync(path.join(root, 'other'), path.join(dir, 'dep/dirlink'), 'dir');
-    expect(cf.inspectFolder(dir, fs, true).error).toBe(`contains ${path.join(dir, 'dep/dirlink')}, a junction or directory link`);
-    expect(cf.inspectFolder(dir, fs, false).error).toBeNull(); // POSIX: symlinks are not followed, so they are harmless
+    expect((await cf.inspectFolder(dir, fs, true)).error).toBe(`contains ${path.join(dir, 'dep/dirlink')}, a junction or directory link`);
+    expect((await cf.inspectFolder(dir, fs, false)).error).toBeNull(); // POSIX: symlinks are not followed, so they are harmless
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -367,4 +367,129 @@ test('D. log entry without a path renders a placeholder; unreadable candidates a
     await expect(page.locator('.dellog-row')).toContainText('(no path recorded)');
     await expect(page.locator('.dellog-row')).not.toContainText('undefined');
   });
+});
+
+// ---- third review round ----
+const catPaths = (cats, root) => Object.fromEntries(cats.map(c => [c.id, c.paths.map(p => path.relative(root, p).split(path.sep).join('/')).sort()]));
+
+test('R3-1/6. file presets use whole-name anchors and offer only clearly regenerable files', async () => {
+  await withApp((r) => {
+    mk(r, 'art/Desktop.ini-backup/design.psd'); mk(r, 'docs/my.Spotlight.project/plan.docx'); mk(r, 'photos/MyThumbs.dbs/IMG_1.jpg');
+    mk(r, 'x/notThumbs.db'); mk(r, 'x/my.DS_Store'); mk(r, 'x/old.DS_Store.bak');
+    mk(r, 'ok/Thumbs.db'); mk(r, 'ok/desktop.ini'); mk(r, 'ok/.DS_Store');
+    mk(r, 'vol/.Spotlight-V100/x'); mk(r, 'vol/.Trashes/501/x');
+    mk(r, 'data/memory.dmp'); mk(r, 'sys/CrashDumps/a.dmp'); mk(r, 'sys/Crashpad/b.dmp');
+    mk(r, '.lmstudio/models/me/model.gguf'); mk(r, '.cache/huggingface/hub/x.bin'); 
+    mk(r, 'cr/Default/Sync Extension Settings/ext/000003.log'); mk(r, 'cr/Default/GCM Store/000003.log'); mk(r, 'cr/WebCache/V01.log');
+    mk(r, 'db/CURRENT'); mk(r, 'db/data.log'); mk(r, 'proj/000123.log'); mk(r, 'proj/app.log');
+    mk(r, 'Library/Application Support/App/state.log'); mk(r, 'Library/Application Support/App/logs/app.log');
+    mk(r, '.yarn/releases/yarn.cjs'); mk(r, 'stuff/cache/data.bin');
+  }, {}, async ({ page, root }) => {
+    const c = catPaths(await page.evaluate(() => window.api.cleanupScan()), root);
+    expect(c.thumbs).toEqual(['ok/Thumbs.db', 'ok/desktop.ini']);
+    expect(c.dsstore).toEqual(['ok/.DS_Store']);
+    expect(c.junkdirs).toEqual(['vol/.Spotlight-V100/x', 'vol/.Trashes/501/x']);
+    expect(c.crash).toEqual(['sys/CrashDumps/a.dmp', 'sys/Crashpad/b.dmp']);
+    expect(c.aimodels).toEqual(['.cache/huggingface/hub/x.bin']);
+    expect(c.logs).toEqual(['Library/Application Support/App/logs/app.log', 'proj/app.log']);
+    const all = Object.values(c).flat();
+    for (const bad of ['art/Desktop.ini-backup/design.psd', 'docs/my.Spotlight.project/plan.docx', 'photos/MyThumbs.dbs/IMG_1.jpg', 'x/notThumbs.db', 'x/my.DS_Store', 'data/memory.dmp', '.lmstudio/models/me/model.gguf', 'db/data.log', 'proj/000123.log', '.yarn/releases/yarn.cjs', 'stuff/cache/data.bin'])
+      expect(all, bad).not.toContain(bad);
+    // the wizard pre-ticks only the exact-name presets
+    await page.locator('#tools-btn').click();
+    await page.locator('[data-tool="cleanup"]').click();
+    await expect(page.locator('#cleanup-body')).toContainText('Log files');
+    expect(await page.locator('.cleanup-check:checked').evaluateAll(els => els.map(e => e.dataset.id).sort())).toEqual(['dsstore', 'thumbs']);
+  });
+});
+
+test('R3-2/5. only project areas are offered: tool, app-data, cloud and volume locations are refused with exact reasons', async () => {
+  const o = { uid: 501, home: '/Users/bob', tmp: '/nonexistent-tmp' };
+  const hidden = 'is inside a hidden folder in your home (tools and settings live there)';
+  const lib = 'is inside your Library folder (app data), not a project';
+  const cloud = 'is a cloud-synced folder: deleting here deletes it everywhere';
+  const vol = 'is on an external, network or mounted volume';
+  for (const [p, why] of [
+    ['/Users/bob/.claude/local/node_modules', hidden], ['/Users/bob/.config/yarn/global/node_modules', hidden], ['/Users/bob/.local/share/pnpm/global/5/node_modules', hidden],
+    ['/Users/bob/.bun/install/global/node_modules', hidden], ['/Users/bob/.node-red/node_modules', hidden], ['/Users/bob/.local/share/uv/tools/ruff/lib/x/target', hidden],
+    ['/Users/bob/Library/pnpm/global/5/node_modules', lib], ['/Users/bob/Library/Application Support/nvim/mason/packages/x/node_modules', lib], ['/Users/bob/Library/Application Support/Zed/languages/x/node_modules', lib],
+    ['/Users/bob/Dropbox/app/node_modules', cloud], ['/Users/bob/OneDrive - Corp/app/node_modules', cloud], ['/Users/bob/Library/CloudStorage/GoogleDrive-x/app/node_modules', cloud],
+    ['/Users/bob/Library/Mobile Documents/com~apple~CloudDocs/app/node_modules', cloud], ['/Users/bob/Google Drive/app/node_modules', cloud], ['/Users/bob/Box/app/node_modules', cloud],
+    ['/Volumes/Backup/proj/node_modules', vol], ['/mnt/data/proj/node_modules', vol], ['/media/bob/usb/proj/node_modules', vol], ['\\\\server\\share\\proj\\node_modules', vol],
+    ['/home/linuxbrew/.linuxbrew/Cellar/node/20/libexec/lib/node_modules/x/node_modules', null], ['C:\\Users\\bob\\AppData\\Roaming\\x\\node_modules', 'is inside AppData (installed apps and settings), not a project']
+  ]) {
+    const got = cf.blockedLocation(p, o);
+    if (why) expect(got, p).toBe(why); else expect(got, p).toBeTruthy();
+  }
+  for (const ok of ['/Users/bob/work/app/node_modules', '/Users/bob/Library/Developer/Xcode/DerivedData', '/Users/bob/dev/x/target'])
+    expect(cf.blockedLocation(ok, o), ok).toBeNull();
+  // and in the running app: only the project folder is offered
+  const root = tmp(); const home = path.join(root, 'h');
+  proj(home, '.claude/local'); proj(home, 'Library/pnpm/global/5'); proj(home, '.local/share/uv/tools/x'); proj(home, 'Dropbox/p'); proj(home, 'OneDrive - Corp/p'); proj(home, 'Library/CloudStorage/GoogleDrive-x/p'); proj(home, 'work/app');
+  mk(home, 'Library/Developer/Xcode/DerivedData/App-1/x.o');
+  age(root);
+  const { app, page } = await launch(root, { HOME: home, USERPROFILE: home });
+  try {
+    await scanViaUi(page);
+    const scan = await page.evaluate(() => window.api.cleanupFoldersScan());
+    expect(scan.candidates.map(c => path.relative(home, c.path).split(path.sep).join('/')).sort()).toEqual(['Library/Developer/Xcode/DerivedData', 'work/app/node_modules']);
+    expect(scan.candidates.every(c => c.defaultChecked === false)).toBe(true);
+    const bad = await del(page, [path.join(home, 'Dropbox/p/node_modules')]);
+    expect(bad.blocked[0].reason).toBe(cloud);
+  } finally { await app.close(); fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('R3-3. a scan through a symlink cannot hide a blocked location (real path is judged too)', async () => {
+  const root = tmp();
+  proj(root, 'real/.nvm/versions/p');   // real path sits inside .nvm
+  mk(root, 'real/.nvm/versions/p/x.txt');
+  fs.symlinkSync(path.join(root, 'real/.nvm/versions'), path.join(root, 'link'), 'dir');
+  age(root);
+  const { app, page } = await launch(path.join(root, 'link'));
+  try {
+    await scanViaUi(page);
+    const typed = path.join(root, 'link/p/node_modules');
+    expect(cf.blockedLocation(typed, { uid: 501 })).toBeNull();   // the typed path alone looks fine
+    const scan = await page.evaluate(() => window.api.cleanupFoldersScan());
+    expect(scan.candidates.map(c => c.path)).not.toContain(typed);
+    const res = await del(page, [typed]);
+    expect(res.deleted).toBe(0);
+    expect(res.blocked[0].reason).toBe('is inside .nvm, which holds installed tools');
+    expect(fs.existsSync(path.join(root, 'real/.nvm/versions/p/node_modules/dep/index.js'))).toBe(true);
+  } finally { await app.close(); fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('R3-4. test mode cannot be enabled in a packaged build (source-level guard)', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
+  expect(src).toMatch(/const E2E = !app\.isPackaged && process\.env\.STUFFDIVER_E2E === '1';/);
+  // every test hook is behind E2E
+  for (const hook of ['__e2eFs', '__e2eBeforeTrash', '__e2eRequire']) {
+    for (const line of src.split('\n').filter(l => l.includes(hook))) expect(line, line).toMatch(/E2E/);
+  }
+  const lines = src.split('\n');
+  lines.forEach((l, i) => { if (l.includes('process.env.STUFFDIVER_')) expect(l + ' ' + lines[i - 1], l).toMatch(/E2E/); });
+});
+
+test('R3-7. folder cleanup is cancellable and nothing is moved when cancelled', async () => {
+  await withApp((r) => { proj(r, 'a'); proj(r, 'b'); }, {}, async ({ app, page, root }) => {
+    expect(await page.evaluate(() => window.api.cancelFolderDelete())).toBe(false);   // idle
+    await app.evaluate(() => { global.__e2eBeforeTrash = () => new Promise(r => setTimeout(r, 1500)); });
+    const run = page.evaluate((p) => window.api.deleteFolders(p, 'test'), [path.join(root, 'a/node_modules'), path.join(root, 'b/node_modules')]);
+    await new Promise(r => setTimeout(r, 500));
+    expect(await page.evaluate(() => window.api.cancelFolderDelete())).toBe(true);
+    const res = await run;
+    expect(res.deleted).toBe(0);
+    expect(res.failed.length).toBe(2);
+    expect(res.cancelled).toBe(true);
+    expect(fs.existsSync(path.join(root, 'a/node_modules/dep/index.js')) && fs.existsSync(path.join(root, 'b/node_modules/dep/index.js'))).toBe(true);
+  });
+});
+
+test('R3-8. there is no permanent-delete fallback anywhere in the delete handlers, and the dialogs state the undo story', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
+  const a = src.indexOf("handleTrusted('delete-files'"), b = src.indexOf('// === Scan cache ===');
+  const region = src.slice(a, b);
+  expect(region).not.toMatch(/\b(rmSync|rmdirSync|unlinkSync|\.rm\(|\.unlink\(|\.rmdir\(|rimraf|emptyTrash)\b/);
+  expect(region.match(/Recycle Bin \(Windows\); nothing is permanently deleted/g)).toHaveLength(2);
+  expect(region).toMatch(/status: 'failed', reason: e\.message/);
 });

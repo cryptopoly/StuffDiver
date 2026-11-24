@@ -18,6 +18,7 @@ contextBridge.exposeInMainWorld('api', {
   revealDeletionLog: () => ipcRenderer.invoke('reveal-deletion-log'),
   cleanupFoldersScan: () => ipcRenderer.invoke('cleanup-folders-scan'),
   deleteFolders: (paths, source) => ipcRenderer.invoke('delete-folders', paths, source),
+  cancelFolderDelete: () => ipcRenderer.invoke('cancel-folder-delete'),
   queryDeletionLog: (opts) => ipcRenderer.invoke('query-deletion-log', opts),
   loadCache: (folderPath) => ipcRenderer.invoke('load-cache', folderPath),
   saveCache: (folderPath, result) => ipcRenderer.invoke('save-cache', folderPath, result),
