@@ -147,7 +147,7 @@ test('folder scan offers only marker-verified folders, with details and defaults
   await withFolders(async ({ page, root }) => {
     const res = await page.evaluate(() => window.api.cleanupFoldersScan());
     const rel = res.candidates.map(c => c.relPath).sort();
-    expect(rel).toEqual(['proj/node_modules', 'rust/target', 'pyenvs/env']); // lonely/ and nolock/ are not offered
+    expect(rel).toEqual(['proj/node_modules', 'pyenvs/env', 'rust/target']); // lonely/ and nolock/ are not offered
     const nm = res.candidates.find(c => c.kind === 'node_modules');
     expect(nm).toMatchObject({ files: 1, defaultChecked: true, refused: null });
     expect(nm.size).toBeGreaterThan(0);
