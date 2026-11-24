@@ -3656,6 +3656,16 @@
 
   // === Feature: Smart Cleanup Wizard ===
 
+  function formatAge(ageDays) {
+    if (ageDays === null || ageDays === undefined) return 'unknown';
+    if (ageDays < 1) return 'today';
+    if (ageDays < 60) return ageDays + ' day' + (ageDays === 1 ? '' : 's') + ' ago';
+    if (ageDays < 700) return Math.round(ageDays / 30) + ' months ago';
+    return (ageDays / 365).toFixed(1) + ' years ago';
+  }
+
+  const CLEANUP_FOLDER_RENDER_CAP = 500;
+
   async function openCleanupWizard() {
     if (!allFiles.length) { alert('Please scan a folder first.'); return; }
     const overlay = document.getElementById('cleanup-overlay');
@@ -3665,23 +3675,75 @@
 
     // Matching runs in the main process over the full scan, not just the top files.
     let found = [];
+    let folders = { candidates: [], totalFound: 0, shown: 0 };
     try { found = await window.api.cleanupScan(); } catch (e) { found = []; }
+    try { folders = await window.api.cleanupFoldersScan(); } catch (e) { /* none */ }
+    const cands = folders.candidates || [];
 
-    if (!found.length) {
+    if (!found.length && !cands.length) {
       body.innerHTML = '<div class="cleanup-empty">No reclaimable patterns found. Your folder looks clean!</div>';
       return;
     }
 
-    const grandTotal = found.reduce(function(sum, c) { return sum + c.totalSize; }, 0);
-    let html = '<div class="cleanup-total"><span class="cleanup-total-label">Total reclaimable space</span><span class="cleanup-total-size">' + formatSize(grandTotal) + '</span></div>';
-
-    for (const cat of found) {
-      html += '<div class="cleanup-category"><input type="checkbox" class="cleanup-check" data-id="' + escHtml(cat.id) + '" checked><span class="cleanup-icon">' + cat.icon + '</span><div class="cleanup-info"><div class="cleanup-name">' + escHtml(cat.label) + '</div><div class="cleanup-detail">' + cat.count.toLocaleString() + ' files</div></div><span class="cleanup-size">' + formatSize(cat.totalSize) + '</span></div>';
+    let html = '';
+    if (cands.length) {
+      const shown = cands.slice(0, CLEANUP_FOLDER_RENDER_CAP);
+      html += '<div class="cleanup-section-title">Folders you can regenerate</div>';
+      html += '<div class="cleanup-note" id="cleanup-folder-count">' + folders.totalFound.toLocaleString() + ' folder' + (folders.totalFound === 1 ? '' : 's') + ' found'
+        + (shown.length < folders.totalFound ? ', showing the ' + shown.length.toLocaleString() + ' largest' : '')
+        + '. Each is moved to the trash as a whole folder and re-checked just before that. Recently used and very large folders start unchecked.</div>';
+      html += '<div class="cleanup-total"><span class="cleanup-total-label">Selected folders</span><span class="cleanup-total-size" id="cleanup-folder-total"></span></div>';
+      shown.forEach(function(c, i) {
+        const refused = !!c.refused;
+        html += '<div class="cleanup-category cleanup-folder' + (refused ? ' cleanup-refused' : '') + '" data-idx="' + i + '">'
+          + '<input type="checkbox" class="cleanup-folder-check" data-idx="' + i + '"' + (c.defaultChecked ? ' checked' : '') + (refused ? ' disabled' : '') + '>'
+          + '<span class="cleanup-icon">' + c.icon + '</span><div class="cleanup-info">'
+          + '<div class="cleanup-name" title="' + escHtml(c.path) + '">' + escHtml(c.relPath || c.path) + '</div>'
+          + '<div class="cleanup-detail">' + escHtml(c.label) + ': ' + escHtml(c.reason) + '</div>'
+          + '<div class="cleanup-detail">' + c.files.toLocaleString() + ' files &middot; last modified ' + escHtml(formatAge(c.ageDays)) + '</div>'
+          + (refused
+            ? '<div class="cleanup-detail cleanup-refuse-reason">Not offered: ' + escHtml(c.refused) + '</div>'
+            : '<div class="cleanup-detail">If you restore or regenerate: ' + escHtml(c.restore) + '</div>')
+          + c.warnings.map(function(w) { return '<div class="cleanup-detail cleanup-warn">&#9888; ' + escHtml(w) + '</div>'; }).join('')
+          + '</div><span class="cleanup-size">' + formatSize(c.size) + '</span></div>';
+      });
+      html += '<div class="cleanup-actions"><button class="cleanup-btn-clean" id="cleanup-folders-execute">Move Selected Folders to Trash</button></div>';
     }
-    html += '<div class="cleanup-actions"><button class="cleanup-btn-clean" id="cleanup-execute">Clean Selected</button></div>';
+    if (found.length) {
+      const grandTotal = found.reduce(function(sum, c) { return sum + c.totalSize; }, 0);
+      html += '<div class="cleanup-section-title">Loose files</div>';
+      html += '<div class="cleanup-total"><span class="cleanup-total-label">Total reclaimable space</span><span class="cleanup-total-size">' + formatSize(grandTotal) + '</span></div>';
+      for (const cat of found) {
+        html += '<div class="cleanup-category"><input type="checkbox" class="cleanup-check" data-id="' + escHtml(cat.id) + '" checked><span class="cleanup-icon">' + cat.icon + '</span><div class="cleanup-info"><div class="cleanup-name">' + escHtml(cat.label) + '</div><div class="cleanup-detail">' + cat.count.toLocaleString() + ' files</div></div><span class="cleanup-size">' + formatSize(cat.totalSize) + '</span></div>';
+      }
+      html += '<div class="cleanup-actions"><button class="cleanup-btn-clean" id="cleanup-execute">Clean Selected</button></div>';
+    }
     body.innerHTML = html;
 
-    document.getElementById('cleanup-execute').addEventListener('click', async function() {
+    if (cands.length) {
+      const updateTotal = function() {
+        let n = 0, sz = 0;
+        body.querySelectorAll('.cleanup-folder-check:checked').forEach(function(c) { n++; sz += cands[Number(c.dataset.idx)].size; });
+        document.getElementById('cleanup-folder-total').textContent = n + ' folder' + (n === 1 ? '' : 's') + ', ' + formatSize(sz);
+      };
+      body.querySelectorAll('.cleanup-folder-check').forEach(function(c) { c.addEventListener('change', updateTotal); });
+      updateTotal();
+      document.getElementById('cleanup-folders-execute').addEventListener('click', async function() {
+        const picked = [...body.querySelectorAll('.cleanup-folder-check:checked')].map(function(c) { return cands[Number(c.dataset.idx)].path; });
+        if (!picked.length) return;
+        const result = await window.api.deleteFolders(picked, 'smart-cleanup-folders');
+        if (result && result.error) { alert(result.error); return; }
+        if (result && result.deleted > 0) {
+          const prefixes = (result.deletedPaths || []).map(function(p) { return p + (p.indexOf('\\') >= 0 ? '\\' : '/'); });
+          allFiles = allFiles.filter(function(f) { return !prefixes.some(function(p) { return f.path.startsWith(p); }); });
+          applyFilters();
+          openCleanupWizard();
+        }
+      });
+    }
+
+    const exec = document.getElementById('cleanup-execute');
+    if (exec) exec.addEventListener('click', async function() {
       const checks = body.querySelectorAll('.cleanup-check:checked');
       const selectedIds = new Set([...checks].map(function(c) { return c.dataset.id; }));
       const filesToDelete = [];
@@ -3702,6 +3764,58 @@
 
   function closeCleanupWizard() {
     document.getElementById('cleanup-overlay').classList.add('hidden');
+  }
+
+  // === Feature: Deletion Log Viewer ===
+
+  const DELLOG_PAGE = 200;
+  let dellogState = { offset: 0, status: '', search: '', entries: [], timer: null };
+
+  function formatLogTime(t) {
+    try { return new Date(t).toLocaleString(); } catch (e) { return String(t); }
+  }
+
+  function openDeletionLog() {
+    document.getElementById('dellog-overlay').classList.remove('hidden');
+    document.getElementById('dellog-search').value = '';
+    document.getElementById('dellog-status').value = '';
+    loadDeletionLog(true);
+  }
+
+  function closeDeletionLog() {
+    document.getElementById('dellog-overlay').classList.add('hidden');
+  }
+
+  async function loadDeletionLog(reset) {
+    const st = dellogState;
+    if (reset) { st.offset = 0; st.entries = []; }
+    st.status = document.getElementById('dellog-status').value;
+    st.search = document.getElementById('dellog-search').value;
+    let res;
+    try { res = await window.api.queryDeletionLog({ offset: st.offset, limit: DELLOG_PAGE, status: st.status, search: st.search }); }
+    catch (e) { res = { entries: [], matched: 0, total: 0, counts: {} }; }
+    st.entries = st.entries.concat(res.entries || []);
+    st.offset = st.entries.length;
+    const list = document.getElementById('dellog-list');
+    const empty = document.getElementById('dellog-empty');
+    const c = res.counts || {};
+    document.getElementById('dellog-summary').textContent = res.total
+      ? 'Showing ' + st.entries.length.toLocaleString() + ' of ' + res.matched.toLocaleString() + ' matching (' + res.total.toLocaleString() + ' total: ' + (c.trashed || 0) + ' trashed, ' + (c.failed || 0) + ' failed, ' + (c.blocked || 0) + ' blocked)'
+      : '';
+    list.innerHTML = st.entries.map(function(e, i) {
+      return '<div class="dellog-row" data-i="' + i + '"><span class="dellog-badge dellog-' + escHtml(e.status) + '">' + escHtml(e.status) + '</span>'
+        + '<div class="dellog-main"><div class="dellog-path">' + escHtml(e.path) + '</div>'
+        + '<div class="dellog-meta">' + escHtml(formatLogTime(e.t))
+        + (e.size != null ? ' &middot; ' + formatSize(e.size) : '')
+        + (e.files != null ? ' &middot; ' + e.files.toLocaleString() + ' files' : '')
+        + (e.type === 'folder' ? ' &middot; folder' : '')
+        + ' &middot; ' + escHtml(e.source || 'unknown') + '</div>'
+        + (e.reason ? '<div class="dellog-reason">' + escHtml(e.reason) + '</div>' : '') + '</div>'
+        + '<button class="dellog-copy" data-i="' + i + '" title="Copy path">Copy path</button></div>';
+    }).join('');
+    empty.classList.toggle('hidden', st.entries.length > 0);
+    empty.textContent = res.total ? 'No entries match the current filter.' : 'No deletions recorded yet.';
+    document.getElementById('dellog-more').classList.toggle('hidden', st.entries.length >= res.matched);
   }
 
   // === Feature: Storage Forecast ===
@@ -3939,7 +4053,7 @@
         { name: 'Cancel a scan', desc: 'Click <strong>Cancel scan</strong> while scanning to stop early. You keep what was found so far, marked as a <em>Partial scan</em>.' },
         { name: 'Scan exclusions', desc: 'In <strong>Settings</strong>, list names (node_modules), patterns (*.tmp) or full paths to skip on every scan. Excluded items are counted in the stats bar.' },
         { name: 'Protected folders', desc: 'When some folders cannot be read, a banner explains why. On Windows it offers <strong>Restart as admin</strong>; on macOS it opens Full Disk Access settings.' },
-        { name: 'Smart Cleanup', desc: 'Click the <strong>&#128736; Tools</strong> icon &rarr; <strong>Smart Cleanup</strong> to scan for reclaimable space: node_modules, .git directories, caches, temp files, build artifacts, logs, .DS_Store, and more. Check categories and clean with one click.' },
+        { name: 'Smart Cleanup', desc: 'Click the <strong>&#128736; Tools</strong> icon &rarr; <strong>Smart Cleanup</strong> to scan for reclaimable space: regenerable folders (node_modules, build caches, virtualenvs), caches, temp files, build artifacts, logs, .DS_Store, and more. Check categories and clean with one click.' },
         { name: 'Storage Forecast', desc: 'Click <strong>&#128736; Tools</strong> &rarr; <strong>Storage Forecast</strong> to see a chart of your disk usage over time with a projected growth line. Shows estimated days until your drive is full.' },
         { name: 'Watch Folder', desc: 'Click <strong>&#128736; Tools</strong> &rarr; <strong>Watch Folder</strong> to monitor a folder for growth. Set a check interval (6h, daily, weekly) and get system notifications when significant growth is detected. A tray icon keeps the app running in the background.' },
         { name: 'Age warnings', desc: 'In the Summary panel, a warning highlights how many files haven\'t been modified in over a year. Click it to filter the view to just those old files.' }
@@ -4780,6 +4894,7 @@
       if (!btn) return;
       closeAllDropdowns();
       if (btn.dataset.tool === 'cleanup') openCleanupWizard();
+      else if (btn.dataset.tool === 'dellog') openDeletionLog();
       else if (btn.dataset.tool === 'forecast') openForecast();
       else if (btn.dataset.tool === 'monitor') openMonitorSetup();
     });
@@ -4793,6 +4908,25 @@
     document.getElementById('cleanup-close').addEventListener('click', closeCleanupWizard);
     document.getElementById('cleanup-overlay').addEventListener('click', (e) => {
       if (e.target.id === 'cleanup-overlay') closeCleanupWizard();
+    });
+
+    // === Deletion Log Modal ===
+    document.getElementById('dellog-close').addEventListener('click', closeDeletionLog);
+    document.getElementById('dellog-overlay').addEventListener('click', (e) => {
+      if (e.target.id === 'dellog-overlay') closeDeletionLog();
+    });
+    document.getElementById('dellog-status').addEventListener('change', () => loadDeletionLog(true));
+    document.getElementById('dellog-search').addEventListener('input', () => {
+      clearTimeout(dellogState.timer);
+      dellogState.timer = setTimeout(() => loadDeletionLog(true), 200);
+    });
+    document.getElementById('dellog-more').addEventListener('click', () => loadDeletionLog(false));
+    document.getElementById('dellog-reveal').addEventListener('click', () => window.api.revealDeletionLog());
+    document.getElementById('dellog-list').addEventListener('click', (e) => {
+      const b = e.target.closest('.dellog-copy');
+      if (!b) return;
+      const entry = dellogState.entries[Number(b.dataset.i)];
+      if (entry) { try { navigator.clipboard.writeText(entry.path); } catch (er) { /* ignore */ } b.textContent = 'Copied'; setTimeout(() => { b.textContent = 'Copy path'; }, 1200); }
     });
 
     // === Forecast Modal ===
@@ -4856,7 +4990,8 @@
     // Escape closes modals
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') {
-        if (!document.getElementById('help-overlay').classList.contains('hidden')) closeHelpGuide();
+        if (!document.getElementById('dellog-overlay').classList.contains('hidden')) closeDeletionLog();
+        else if (!document.getElementById('help-overlay').classList.contains('hidden')) closeHelpGuide();
         else if (!document.getElementById('locate-overlay').classList.contains('hidden')) closeLocatePanel();
         else if (!document.getElementById('settings-overlay').classList.contains('hidden')) closeSettings();
         else if (!document.getElementById('cleanup-overlay').classList.contains('hidden')) closeCleanupWizard();

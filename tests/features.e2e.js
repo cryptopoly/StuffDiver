@@ -112,13 +112,16 @@ test('extension panel lists extensions and filters to one extension', async () =
 test('smart cleanup scans the full file list (incl. Windows-style separators)', async () => {
   await withApp(async ({ page }) => {
     await scanViaUi(page);
+    // node_modules is now a folder-level candidate (needs package.json next to it), not a per-file preset.
     const cats = await page.evaluate(() => window.api.cleanupScan());
-    const nm = cats.find(c => c.id === 'node_modules');
-    expect(nm.count).toBe(1);
+    expect(cats.find(c => c.id === 'node_modules')).toBeUndefined();
+    const folders = await page.evaluate(() => window.api.cleanupFoldersScan());
+    expect(folders.candidates.map(c => c.relPath)).toEqual(['node_modules']);
+    expect(folders.candidates[0].files).toBe(1);
     await page.locator('#tools-btn').click();
     await page.locator('[data-tool="cleanup"]').click();
     await expect(page.locator('#cleanup-body')).toContainText('node_modules');
-  });
+  }, { prepare: (fx) => fs.writeFileSync(path.join(fx.root, 'package.json'), '{}') });
 });
 
 test('duplicate finder reports the exact copy as a gold match', async () => {

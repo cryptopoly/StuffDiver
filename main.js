@@ -13,6 +13,7 @@ const { promisify } = require('util');
 const execFileP = promisify(execFile);
 const { runScan, mapLimit, isPseudoFilesystemPath } = require('./scanner');
 const { parseCliArgs, runCli, UsageError, USAGE } = require('./cli');
+const cleanupFolders = require('./cleanup-folders');
 
 // Set the app name so macOS permission dialogs show "Stuff Diver"
 app.setName('Stuff Diver');
@@ -366,12 +367,9 @@ const CLEANUP_PATTERNS = [
   { id: 'crash', label: 'Crash dumps', icon: '\u{1F4A5}', re: /(\/CrashDumps\/|\/Crashpad\/|^\/Windows\/Minidump\/|\/MEMORY\.DMP$|\.dmp$)/i },
   { id: 'aimodels', label: 'AI model caches (re-downloadable)', icon: '\u{1F9E0}', re: /(\/\.cache\/(huggingface|torch|whisper|lm-studio)\/|\/\.ollama\/models\/|\/\.lmstudio\/models\/)/i },
   { id: 'pkgcache', label: 'Package manager caches', icon: '\u{1F4E6}', re: /(\/AppData\/Local\/(pip|npm-cache|NuGet|Yarn|pnpm)\/|\/\.nuget\/packages\/|\/\.gradle\/caches\/|\/\.m2\/repository\/|\/\.cargo\/registry\/|\/Library\/Caches\/(pip|Homebrew)\/|\/var\/cache\/apt\/archives\/)/i },
-  { id: 'node_modules', label: 'node_modules', icon: '\u{1F4E6}', re: /\/node_modules\// },
-  { id: 'git', label: '.git directories', icon: '\u{1F500}', re: /\/\.git\// },
-  { id: 'syscache', label: 'System & app caches', icon: '\u{1F5C4}', re: /(\/(cache|\.cache|__pycache__|\.pytest_cache|\.npm|\.yarn|INetCache|GPUCache|Code Cache)\/|\/Library\/Caches\/|\/\.local\/share\/Trash\/|\/\.Trash\/)/i },
+  { id: 'syscache', label: 'System & app caches', icon: '\u{1F5C4}', re: /(\/(cache|\.cache|\.npm|\.yarn|INetCache|GPUCache|Code Cache)\/|\/Library\/Caches\/|\/\.local\/share\/Trash\/|\/\.Trash\/)/i },
   { id: 'temp', label: 'Temp files', icon: '\u{1F550}', re: /\.(tmp|temp|swp|swo|bak|old)$/i },
-  { id: 'xcode', label: 'Xcode DerivedData', icon: '\u{1F528}', re: /\/DerivedData\// },
-  { id: 'build', label: 'Build artifacts', icon: '\u{1F3D7}', re: /\/(dist|\.next|\.nuxt|target|\.build)\//i },
+  { id: 'build', label: 'Build artifacts', icon: '\u{1F3D7}', re: /\/(dist|\.build)\//i },
   { id: 'logs', label: 'Log files', icon: '\u{1F4DD}', re: /\.log$/i },
   { id: 'dsstore', label: '.DS_Store files', icon: '\u{1F47B}', re: /\.DS_Store$/ },
   { id: 'thumbs', label: 'Thumbnails & junk', icon: '\u{1F5D1}', re: /(Thumbs\.db|desktop\.ini|\.Spotlight|\.Trashes|\/\.cache\/thumbnails\/)/i }
@@ -657,6 +655,11 @@ const PROTECTED_HOME_SECRETS = ['.ssh', '.gnupg', '.aws', '.kube', '.docker', '.
   'Library/Keychains', 'Library/Mobile Documents', 'AppData/Roaming/Microsoft/Credentials',
   'AppData/Roaming/Microsoft/Protect', 'AppData/Local/Microsoft/Credentials'];
 
+const WIN_SYS_ROOTS = ['c:/windows', 'c:/program files', 'c:/program files (x86)', 'c:/programdata/microsoft',
+  'c:/system volume information', 'c:/$recycle.bin', 'c:/boot', 'c:/recovery'];
+const POSIX_SYS_ROOTS = ['/system', '/usr', '/bin', '/sbin', '/etc', '/dev', '/cores', '/private/etc', '/private/var/db',
+  '/opt/homebrew/bin', '/boot', '/proc', '/sys', '/lib', '/lib64', '/var/lib', '/var/db'];
+
 // lexical: skip the filesystem lookup (used when classifying many scanned paths).
 function protectedReason(inputPath, lexical) {
   const stripLongPrefix = (v) => v.replace(/^\\\\[?.]\\/, '');
@@ -685,14 +688,12 @@ function protectedReason(inputPath, lexical) {
       // Folders Smart Cleanup legitimately empties: allowed even though they sit under system roots.
       const cleanable = ['c:/windows/temp', 'c:/windows/softwaredistribution/download', 'c:/windows/minidump', 'c:/$recycle.bin'];
       const exempt = cleanable.some(r => pw !== r && pw.startsWith(r + '/')) || pw === 'c:/windows/memory.dmp';
-      const sysRoots = exempt ? [] : ['c:/windows', 'c:/program files', 'c:/program files (x86)', 'c:/programdata/microsoft',
-        'c:/system volume information', 'c:/$recycle.bin', 'c:/boot', 'c:/recovery'];
+      const sysRoots = exempt ? [] : WIN_SYS_ROOTS;
       for (const r of sysRoots) if (insideOrEq(pw, r)) return 'a Windows system folder';
       if (/^[a-z]:\/(pagefile|hiberfil|swapfile)\.sys$/.test(p)) return 'a Windows system file';
       if (/^[a-z]:\/users$/.test(p) || /^[a-z]:\/users\/[^/]+$/.test(p)) return 'a user profile folder';
     } else {
-      const sysRoots = ['/system', '/usr', '/bin', '/sbin', '/etc', '/dev', '/cores', '/private/etc', '/private/var/db',
-        '/opt/homebrew/bin', '/boot', '/proc', '/sys', '/lib', '/lib64', '/var/lib', '/var/db'];
+      const sysRoots = POSIX_SYS_ROOTS;
       for (const r of sysRoots) if (insideOrEq(p, r)) return 'an operating-system folder';
       if (['/users', '/home', '/volumes', '/applications', '/library', '/private', '/var', '/opt', '/srv', '/mnt', '/media', '/snap', '/root', '/tmp', '/lost+found', '/run'].includes(p)) return 'a top-level system folder';
     }
@@ -799,6 +800,193 @@ handleTrusted('delete-files', async (event, filePaths, source) => {
     lastScanAllFiles = lastScanAllFiles.filter(f => !gone.has(f.path));
   }
   return { deleted: deletedPaths.length, deletedPaths };
+});
+
+
+// === Folder-level Smart Cleanup ===
+
+// Reason if `folder` IS or CONTAINS a location protectedReason() guards: the
+// folder equals/encloses home, a standard home folder, a credentials store,
+// an OS folder or the scanned folder. (protectedReason covers "inside of".)
+function containsProtected(folder) {
+  const win = process.platform === 'win32';
+  const ci = win || process.platform === 'darwin';
+  const norm = (v) => { let x = v.split(path.sep).join('/').replace(/\/+$/, ''); if (ci) x = x.toLowerCase(); return win ? x.replace(/^[a-z]:/, 'c:') : x; };
+  const f = norm(path.resolve(folder));
+  const home = require('os').homedir();
+  const anchors = [[home, 'your home folder']];
+  for (const n of PROTECTED_HOME_FOLDERS) anchors.push([path.join(home, n), `a user's ${n} folder`]);
+  for (const n of PROTECTED_HOME_SECRETS) anchors.push([path.join(home, n), 'a credentials or keychain location']);
+  for (const r of approvedFolderPaths) anchors.push([r, 'the folder you scanned']);
+  for (const r of win ? WIN_SYS_ROOTS : POSIX_SYS_ROOTS) anchors.push([r, 'an operating-system folder']);
+  for (const [a, why] of anchors) {
+    const n = norm(a);
+    if (n === f || n.startsWith(f + '/')) return `contains ${why} (${a})`;
+  }
+  return null;
+}
+
+const FOLDER_BATCH_CAP = 500;
+const FOLDER_SCAN_CAP = 2000;
+
+// Full delete-time verification of one folder. Returns {ok:true, ...info} or {ok:false, reason}.
+function evaluateFolder(fp) {
+  let resolved;
+  try { resolved = assertAllowedFilePath(fp); } catch (e) { return { ok: false, path: String(fp), reason: 'is outside the scanned folder' }; }
+  const fail = (reason) => ({ ok: false, path: resolved, reason });
+  const ci = process.platform === 'win32' || process.platform === 'darwin';
+  const eq = (a, b) => ci ? a.toLowerCase() === b.toLowerCase() : a === b;
+  const pr = protectedReason(resolved);
+  if (pr) return fail(`is ${pr}`);
+  const cp = containsProtected(resolved);
+  if (cp) return fail(cp);
+  const c = cleanupFolders.classifyFolder(resolved, rawFs);
+  if (!c) return fail('is not a recognised regenerable folder (marker missing or changed)');
+  if (c.refused) return fail(c.refused);
+  // Real location must be exactly where the scan saw it: no symlinked ancestor swapped in below the scanned root.
+  try {
+    const root = [...approvedFolderPaths].find(r => cleanupFolders.isInside(resolved, r, ci));
+    const expected = path.join(fs.realpathSync.native(root), path.relative(root, resolved));
+    if (!eq(fs.realpathSync.native(resolved), expected)) return fail('resolves to a different location than the scanned path (symlink or junction involved)');
+  } catch (e) { return fail('cannot be resolved (' + (e.code || e.message) + ')'); }
+  const w = cleanupFolders.inspectFolder(resolved, rawFs);
+  if (w.error) return fail(w.error);
+  if (w.git) return fail(`contains a .git folder or file (${w.git}), so it may hold a repository`);
+  for (const d of w.dirs) {
+    const dr = protectedReason(d, true);
+    if (dr) return fail(`contains ${d}, which is ${dr}`);
+  }
+  return { ok: true, path: resolved, kind: c.kind, label: c.label, reason: c.reason, size: w.bytes, files: w.files, newest: w.newest };
+}
+
+handleTrusted('cleanup-folders-scan', async () => {
+  const ci = process.platform === 'win32' || process.platform === 'darwin';
+  if (!lastScanFolder) return { candidates: [], totalFound: 0, shown: 0, cap: FOLDER_SCAN_CAP };
+  const found = cleanupFolders.findCandidates(lastScanAllFiles, lastScanFolder, ci, rawFs);
+  const now = Date.now();
+  const out = found.map(c => {
+    let refused = protectedReason(c.path, true) ? `is ${protectedReason(c.path, true)}` : containsProtected(c.path);
+    if (!refused && c.hasGit) refused = 'contains a .git folder, so it may hold a repository';
+    const ageDays = c.newest ? Math.floor((now - c.newest) / 86400000) : null;
+    const recent = ageDays !== null && ageDays < cleanupFolders.RECENT_DAYS;
+    const many = c.files > cleanupFolders.MANY_FILES;
+    const warnings = [];
+    if (recent) warnings.push(`modified ${ageDays === 0 ? 'today' : ageDays + ' day(s) ago'}: probably in use`);
+    if (many) warnings.push(`${c.files.toLocaleString()} files: review before cleaning`);
+    if (c.defaultOff) warnings.push('may contain packages installed by hand');
+    return {
+      path: c.path, relPath: path.relative(lastScanFolder, c.path).split(path.sep).join('/'),
+      kind: c.kind, label: c.label, icon: c.icon, reason: c.reason, restore: c.restore,
+      size: c.size, files: c.files, newest: c.newest, ageDays, warnings,
+      refused: refused || null,
+      defaultChecked: !refused && !recent && !many && !c.defaultOff
+    };
+  }).sort((a, b) => b.size - a.size);
+  return { candidates: out.slice(0, FOLDER_SCAN_CAP), totalFound: out.length, shown: Math.min(out.length, FOLDER_SCAN_CAP), cap: FOLDER_SCAN_CAP };
+});
+
+let folderDeleteBusy = false;
+handleTrusted('delete-folders', async (event, folderPaths, source) => {
+  const src = source || 'smart-cleanup-folders';
+  const nothing = { deleted: 0, deletedPaths: [], freedBytes: 0 };
+  if (!Array.isArray(folderPaths) || !folderPaths.length) return nothing;
+  if (folderDeleteBusy) return { ...nothing, error: 'Another folder cleanup is already running.' };
+  folderDeleteBusy = true;
+  try {
+    const ci = process.platform === 'win32' || process.platform === 'darwin';
+    const strings = folderPaths.filter(p => typeof p === 'string' && p);
+    if (strings.length !== folderPaths.length) return { ...nothing, error: 'Refused: invalid folder path in request.' };
+    const { kept, dropped } = cleanupFolders.dedupeNested(strings.map(p => path.resolve(p)), ci);
+    if (kept.length > FOLDER_BATCH_CAP) {
+      return { ...nothing, error: `Refused: ${kept.length} folders selected, the limit is ${FOLDER_BATCH_CAP} per run. Nothing was changed.` };
+    }
+    const checks = kept.map(evaluateFolder);
+    const blocked = checks.filter(c => !c.ok);
+    if (blocked.length) {
+      const now = Date.now();
+      await logDeletion(blocked.map(b => ({ t: now, path: b.path, status: 'blocked', reason: b.reason, source: src, type: 'folder' })));
+      const list = blocked.slice(0, 10).map(b => `${b.path} ${b.reason}`);
+      return {
+        ...nothing, blocked: blocked.map(b => ({ path: b.path, reason: b.reason })),
+        error: `Refused: ${blocked.length} of ${kept.length} folder(s) failed the safety checks, so nothing was moved.\n` + list.join('\n') + (blocked.length > 10 ? `\n(+${blocked.length - 10} more)` : '')
+      };
+    }
+    const total = checks.reduce((a, c) => a + c.size, 0);
+    if (!E2E) {
+      const top = [...checks].sort((a, b) => b.size - a.size).slice(0, 10).map(c => `${formatSizeMain(c.size)}  ${c.path}`);
+      const recent = checks.filter(c => c.newest && Date.now() - c.newest < cleanupFolders.RECENT_DAYS * 86400000).length;
+      const r = await dialog.showMessageBox(mainWindow, {
+        type: 'warning', buttons: ['Cancel', 'Move to Trash'], defaultId: 0, cancelId: 0,
+        title: 'Clean up folders',
+        message: `Move ${checks.length} folder${checks.length > 1 ? 's' : ''} (${formatSizeMain(total)}, ${checks.reduce((a, c) => a + c.files, 0).toLocaleString()} files) to the trash?`,
+        detail: (recent ? `${recent} of them were modified in the last ${cleanupFolders.RECENT_DAYS} days.\n\n` : '') +
+          `Largest ${top.length}:\n${top.join('\n')}\n\nThey go to the system trash and can be restored from there. Each one is recorded in the deletion log.`
+      });
+      if (r.response !== 1) return nothing;
+    }
+    // The dialog can sit open for a long time: verify everything again before touching anything.
+    const again = checks.map(c => evaluateFolder(c.path));
+    const changed = again.filter(c => !c.ok);
+    if (changed.length) {
+      const now = Date.now();
+      await logDeletion(changed.map(b => ({ t: now, path: b.path, status: 'blocked', reason: 'changed before delete: ' + b.reason, source: src, type: 'folder' })));
+      return { ...nothing, blocked: changed.map(b => ({ path: b.path, reason: b.reason })), error: `Refused: ${changed[0].path} changed before it could be deleted (${changed[0].reason}). Nothing was moved.` };
+    }
+    const deletedPaths = [], log = [], failed = [];
+    let freedBytes = 0;
+    for (const c of checks) {
+      const entry = { t: Date.now(), path: c.path, type: 'folder', size: c.size, files: c.files, category: c.kind, source: src };
+      // Last-moment check, immediately before the move.
+      const last = cleanupFolders.classifyFolder(c.path, rawFs);
+      if (!last || last.refused) {
+        log.push({ ...entry, status: 'blocked', reason: 'changed just before delete: ' + ((last && last.refused) || 'marker lost') });
+        failed.push(c.path);
+        continue;
+      }
+      try {
+        await shell.trashItem(c.path);
+        deletedPaths.push(c.path); freedBytes += c.size;
+        log.push({ ...entry, status: 'trashed', reason: c.reason });
+      } catch (e) {
+        failed.push(c.path);
+        log.push({ ...entry, status: 'failed', reason: e.message });
+      }
+    }
+    await logDeletion(log);
+    if (deletedPaths.length) {
+      const gone = deletedPaths.map(p => p + path.sep);
+      const lc = ci ? (v) => v.toLowerCase() : (v) => v;
+      const goneL = gone.map(lc);
+      lastScanAllFiles = lastScanAllFiles.filter(f => { const fl = lc(f.path); return !goneL.some(g => fl.startsWith(g)); });
+    }
+    return { deleted: deletedPaths.length, deletedPaths, freedBytes, failed, dedupedNested: dropped };
+  } finally {
+    folderDeleteBusy = false;
+  }
+});
+
+// Filtered, paginated view of the deletion log (newest first).
+handleTrusted('query-deletion-log', async (event, opts) => {
+  const o = opts || {};
+  const limit = Math.max(1, Math.min(Number(o.limit) || 200, 1000));
+  const offset = Math.max(0, Number(o.offset) || 0);
+  const status = ['trashed', 'failed', 'blocked'].includes(o.status) ? o.status : null;
+  const q = typeof o.search === 'string' ? o.search.trim().toLowerCase() : '';
+  let lines = [];
+  try { lines = (await fs.promises.readFile(deletionLogPath(), 'utf8')).split('\n'); } catch (e) { /* no log yet */ }
+  const counts = { trashed: 0, failed: 0, blocked: 0 };
+  const matched = [];
+  let total = 0;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (!lines[i]) continue;
+    let e; try { e = JSON.parse(lines[i]); } catch (er) { continue; }
+    total++;
+    if (counts[e.status] !== undefined) counts[e.status]++;
+    if (status && e.status !== status) continue;
+    if (q && !`${e.path || ''} ${e.reason || ''} ${e.source || ''} ${e.category || ''}`.toLowerCase().includes(q)) continue;
+    matched.push(e);
+  }
+  return { entries: matched.slice(offset, offset + limit), matched: matched.length, total, counts, logPath: deletionLogPath() };
 });
 
 // === Scan cache ===
