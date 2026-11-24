@@ -380,6 +380,8 @@ handleTrusted('cleanup-scan', async () => {
     const rp = '/' + String(f.relativePath || f.name).replace(/\\/g, '/');
     for (const c of cats) {
       if (c.re.test(rp)) {
+        // Never offer paths the delete guard would refuse (a single one refuses the whole request).
+        if (protectedReason(f.path, true)) break;
         c.count++;
         c.totalSize += f.size;
         if (c.paths.length < CLEANUP_PATH_CAP) c.paths.push(f.path);
@@ -650,25 +652,32 @@ const PROTECTED_HOME_SECRETS = ['.ssh', '.gnupg', '.aws', '.kube', '.docker', '.
   'Library/Keychains', 'Library/Mobile Documents', 'AppData/Roaming/Microsoft/Credentials',
   'AppData/Roaming/Microsoft/Protect', 'AppData/Local/Microsoft/Credentials'];
 
-function protectedReason(inputPath) {
-  const variants = new Set([path.resolve(inputPath)]);
-  try { variants.add(fs.realpathSync(path.resolve(inputPath))); } catch (e) { /* missing: judge by name */ }
+// lexical: skip the filesystem lookup (used when classifying many scanned paths).
+function protectedReason(inputPath, lexical) {
+  const stripLongPrefix = (v) => v.replace(/^\\\\[?.]\\/, '');
+  const variants = new Set([path.resolve(stripLongPrefix(inputPath))]);
+  // native realpath also expands Windows 8.3 short names (PROGRA~1)
+  if (!lexical) { try { variants.add(stripLongPrefix(fs.realpathSync.native(path.resolve(stripLongPrefix(inputPath))))); } catch (e) { /* missing: judge by name */ } }
   const win = process.platform === 'win32';
-  const norm = (v) => { const x = v.split(path.sep).join('/').replace(/\/+$/, ''); return win ? x.toLowerCase() : x; };
+  // Windows and macOS volumes are case-insensitive by default
+  const ci = win || process.platform === 'darwin';
+  const norm = (v) => { const x = v.split(path.sep).join('/').replace(/\/+$/, ''); return ci ? x.toLowerCase() : x; };
   const home = norm(require('os').homedir());
   const insideOrEq = (p, root) => p === root || p.startsWith(root + '/');
   for (const raw of variants) {
     const p = norm(raw) || '/';
+    // Windows system folders are protected on every drive letter.
+    const pw = win ? p.replace(/^[a-z]:/, 'c:') : p;
     if (p === '/' || /^[a-z]:$/i.test(p)) return 'a drive or filesystem root';
     if (p === home) return 'your home folder';
     for (const r of approvedFolderPaths) if (norm(r) === p) return 'the folder you scanned (delete items inside it instead)';
     if (win) {
       // Folders Smart Cleanup legitimately empties: allowed even though they sit under system roots.
       const cleanable = ['c:/windows/temp', 'c:/windows/softwaredistribution/download', 'c:/windows/minidump', 'c:/$recycle.bin'];
-      const exempt = cleanable.some(r => p !== r && p.startsWith(r + '/')) || p === 'c:/windows/memory.dmp';
+      const exempt = cleanable.some(r => pw !== r && pw.startsWith(r + '/')) || pw === 'c:/windows/memory.dmp';
       const sysRoots = exempt ? [] : ['c:/windows', 'c:/program files', 'c:/program files (x86)', 'c:/programdata/microsoft',
         'c:/system volume information', 'c:/$recycle.bin', 'c:/boot', 'c:/recovery'];
-      for (const r of sysRoots) if (insideOrEq(p, r)) return 'a Windows system folder';
+      for (const r of sysRoots) if (insideOrEq(pw, r)) return 'a Windows system folder';
       if (/^[a-z]:\/(pagefile|hiberfil|swapfile)\.sys$/.test(p)) return 'a Windows system file';
       if (/^[a-z]:\/users$/.test(p) || /^[a-z]:\/users\/[^/]+$/.test(p)) return 'a user profile folder';
     } else {
@@ -846,17 +855,25 @@ handleTrusted('load-cache', async (event, folderPath) => {
   }
 });
 
+// One save at a time per folder: a quick rescan must not interleave rotation and writes.
+const saveCacheChains = new Map();
 handleTrusted('save-cache', async (event, folderPath, result) => {
   try {
     folderPath = assertApprovedFolder(folderPath);
     if (lastScanFolder !== folderPath) return false; // full list belongs to another scan
-    const cp = cachePaths(folderPath);
-    await renameIfExists(cp.result, cp.prevResult);
-    await renameIfExists(cp.files, cp.prevFiles);
-    await writeFilesSidecar(cp.files, lastScanAllFiles);
-    const data = { ...result, cachedAt: Date.now(), folderPath, scanVersion: SCAN_CACHE_VERSION };
-    await fs.promises.writeFile(cp.result, JSON.stringify(data));
-    return true;
+    const files = lastScanAllFiles; // snapshot: the array is replaced, not mutated, by later scans
+    const prior = saveCacheChains.get(folderPath) || Promise.resolve();
+    const job = prior.catch(() => {}).then(async () => {
+      const cp = cachePaths(folderPath);
+      await renameIfExists(cp.result, cp.prevResult);
+      await renameIfExists(cp.files, cp.prevFiles);
+      await writeFilesSidecar(cp.files, files);
+      const data = { ...result, cachedAt: Date.now(), folderPath, scanVersion: SCAN_CACHE_VERSION };
+      await fs.promises.writeFile(cp.result, JSON.stringify(data));
+      return true;
+    });
+    saveCacheChains.set(folderPath, job);
+    return await job;
   } catch (e) {
     return false;
   }
@@ -1175,7 +1192,9 @@ async function quickScanSize(folderPath) {
       } else if (entry.isFile()) {
         try {
           const stat = await fs.promises.stat(fullPath);
-          totalSize += stat.blocks != null ? stat.blocks * 512 : stat.size;
+          let sz = stat.blocks != null ? stat.blocks * 512 : stat.size;
+          if (process.platform === 'win32' && sz > stat.size + 4 * 1024 * 1024) sz = stat.size; // garbage NTFS allocation
+          totalSize += sz;
           fileCount++;
         } catch (e) { /* skip */ }
       }

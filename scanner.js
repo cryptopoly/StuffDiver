@@ -443,6 +443,8 @@ async function runScan(folderPath, options = {}) {
       const t0 = Date.now();
       const r = await require('./mft-scan').scanNtfsVolume(folderPath, { isCancelled: () => scanState.cancelled });
       for (let i = 0; i < r.count; i++) {
+        // Yield now and then so cancel and IPC stay responsive on multi-million-file volumes.
+        if (i % 50000 === 49999) { await new Promise(res => setImmediate(res)); if (scanState.cancelled) break; }
         if (r.cloud[i]) cloudOnlyCount++;
         recordFile(r.fullPaths[i], r.names[i], r.cloud[i] ? 0 : r.diskSize[i], r.logicalSize[i], r.mtimeMs[i], r.cloud[i] ? 'icloud-only' : undefined);
       }

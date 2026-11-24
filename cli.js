@@ -75,13 +75,21 @@ function csvCell(v) {
   return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
 }
 
-function toCsv(files) {
-  const lines = ['path,size_on_disk,logical_size,mtime,ext'];
-  for (const f of files) {
-    const mtime = f.mtime ? new Date(f.mtime).toISOString() : '';
-    lines.push([f.path, f.size, f.logicalSize || f.size, mtime, f.ext].map(csvCell).join(','));
+// Written in chunks: one string for millions of rows would exceed V8's string limit.
+function writeCsv(file, files) {
+  const fd = fs.openSync(file, 'w');
+  try {
+    fs.writeSync(fd, 'path,size_on_disk,logical_size,mtime,ext\n');
+    let buf = [];
+    for (const f of files) {
+      const mtime = f.mtime ? new Date(f.mtime).toISOString() : '';
+      buf.push([f.path, f.size, f.logicalSize || f.size, mtime, f.ext].map(csvCell).join(','));
+      if (buf.length >= 20000) { fs.writeSync(fd, buf.join('\n') + '\n'); buf = []; }
+    }
+    if (buf.length) fs.writeSync(fd, buf.join('\n') + '\n');
+  } finally {
+    fs.closeSync(fd);
   }
-  return lines.join('\n') + '\n';
 }
 
 function flattenFolders(node, prefix, out) {
@@ -174,13 +182,12 @@ async function runCli(opts, { version }) {
   try {
     for (const out of opts.exports) {
       const ext = path.extname(out).toLowerCase();
-      let text;
-      if (ext === '.csv') text = toCsv(result.allFiles);
+      if (ext === '.csv') writeCsv(path.resolve(out), result.allFiles);
       else {
         summary = summary || buildSummary(folder, result, opts);
-        text = ext === '.json' ? JSON.stringify(summary, null, 2) + '\n' : toHtml(summary);
+        const text = ext === '.json' ? JSON.stringify(summary, null, 2) + '\n' : toHtml(summary);
+        fs.writeFileSync(path.resolve(out), text);
       }
-      fs.writeFileSync(path.resolve(out), text);
       err(`Wrote ${path.resolve(out)}`);
     }
   } catch (e) {
