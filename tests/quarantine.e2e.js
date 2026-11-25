@@ -864,6 +864,76 @@ test('restore only lands inside an approved or recorded scan folder; anything el
   });
 });
 
+// ---------- Windows per-user folder securing (injectable runner, pure unit tests) ----------
+test.describe('unit: per-user folder ACL', () => {
+  const SID = 'S-1-5-21-111-222-333-1001';
+  const GOOD = `D:PAI(A;OICI;FA;;;${SID})(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)`;
+  function setup(over = {}) {
+    const root = tmp();
+    const calls = [];
+    const run = over.run || (async (cmd, args) => {
+      calls.push([cmd, ...args]);
+      if (args.includes('/save')) fs.writeFileSync(args[args.indexOf('/save') + 1], Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from('shared\r\n' + (over.sddl || GOOD) + '\r\n', 'utf16le')]));
+      if (cmd === 'cmd.exe') return `01/01/2026  10:00    <DIR>          ${over.owner || 'PC\\bob'}  ${path.basename(over.dirName || 'sid-x')}\r\n`;
+      return '';
+    });
+    const sec = q.createDirSecurer({ fsx: fs, run, getSid: async () => SID, getUserName: async () => 'PC\\bob', scratch: path.join(root, 'acl.txt'), now: over.now });
+    return { root, calls, sec, dir: path.join(root, q.QDIR, 'sid-x') };
+  }
+  test('SDDL parsing: protected, only the three SIDs, no inherited or deny entries', () => {
+    expect(q.parseSddl(GOOD)).toMatchObject({ protected: true, inheritedAce: false, denyAce: false, allFull: true, trustees: [SID, 'S-1-5-18', 'S-1-5-32-544'] });
+    expect(q.parseSddl('D:AI(A;OICIID;FA;;;AU)')).toMatchObject({ protected: false, inheritedAce: true });
+    expect(q.parseSddl('nothing here')).toBeNull();
+  });
+  test('a new folder is created exclusively, gets the icacls grant, is verified and then cached for the session', async () => {
+    const { root, calls, sec, dir } = setup();
+    try {
+      await sec.ensure(dir);
+      expect(fs.existsSync(dir)).toBe(true);
+      expect(calls[0].slice(0, 4)).toEqual(['icacls.exe', dir, '/inheritance:r', '/grant:r']);
+      expect(calls[0]).toContain(`*${SID}:(OI)(CI)F`); expect(calls[0]).toContain('*S-1-5-18:(OI)(CI)F'); expect(calls[0]).toContain('*S-1-5-32-544:(OI)(CI)F');
+      const n = calls.length; await sec.ensure(dir);
+      expect(calls.length).toBe(n); expect(sec.isVerified(dir)).toBe(true);   // cached: no more processes
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
+  test('an ACL that did not apply as expected (extra principal, inherited entry) is refused', async () => {
+    for (const sddl of [`D:PAI(A;OICI;FA;;;${SID})(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;AU)`, `D:AI(A;OICIID;FA;;;${SID})`, `D:PAI(A;OICI;FA;;;SY)`]) {
+      const { root, sec, dir } = setup({ sddl });
+      try { await expect(sec.ensure(dir)).rejects.toThrow(/could not secure the quarantine folder \(the permissions did not apply/); } finally { fs.rmSync(root, { recursive: true, force: true }); }
+    }
+  });
+  test('a folder that already existed must match exactly (no new grant is applied) and be owned by this account or Administrators', async () => {
+    let { root, calls, sec, dir } = setup();
+    try { fs.mkdirSync(dir, { recursive: true }); await sec.ensure(dir); expect(calls.some(c => c.includes('/grant:r'))).toBe(false); expect(calls.some(c => c[0] === 'cmd.exe')).toBe(true); } finally { fs.rmSync(root, { recursive: true, force: true }); }
+    ({ root, sec, dir } = setup({ owner: 'PC\\mallory' }));
+    try { fs.mkdirSync(dir, { recursive: true }); await expect(sec.ensure(dir)).rejects.toThrow(/owned by another account/); } finally { fs.rmSync(root, { recursive: true, force: true }); }
+    ({ root, sec, dir } = setup({ owner: 'BUILTIN\\Administrators' }));
+    try { fs.mkdirSync(dir, { recursive: true }); await sec.ensure(dir); } finally { fs.rmSync(root, { recursive: true, force: true }); }
+    ({ root, sec, dir } = setup({ sddl: `D:AI(A;OICI;FA;;;AU)` }));
+    try { fs.mkdirSync(dir, { recursive: true }); await expect(sec.ensure(dir)).rejects.toThrow(/existing folder has other permissions/); } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
+  test('a timeout gives the short reason, is not cached beyond 30 s, and works on retry', async () => {
+    let t = 0, slow = true;
+    const base = setup();
+    const sec = q.createDirSecurer({ fsx: fs, now: () => t, getSid: async () => SID, getUserName: async () => 'PC\\bob', scratch: path.join(base.root, 'acl.txt'),
+      run: async (cmd, args) => { if (slow) throw new Error('timed out after 5 s'); if (args.includes('/save')) fs.writeFileSync(args[args.indexOf('/save') + 1], GOOD); return ''; } });
+    try {
+      await expect(sec.ensure(base.dir)).rejects.toThrow('could not secure the quarantine folder (timed out)');
+      slow = false; t += 5000;
+      await expect(sec.ensure(base.dir)).rejects.toThrow(/timed out/);   // still inside the 30 s window: same answer, no new process
+      t += 31000;
+      expect(fs.existsSync(base.dir)).toBe(true);                         // made by the failed try: still ours, so the retry applies the grant
+      await sec.ensure(base.dir);
+      expect(sec.isVerified(base.dir)).toBe(true);
+    } finally { fs.rmSync(base.root, { recursive: true, force: true }); }
+  });
+  test('processes run strictly one at a time', async () => {
+    let active = 0, max = 0;
+    const { root, sec, dir } = setup({ run: async (cmd, args) => { active++; max = Math.max(max, active); await new Promise(r => setTimeout(r, 15)); if (args.includes('/save')) fs.writeFileSync(args[args.indexOf('/save') + 1], GOOD); active--; return ''; } });
+    try { await Promise.all([sec.ensure(dir), sec.ensure(dir + '-b')]); expect(max).toBe(1); } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
+});
+
 // ---------- W1/P1/P2: drive-type probe (pure unit tests, no windows) ----------
 test.describe('unit: drive-type probe', () => {
   const mk2 = (o) => q.createDriveProbe({ systemDrive: 'C', runFsutil: async (l) => `${l}: - Fixed Drive`, runDotnet: async () => 'C|Fixed|\nS|Fixed|\n', runBus: async () => 'S|SATA\nD|USB\n', ...o });

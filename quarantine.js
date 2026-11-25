@@ -457,4 +457,76 @@ function createDriveProbe(opts) {
   return api;
 }
 
-module.exports = { parseDriveList, parseFsutilDriveType, parseBusList, createDriveProbe, DRIVE_FAIL_MS, QDIR, RETENTION_DAYS, MANIFEST, RUN_RE, isQuarantinePath, runDirName, newRunId, chooseRoot, createRun, moveIn, setItemStatus, writeManifest, readRun, listRuns, restoreItem, markRestored, readRegistry, addRegistry, registryPath };
+
+// ---- Windows: private per-user folder on a shared drive (no PowerShell, never blocks the main thread) ----
+const SDDL_SIDS = { SY: 'S-1-5-18', BA: 'S-1-5-32-544' };
+// Parses the DACL line of `icacls <dir> /save`: returns { protected, trustees:[SID], inheritedAce, allFull }.
+function parseSddl(text) {
+  const line = String(text).split(/\r?\n/).map(l => l.trim()).find(l => /^(O:.*)?(G:.*)?D:/.test(l) || l.startsWith('D:'));
+  if (!line) return null;
+  const d = line.slice(line.indexOf('D:') + 2).replace(/S:.*$/, '');
+  const flags = d.slice(0, d.indexOf('(') < 0 ? d.length : d.indexOf('('));
+  const out = { protected: /P/.test(flags), trustees: [], inheritedAce: false, allFull: true, denyAce: false };
+  for (const m of d.matchAll(/\(([^)]*)\)/g)) {
+    const f = m[1].split(';');
+    if (f.length < 6) return null;
+    if (f[0] !== 'A') out.denyAce = true;
+    if (/ID/.test(f[1])) out.inheritedAce = true;
+    if (f[2] !== 'FA' && !/^0x1f01ff$/i.test(f[2])) out.allFull = false;
+    out.trustees.push(SDDL_SIDS[f[5]] || f[5]);
+  }
+  return out;
+}
+// opts: { fsx, run(cmd, args, ms) -> Promise<string> (rejects on failure; err.message 'timed out after N s' for timeouts),
+//   getSid() -> Promise<string>, getUserName() -> Promise<string>, scratch: file path for `icacls /save`, now() }
+// ensure(dir): resolves when `dir` is verified private to this account; rejects with a SHORT reason otherwise.
+function createDirSecurer(opts) {
+  const fsx = opts.fsx || fs, now = opts.now || Date.now;
+  const verified = new Set(), failed = new Map(), madeByUs = new Set();
+  let chain = Promise.resolve();
+  const serial = (fn) => { const p = chain.then(fn, fn); chain = p.then(() => {}, () => {}); return p; };
+  const refuse = (why) => Object.assign(new Error(`could not secure the quarantine folder (${why})`), { secure: true });
+  const timedOut = (e) => /timed out/.test((e && e.message) || '');
+  async function work(dir) {
+    const sid = await opts.getSid().catch(() => null);
+    if (!sid) throw refuse('the account SID is unknown');
+    let created = false;
+    fsx.mkdirSync(path.dirname(dir), { recursive: true, mode: 0o755 });
+    try { fsx.mkdirSync(dir); created = true; madeByUs.add(dir); } catch (e) { if (e.code !== 'EEXIST') throw refuse(e.code || e.message); created = madeByUs.has(dir); }   // a folder we made on an earlier (failed) try is still ours
+    try {
+      if (created) await opts.run('icacls.exe', [dir, '/inheritance:r', '/grant:r', `*${sid}:(OI)(CI)F`, '*S-1-5-18:(OI)(CI)F', '*S-1-5-32-544:(OI)(CI)F'], 5000);
+      fsx.writeFileSync(opts.scratch, '');
+      await opts.run('icacls.exe', [dir, '/save', opts.scratch], 5000);
+    } catch (e) { throw refuse(timedOut(e) ? 'timed out' : 'icacls failed'); }
+    const buf = fsx.readFileSync(opts.scratch);   // icacls writes UTF-16 (with BOM); accept UTF-8 too
+    const acl = parseSddl(buf[0] === 0xff && buf[1] === 0xfe ? buf.toString('utf16le') : buf.toString('utf8'));
+    const allowed = new Set([sid, 'S-1-5-18', 'S-1-5-32-544']);
+    if (!acl || !acl.protected || acl.inheritedAce || acl.denyAce || !acl.allFull || !acl.trustees.includes(sid) || acl.trustees.some(t => !allowed.has(t))) {
+      throw refuse(created ? 'the permissions did not apply as expected' : 'an existing folder has other permissions');
+    }
+    if (!created) {   // somebody else's pre-made folder could still be OWNED by them: check the owner column
+      try {
+        const name = path.basename(dir), parent = path.dirname(dir);
+        const listing = await opts.run('cmd.exe', ['/d', '/c', 'dir', '/q', '/a:d', parent], 5000);
+        const user = ((await opts.getUserName().catch(() => '')) || '').toLowerCase();
+        const row = listing.split(/\r?\n/).find(l => l.trimEnd().toLowerCase().endsWith(' ' + name.toLowerCase()));
+        const owner = row && (/\s(\S+\\\S+)\s+\S+\s*$/.exec(row.trimEnd()) || [])[1];
+        if (!owner || !(owner.toLowerCase() === user || /\\administrators$/i.test(owner))) throw refuse('an existing folder is owned by another account');
+      } catch (e) { throw e.secure ? e : refuse(timedOut(e) ? 'timed out' : 'owner check failed'); }
+    }
+  }
+  return {
+    isVerified: (dir) => verified.has(dir),
+    ensure(dir) {
+      if (verified.has(dir)) return Promise.resolve();
+      const f = failed.get(dir);
+      if (f && now() - f.t < DRIVE_FAIL_MS) return Promise.reject(f.err);   // a failure is cached for 30 s only
+      return serial(async () => {
+        if (verified.has(dir)) return;
+        try { await work(dir); verified.add(dir); failed.delete(dir); } catch (e) { const err = e.secure ? e : refuse(e.code || e.message || 'error'); failed.set(dir, { t: now(), err }); throw err; }
+      });
+    }
+  };
+}
+
+module.exports = { parseSddl, createDirSecurer, parseDriveList, parseFsutilDriveType, parseBusList, createDriveProbe, DRIVE_FAIL_MS, QDIR, RETENTION_DAYS, MANIFEST, RUN_RE, isQuarantinePath, runDirName, newRunId, chooseRoot, createRun, moveIn, setItemStatus, writeManifest, readRun, listRuns, restoreItem, markRestored, readRegistry, addRegistry, registryPath };
