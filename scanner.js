@@ -350,6 +350,7 @@ async function runScan(folderPath, options = {}) {
       const isICloudPlaceholder = process.platform === 'darwin' &&
         entry.name.startsWith('.') && entry.name.endsWith('.icloud') && entry.name.length > 8;
       const fullPath = path.join(dir, entry.name);
+      if (entry.name.toLowerCase() === '.stuffdiverquarantine') continue;   // our own quarantine folder is never scanned
       if (isExcluded && isExcluded(fullPath, entry.name)) { excludedCount++; continue; }
       if (!isICloudPlaceholder && entry.isDirectory() && !entry.isSymbolicLink()) {
         if (isPseudoFilesystemPath(fullPath)) continue;
@@ -447,6 +448,7 @@ async function runScan(folderPath, options = {}) {
       for (let i = 0; i < r.count; i++) {
         // Yield now and then so cancel and IPC stay responsive on multi-million-file volumes.
         if (i % 50000 === 49999) { await new Promise(res => setImmediate(res)); if (scanState.cancelled) break; }
+        if (r.fullPaths[i].toLowerCase().includes('.stuffdiverquarantine')) continue;   // never scan the quarantine
         if (r.cloud[i]) cloudOnlyCount++;
         recordFile(r.fullPaths[i], r.names[i], r.cloud[i] ? 0 : r.diskSize[i], r.logicalSize[i], r.mtimeMs[i], r.cloud[i] ? 'icloud-only' : undefined);
       }

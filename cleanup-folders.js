@@ -5,6 +5,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { isQuarantinePath } = require('./quarantine');
 
 const RECENT_DAYS = 14;
 const MANY_FILES = 50000;
@@ -476,6 +477,7 @@ function dedupeNested(paths, ci) {
 // {path, size, mtime}. Marker checks hit the real filesystem, but only for
 // folders whose name could qualify, so this stays cheap on huge scans.
 function findCandidates(files, scanRoot, ci, fsx = fs, mounts = getMountPoints(), cwds = runningCwds()) {
+  files = files.filter(f => !isQuarantinePath(f.path));   // the quarantine is never a candidate
   const root = path.resolve(scanRoot);
   const possible = new Set();
   const dirKey = (d) => ci ? d.toLowerCase() : d;

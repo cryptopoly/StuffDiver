@@ -14,6 +14,7 @@ const execFileP = promisify(execFile);
 const { runScan, mapLimit, isPseudoFilesystemPath } = require('./scanner');
 const { parseCliArgs, runCli, UsageError, USAGE } = require('./cli');
 const cleanupFolders = require('./cleanup-folders');
+const quarantine = require('./quarantine');
 
 // Set the app name so macOS permission dialogs show "Stuff Diver"
 app.setName('Stuff Diver');
@@ -707,7 +708,8 @@ const POSIX_SYS_ROOTS = ['/system', '/usr', '/bin', '/sbin', '/etc', '/dev', '/c
   '/opt/homebrew/bin', '/boot', '/proc', '/sys', '/lib', '/lib64', '/var/lib', '/var/db'];
 
 // lexical: skip the filesystem lookup (used when classifying many scanned paths).
-function protectedReason(inputPath, lexical) {
+function protectedReason(inputPath, lexical, allowQuarantine) {
+  if (!allowQuarantine && quarantine.isQuarantinePath(inputPath)) return 'inside the Stuff Diver quarantine folder';
   const stripLongPrefix = (v) => v.replace(/^\\\\[?.]\\/, '');
   const variants = new Set([path.resolve(stripLongPrefix(inputPath))]);
   // \\host\C$\Windows is the same folder as C:\Windows
@@ -824,6 +826,7 @@ const FILE_REQUEST_CAP = 50000;
 const trashFn = (p) => (E2E && typeof global.__e2eTrash === 'function') ? global.__e2eTrash(p) : shell.trashItem(p); // E2E-only hook can simulate platform quirks
 // Location rules shared by the Smart Cleanup file list and delete-files: ONE function, no flags, so the two can never drift.
 function fileLocationReason(fp) {
+  if (quarantine.isQuarantinePath(fp)) return 'inside the Stuff Diver quarantine folder (restore or move it to the Trash from the Quarantine window)';
   if (cleanupFolders.cloudSyncedReason(fp)) return 'in a cloud-synced folder: deleting here deletes it everywhere';
   if (cleanupFolders.trashReason(fp)) return 'already in a Trash or Recycle Bin (it cannot be moved to the Trash again)';
   const app = cleanupFolders.installedAppReason(fp);
@@ -1110,6 +1113,61 @@ async function evaluateFolder(fp) {
   return { ok: true, path: resolved, logPath: realNow || resolved, kind: c.kind, label: c.label, reason: c.reason, size: w.bytes, files: w.files, newest: w.newest, warnings: sig.warnings };
 }
 
+// === Quarantine (developer-folder cleanup): same-volume rename into a hidden dated folder, with a manifest ===
+const quarantineOn = () => loadSettings().useQuarantine !== false;
+const quarantineHome = () => (E2E && process.env.STUFFDIVER_E2E_QHOME) || require('os').homedir();
+function quarantineRootProblem(root) {
+  const c = cleanupFolders.cloudSyncedReason(root); if (c) return 'is cloud-synced';
+  const t = cleanupFolders.trashReason(root); if (t) return t;
+  const a = cleanupFolders.installedAppReason(root); if (a) return a;
+  const pr = protectedReason(root, false, true); if (pr) return 'is ' + pr;
+  try { // judge where the parent really is (symlinked home, subst drives, 8.3 names)
+    const real = fs.realpathSync.native(path.dirname(root));
+    const rc = cleanupFolders.cloudSyncedReason(real) ? 'is cloud-synced' : (cleanupFolders.trashReason(real) || null); if (rc) return rc;
+  } catch (e) { /* parent missing: the volume probe handles it */ }
+  return null;
+}
+// Rules a restore destination must pass (same family as evaluateFolder: protected, cloud, trash, bundle, mount, real path).
+function restoreDestProblem(dest) {
+  const ci = process.platform === 'win32' || process.platform === 'darwin';
+  const pr = protectedReason(dest); if (pr) return pr;
+  const cp = containsProtected(dest); if (cp) return cp;
+  if (cleanupFolders.cloudSyncedReason(dest)) return 'in a cloud-synced folder';
+  const tr = cleanupFolders.trashReason(dest); if (tr) return tr.replace(/^is /, 'in a Trash: ');
+  const ia = cleanupFolders.installedAppReason(dest); if (ia) return ia;
+  let real = null;
+  try { real = path.join(fs.realpathSync.native(path.dirname(dest)), path.basename(dest)); } catch (e) { return 'in a folder that cannot be resolved'; }
+  if (real !== dest) {
+    const r2 = protectedReason(real, true); if (r2) return `at ${real}, which is ${r2}`;
+    const c2 = containsProtected(real); if (c2) return `at ${real}, which ${c2}`;
+    if (cleanupFolders.cloudSyncedReason(real)) return `at ${real}, a cloud-synced folder`;
+    if (cleanupFolders.trashReason(real)) return `at ${real}, a Trash`;
+  }
+  const mc = cleanupFolders.mountConflict([dest, real], mountList(), ci); if (mc) return mc;
+  return null;
+}
+function quarantineCtx() {
+  const ci = process.platform === 'win32' || process.platform === 'darwin';
+  return {
+    platform: process.platform, home: quarantineHome(), fsx: rawFs, uid: typeof process.getuid === 'function' ? process.getuid() : null,
+    mounts: () => mountList(), rootOk: quarantineRootProblem, destReason: restoreDestProblem,
+    rename: (E2E && typeof global.__e2eRename === 'function') ? global.__e2eRename : null,
+    hide: (root) => { if (process.platform === 'win32') execFile('attrib', ['+h', root], () => {}); },
+    inspect: (dir) => cleanupFolders.inspectFolder(dir, rawFs, undefined, null, null),
+    canRecreate: (parent, scanRoot) => {
+      if (!scanRoot || !path.isAbsolute(scanRoot) || !cleanupFolders.isInside(parent, scanRoot, ci)) return false;
+      try { if (!fs.statSync(scanRoot).isDirectory()) return false; } catch (e) { return false; }
+      return !restoreDestProblem(parent);
+    }
+  };
+}
+function quarantineRoots() {
+  const roots = quarantine.readRegistry(app.getPath('userData'));
+  const home = path.join(quarantineHome(), quarantine.QDIR);
+  if (!roots.includes(home)) roots.push(home);
+  return roots;
+}
+
 handleTrusted('cleanup-folders-scan', async () => {
   const ci = process.platform === 'win32' || process.platform === 'darwin';
   if (!devFoldersOn()) return { candidates: [], totalFound: 0, shown: 0, cap: FOLDER_SCAN_CAP, disabled: true };
@@ -1187,19 +1245,29 @@ handleTrusted('delete-folders', async (event, folderPaths, source) => {
       };
     }
     const total = checks.reduce((a, c) => a + c.size, 0);
-    if (!E2E) {
+    const useQ = quarantineOn();
+    const plans = new Map();
+    if (useQ) { const qc = quarantineCtx(); for (const c of checks) plans.set(c.path, quarantine.chooseRoot(c.path, qc)); }
+    const nQ = [...plans.values()].filter(x => x.root).length;
+    const nT = checks.length - nQ;
+    {
       const top = [...checks].sort((a, b) => b.size - a.size).slice(0, 10).map(c => `${formatSizeMain(c.size)}  ${cleanupFolders.safeText(c.path)}`);
       const recent = checks.filter(c => c.newest && Date.now() - c.newest < cleanupFolders.RECENT_DAYS * 86400000).length;
       const warned = checks.filter(c => c.warnings && c.warnings.length);
-      const r = await dialog.showMessageBox(mainWindow, {
-        type: 'warning', buttons: ['Cancel', 'Move to Trash'], defaultId: 0, cancelId: 0,
+      const where = nQ
+        ? `Nothing is deleted. ${nQ === checks.length ? 'These folders are' : nQ + ' of them are'} moved to a hidden quarantine folder (${quarantine.QDIR}) next to your files, and you can put every one back exactly where it was from Tools > Quarantine. Quarantined folders keep using disk space until you empty the quarantine, which moves them to the Trash.` +
+          (nT ? ` ${nT} cannot be quarantined (${cleanupFolders.safeText([...plans.values()].find(x => x.error).error, 200)}) and go to the Trash instead.` : '')
+        : 'They are moved to the Trash (macOS/Linux) or Recycle Bin (Windows); nothing is permanently deleted, and you can restore them from there.';
+      const opts = {
+        type: 'warning', buttons: ['Cancel', nQ ? 'Move to quarantine' : 'Move to Trash'], defaultId: 0, cancelId: 0,
         title: 'Clean up folders',
-        message: `Move ${checks.length} folder${checks.length > 1 ? 's' : ''} (${formatSizeMain(total)} logical size, ${checks.reduce((a, c) => a + c.files, 0).toLocaleString()} entries counted just now) to the trash?`,
+        message: `Move ${checks.length} folder${checks.length > 1 ? 's' : ''} (${formatSizeMain(total)} logical size, ${checks.reduce((a, c) => a + c.files, 0).toLocaleString()} entries counted just now) ${nQ ? 'to quarantine' : 'to the trash'}?`,
         detail: (recent ? `${recent} of them were modified in the last ${cleanupFolders.RECENT_DAYS} days.\n\n` : '') +
           (warned.length ? `Warnings (${warned.length} folder${warned.length > 1 ? 's' : ''}):\n` + warned.slice(0, 5).map(c => `- ${cleanupFolders.safeText(c.path)}: ${cleanupFolders.safeText(c.warnings.join('; '), 300)}`).join('\n') + (warned.length > 5 ? `\n(+${warned.length - 5} more)` : '') + '\n\n' : '') +
-          `Largest ${top.length}:\n${top.join('\n')}\n\nSizes are logical sizes; space actually freed can be less (shared or compressed files). They are moved to the Trash (macOS/Linux) or Recycle Bin (Windows); nothing is permanently deleted, and you can restore them from there. Each one is recorded in the deletion log.`
-      });
-      if (r.response !== 1) return nothing;
+          `Largest ${top.length}:\n${top.join('\n')}\n\nSizes are logical sizes; space actually freed can be less (shared or compressed files). ${where} Each one is recorded in the deletion log.`
+      };
+      if (E2E) { if (typeof global.__e2eConfirm === 'function' && !(await global.__e2eConfirm(opts))) return nothing; }
+      else { const r = await dialog.showMessageBox(mainWindow, opts); if (r.response !== 1) return nothing; }
     }
     // The dialog can sit open for a long time: verify everything again before touching anything.
     const again = [];
@@ -1215,7 +1283,36 @@ handleTrusted('delete-folders', async (event, folderPaths, source) => {
       return { ...nothing, blocked: changed.map(b => ({ path: b.path, reason: b.reason })), error: `Refused: ${changed[0].path} changed before it could be deleted (${changed[0].reason}). Nothing was moved.` };
     }
     const deletedPaths = [], removedPaths = [], failed = [], failures = [];
-    let freedBytes = 0, logError = null;
+    const quarantinedPaths = [], trashedInsteadPaths = [], fallbackReasons = [];
+    let freedBytes = 0, quarantinedBytes = 0, logError = null;
+    // Quarantine runs: one folder + manifest per volume root, all written (status planned) BEFORE the first move.
+    const runId = quarantine.newRunId(), runT = Date.now(), qctx = quarantineCtx();
+    const qItem = new Map(); // folder path -> { manifest, item }
+    const fallbackWhy = new Map(); // folder path -> why it goes to the Trash
+    if (useQ) {
+      const groups = new Map();
+      for (const c of checks) {
+        const pl = quarantine.chooseRoot(c.path, qctx);
+        if (!pl.root) { fallbackWhy.set(c.path, pl.error); continue; }
+        if (!groups.has(pl.root)) groups.set(pl.root, []);
+        groups.get(pl.root).push(c);
+      }
+      let n = 0;
+      const scanRootOf = (p) => [...approvedFolderPaths].find(r => cleanupFolders.isInside(p, r, ci)) || lastScanFolder || null;
+      for (const [root, list] of groups) {
+        try {
+          const items = list.map(c => {
+            let dev = ''; try { dev = fs.lstatSync(c.path, { bigint: true }).dev; } catch (e) { throw new Error('cannot read ' + c.path); }
+            return { n: ++n, originalPath: c.path, originalRealPath: c.logPath || c.path, dev, size: c.size, files: c.files, category: c.kind };
+          });
+          const expectDev = fs.lstatSync(list[0].path, { bigint: true }).dev;
+          const manifest = quarantine.createRun({ root, runId, t: runT, appVersion: app.getVersion(), scanRoot: scanRootOf(list[0].path), source: src, items, expectDev }, qctx);
+          quarantine.addRegistry(app.getPath('userData'), root);
+          manifest.items.forEach((item, i) => qItem.set(list[i].path, { manifest, item }));
+        } catch (e) { for (const c of list) fallbackWhy.set(c.path, 'could not create the quarantine folder (' + osErrorReason(e) + ')'); }
+      }
+    }
+    const setQ = (c, status, extra) => { const q = qItem.get(c.path); if (q) { try { quarantine.setItemStatus(q.manifest, q.item, status, extra, qctx); } catch (e) { /* the log below still records it */ } } };
     for (const c of checks) {
       sendFolderProgress('trash', deletedPaths.length + failed.length, checks.length, c.path);
       const entry = { t: Date.now(), path: c.logPath || c.path, type: 'folder', size: c.size, files: c.files, category: c.kind, source: src };
@@ -1231,25 +1328,53 @@ handleTrusted('delete-folders', async (event, folderPaths, source) => {
           rec = { ...entry, status: 'blocked', reason: 'changed just before delete: ' + last.reason };
           failed.push(c.path); failures.push({ path: c.path, reason: rec.reason, state: 'blocked' });
         } else {
-          try {
+          let moved = null;
+          const q = qItem.get(c.path);
+          if (q) {
+            try {
+              quarantine.moveIn(q.manifest, q.item, qctx);
+              moved = { ok: true };
+            } catch (e) {
+              let origThere = true; try { fs.lstatSync(c.path); } catch (er) { origThere = er.code !== 'ENOENT'; }
+              let inQ = false; try { fs.lstatSync(q.item.quarantinePath); inQ = true; } catch (er) { /* not there */ }
+              // Renamed but the manifest write failed: the folder IS in quarantine (status stays planned, which restore accepts).
+              if (!origThere && inQ) moved = { ok: true, manifestError: osErrorReason(e) };
+              else fallbackWhy.set(c.path, 'moving it to quarantine failed (' + osErrorReason(e) + ')');
+            }
+          }
+          if (moved) {
+            deletedPaths.push(c.path); quarantinedPaths.push(c.path); quarantinedBytes += c.size;
+            rec = { ...entry, status: 'quarantined', runId, quarantinePath: q.item.quarantinePath, reason: c.reason + (moved.manifestError ? ` (manifest update failed: ${moved.manifestError}; it is in quarantine and can still be restored)` : '') };
+          } else try {
             await trashFn(c.path);
             deletedPaths.push(c.path); freedBytes += c.size;
-            rec = { ...entry, status: 'trashed', reason: c.reason };
+            const why = fallbackWhy.get(c.path);
+            if (useQ && why) { trashedInsteadPaths.push(c.path); fallbackReasons.push(why); }
+            rec = { ...entry, status: 'trashed', reason: c.reason + (useQ && why ? ` (sent to the Trash instead of quarantine: ${why})` : '') };
+            setQ(c, 'trashed-fallback');
           } catch (e) {
             // Some platforms report an error although the item was moved: record what is really there now.
             let gone = false; try { fs.lstatSync(c.path); } catch (er) { gone = er.code === 'ENOENT'; }
             if (gone) {
               removedPaths.push(c.path);
               rec = { ...entry, status: 'removed', reason: 'the system reported an error but the folder is gone; it may not be in the Trash (' + osErrorReason(e) + ')' };
+              setQ(c, 'failed', { note: 'gone, not confirmed in the Trash' });
             } else {
               failed.push(c.path);
               rec = { ...entry, status: 'failed', finalState: 'untouched', reason: await trashFailureReason(e, c.path, c.size) };
               failures.push({ path: c.path, reason: rec.reason, state: 'failed', finalState: 'untouched' });
+              setQ(c, 'failed');
             }
           }
         }
       }
       logError = (await logDeletion([rec])) || logError; // per item, right after the move
+    }
+    // Items that were never moved (cancelled, blocked): the manifest must not claim they are planned forever.
+    for (const [fp, q] of qItem) {
+      if (q.item.status !== 'planned') continue;
+      let orig = false; try { fs.lstatSync(fp); orig = true; } catch (e) { /* not at its original place */ }
+      if (orig) { try { quarantine.setItemStatus(q.manifest, q.item, 'skipped', null, qctx); } catch (e) { /* best effort */ } }
     }
     if (deletedPaths.length || removedPaths.length) {
       const gone = [...deletedPaths, ...removedPaths].map(p => p + path.sep);
@@ -1257,10 +1382,92 @@ handleTrusted('delete-folders', async (event, folderPaths, source) => {
       const goneL = gone.map(lc);
       lastScanAllFiles = lastScanAllFiles.filter(f => { const fl = lc(f.path); return !goneL.some(g => fl.startsWith(g)); });
     }
-    return { deleted: deletedPaths.length, deletedPaths, removed: removedPaths.length, removedPaths, freedBytes, failed, failures, cancelled: folderDeleteCancel || undefined, dedupedNested: dropped, ...(logError ? { logError } : {}) };
+    return { deleted: deletedPaths.length, deletedPaths, quarantined: quarantinedPaths.length, quarantinedPaths, quarantinedBytes, runId: quarantinedPaths.length ? runId : undefined, trashedInstead: trashedInsteadPaths.length, trashedInsteadPaths, trashedInsteadReason: fallbackReasons[0], removed: removedPaths.length, removedPaths, freedBytes, failed, failures, cancelled: folderDeleteCancel || undefined, dedupedNested: dropped, ...(logError ? { logError } : {}) };
   } finally {
     folderDeleteBusy = false;
   }
+});
+
+// === Quarantine: list, restore, move to Trash ===
+const QUARANTINE_ID_RE = /^[0-9a-f]{8}$/;
+const nowMs = () => (E2E && typeof global.__e2eNow === 'function') ? global.__e2eNow() : Date.now();
+handleTrusted('quarantine-list', async () => {
+  const r = quarantine.listRuns(quarantineRoots(), quarantineCtx(), nowMs());
+  return {
+    enabled: quarantineOn(), retentionDays: quarantine.RETENTION_DAYS, totalSize: r.totalSize, unreadable: r.broken.length, busy: folderDeleteBusy,
+    runs: r.runs.map(run => ({
+      runId: run.runId, t: run.t, size: run.size, heldCount: run.heldCount, expired: run.expired,
+      items: run.items.map(i => ({ id: i.n, name: i.name, originalPath: i.originalPath, category: i.category, size: i.size, files: i.files, status: i.status, present: i.present, restoredTo: i.restoredTo || null }))
+    }))
+  };
+});
+
+// opts: { ids?: number[] (default: every item still held), beside?: bool, recreateParent?: bool } applied to the listed ids.
+handleTrusted('quarantine-restore', async (event, runId, opts) => {
+  const o = opts && typeof opts === 'object' ? opts : {};
+  if (typeof runId !== 'string' || !QUARANTINE_ID_RE.test(runId)) return { error: 'Invalid run.' };
+  if (o.ids != null && (!Array.isArray(o.ids) || o.ids.some(n => !Number.isInteger(n)))) return { error: 'Invalid item list.' };
+  if (folderDeleteBusy) return { error: 'A cleanup or restore is already running. Nothing was restored.' };
+  folderDeleteBusy = true;
+  try {
+    const qctx = quarantineCtx();
+    const run = quarantine.listRuns(quarantineRoots(), qctx, nowMs()).runs.find(r => r.runId === runId);
+    if (!run) return { error: 'That quarantine run no longer exists (it may have been moved to the Trash).' };
+    const held = (i) => i.status === 'quarantined' || i.status === 'planned';
+    const targets = o.ids ? run.items.filter(i => o.ids.includes(i.n)) : run.items.filter(held);
+    if (!targets.length) return { error: 'Nothing to restore in this run.', results: [] };
+    const results = [], restoredPaths = [];
+    let logError = null;
+    for (const it of targets) {
+      const res = await quarantine.restoreItem(it, qctx, { beside: o.beside === true, recreateParent: o.recreateParent === true });
+      const base = { id: it.n, name: it.name, originalPath: it.originalPath };
+      const meta = { t: Date.now(), type: 'folder', runId, size: it.size, files: it.files, category: it.category, source: 'quarantine-restore' };
+      if (res.ok) {
+        try { quarantine.markRestored(it, res.restoredTo, qctx); } catch (e) { /* folder is back; the log still says so */ }
+        restoredPaths.push(res.restoredTo);
+        results.push({ ...base, ok: true, restoredTo: res.restoredTo, beside: res.beside });
+        logError = (await logDeletion([{ ...meta, path: res.restoredTo, from: it.quarantinePath, status: 'restored', reason: res.beside ? 'put back next to the folder that already exists there' : 'put back where it was' }])) || logError;
+      } else {
+        results.push({ ...base, ok: false, state: res.state, reason: res.reason, canRestoreBeside: !!res.canRestoreBeside, canRecreateParent: !!res.canRecreateParent });
+        logError = (await logDeletion([{ ...meta, path: it.originalPath, status: 'blocked', reason: 'restore refused: ' + res.reason }])) || logError;
+      }
+    }
+    return { runId, restored: restoredPaths.length, restoredPaths, failed: results.filter(r => !r.ok).length, results, ...(logError ? { logError } : {}) };
+  } finally { folderDeleteBusy = false; }
+});
+
+// runIds: array of ids, or 'all'. Moves whole run folders to the OS Trash (never removes anything itself).
+handleTrusted('quarantine-trash', async (event, runIds) => {
+  const all = runIds === 'all';
+  if (!all && (!Array.isArray(runIds) || !runIds.length || runIds.some(r => typeof r !== 'string' || !QUARANTINE_ID_RE.test(r)))) return { error: 'Invalid run list.' };
+  if (folderDeleteBusy) return { error: 'A cleanup or restore is already running. Nothing was moved.' };
+  folderDeleteBusy = true;
+  try {
+    const qctx = quarantineCtx();
+    const runs = quarantine.listRuns(quarantineRoots(), qctx, nowMs()).runs.filter(r => all || runIds.includes(r.runId));
+    if (!runs.length) return { error: 'Nothing to move.', trashed: 0, results: [] };
+    const total = runs.reduce((a, r) => a + r.size, 0), held = runs.reduce((a, r) => a + r.heldCount, 0);
+    const opts = {
+      type: 'warning', buttons: ['Cancel', 'Move to Trash'], defaultId: 0, cancelId: 0, title: 'Empty quarantine',
+      message: `Move ${runs.length} quarantine run${runs.length > 1 ? 's' : ''} (${formatSizeMain(total)}, ${held} folder${held === 1 ? '' : 's'}) to the Trash?`,
+      detail: 'Nothing is permanently deleted: the whole quarantine run moves to the Trash (macOS/Linux) or Recycle Bin (Windows). After that, Stuff Diver can no longer put these folders back for you; you can still restore them from the Trash yourself until you empty it.'
+    };
+    if (E2E) { if (typeof global.__e2eConfirm === 'function' && !(await global.__e2eConfirm(opts))) return { trashed: 0, cancelled: true, results: [] }; }
+    else { const r = await dialog.showMessageBox(mainWindow, opts); if (r.response !== 1) return { trashed: 0, cancelled: true, results: [] }; }
+    const results = []; let logError = null;
+    for (const run of runs) {
+      for (const dir of run.dirs) {
+        let ok = true, reason = null;
+        try { await trashFn(dir); } catch (e) {
+          let gone = false; try { fs.lstatSync(dir); } catch (er) { gone = er.code === 'ENOENT'; }
+          if (!gone) { ok = false; reason = osErrorReason(e); }
+        }
+        results.push({ runId: run.runId, ok, reason });
+        logError = (await logDeletion([{ t: Date.now(), path: dir, type: 'quarantine-run', runId: run.runId, size: run.size, files: run.heldCount, status: ok ? 'trashed' : 'failed', source: 'quarantine-empty', reason: ok ? (run.expired ? 'expired quarantine run moved to the Trash' : 'quarantine run moved to the Trash') : reason, ...(ok ? {} : { finalState: 'untouched' }) }])) || logError;
+      }
+    }
+    return { trashed: results.filter(r => r.ok).length, failed: results.filter(r => !r.ok).length, results, ...(logError ? { logError } : {}) };
+  } finally { folderDeleteBusy = false; }
 });
 
 // Filtered, paginated view of the deletion log (newest first). opts.file: 0 = current, 1..2 = rotated.
@@ -1269,10 +1476,10 @@ handleTrusted('query-deletion-log', async (event, opts) => {
   const limit = Math.max(1, Math.min(Number(o.limit) || 200, 1000));
   const offset = Math.max(0, Number(o.offset) || 0);
   const file = Math.max(0, Math.min(Number(o.file) || 0, LOG_KEEP - 1));
-  const status = ['trashed', 'failed', 'blocked', 'skipped', 'removed', 'gone'].includes(o.status) ? o.status : null;
+  const status = ['trashed', 'quarantined', 'restored', 'failed', 'blocked', 'skipped', 'removed', 'gone'].includes(o.status) ? o.status : null;
   const q = typeof o.search === 'string' ? o.search.trim().toLowerCase() : '';
   const all = await readLogEntries(file);
-  const counts = { trashed: 0, failed: 0, blocked: 0, skipped: 0, removed: 0, gone: 0 };
+  const counts = { trashed: 0, quarantined: 0, restored: 0, failed: 0, blocked: 0, skipped: 0, removed: 0, gone: 0 };
   const matched = [];
   for (let i = all.length - 1; i >= 0; i--) {
     const e = all[i];
@@ -1493,7 +1700,7 @@ function loadSettings() {
   }
 }
 
-const ALLOWED_SETTINGS_KEYS = ['developerFolderCleanup', 'recentFolders', 'theme', 'monitorFolder', 'monitorInterval', 'monitorEnabled', 'lastViewMode', 'scanExclusions', 'mftFastScan'];
+const ALLOWED_SETTINGS_KEYS = ['developerFolderCleanup', 'recentFolders', 'theme', 'monitorFolder', 'monitorInterval', 'monitorEnabled', 'lastViewMode', 'scanExclusions', 'mftFastScan', 'useQuarantine'];
 
 function saveSettings(settings) {
   const existing = loadSettings();
