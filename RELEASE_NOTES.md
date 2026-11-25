@@ -12,6 +12,8 @@ Accuracy and safety update. Scans are more accurate on all three platforms, clea
   - After every clean-up you see exactly what was moved, what failed and why, and what was skipped.
 - **Protected locations**: Stuff Diver refuses to remove drive roots, your home folder, Windows and macOS system folders, standard folders such as Documents and Desktop, other users' profiles, and credential stores such as `.ssh`, `.aws` and Keychains. If one item in a request is protected, nothing is removed.
 - **Developer folders (advanced, off by default)**: an optional switch in Smart Cleanup lets you move `node_modules`, Python virtualenvs, build caches and similar re-creatable folders to the Trash in one step. Every folder is unticked, must carry its tool's own marker, and is re-checked just before it is moved. A folder is refused if it contains a Git or other version-control folder, your own documents, a mount point or a link to somewhere else, if it uses private or local packages, or if it sits in a cloud-synced, system or tool folder.
+- **Undo for developer-folder cleanup**: with the Developer folders switch on, each cleanup moves folders into a hidden quarantine folder next to your files by a same-drive rename (instant, no extra copy) instead of the Trash, and the new Quarantine window (Tools menu) restores a whole run or a single folder exactly where it came from. Restore never overwrites anything, and a restore after the folder changed asks you to confirm. Nothing is purged automatically: emptying the quarantine moves it to the Trash, and quarantined folders keep using disk space until then. If a safe place on the same drive cannot be found (network, external or removable drives), the folder goes to the Trash instead and the results say why. On Windows the quarantine folder is used on the system drive only in this version; other Windows drives use the Recycle Bin.
+- **Tighter app security**: other programs can no longer start Stuff Diver as a Node.js process or attach a debugger to it, and a second copy of the app now opens the existing window instead of starting again.
 - **Deletion Log**: every item moved, removed, failed, skipped or refused is recorded, and the new Deletion Log window (Tools menu) lets you filter and search it.
 - **Command-line mode**: scan a folder with no window and write CSV, JSON or HTML reports, for scripts and scheduled tasks. See the README for usage.
 - **Cached scans are complete**: opening a cached scan now keeps every file, so Duplicates, Smart Cleanup and the Extensions panel see the whole scan instead of only the largest files.
@@ -28,6 +30,7 @@ Accuracy and safety update. Scans are more accurate on all three platforms, clea
 - The folder monitor no longer reports false growth caused by bad file sizes.
 - A quick rescan can no longer corrupt the saved scan.
 - Exclusions accept `~` for your home folder.
+- The command-line mode no longer shows an error dialog when its output is piped into a program that closes early (for example `| head`).
 
 ## Notes
 
