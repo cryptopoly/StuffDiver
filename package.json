@@ -1,7 +1,7 @@
 {
   "name": "stuff-diver",
-  "version": "0.4.5",
-  "description": "Dive deep into your disk — treemap, pie chart & duplicate finder",
+  "version": "0.5.0",
+  "description": "Dive deep into your disk \u2014 treemap, pie chart & duplicate finder",
   "author": {
     "name": "Stuff Diver",
     "email": "info@stuffdiver.com"
@@ -95,6 +95,8 @@
     "files": [
       "main.js",
       "scanner.js",
+      "cleanup-folders.js",
+      "quarantine.js",
       "cli.js",
       "mft-scan.js",
       "preload.js",
@@ -102,7 +104,13 @@
       "styles.css",
       "renderer.js",
       "logo.png"
-    ]
+    ],
+    "electronFuses": {
+      "runAsNode": false,
+      "enableNodeOptionsEnvironmentVariable": false,
+      "enableNodeCliInspectArguments": false,
+      "onlyLoadAppFromAsar": true
+    }
   },
   "devDependencies": {
     "@electron/notarize": "^3.1.1",

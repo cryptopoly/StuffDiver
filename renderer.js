@@ -362,7 +362,7 @@
     if (!normalized) return folderTree;
     let node = folderTree;
     for (const seg of normalized.split('/')) {
-      if (!node.children || !node.children[seg]) return null;
+      if (!node.children || !Object.prototype.hasOwnProperty.call(node.children, seg)) return null;
       node = node.children[seg];
     }
     return node;
@@ -404,7 +404,7 @@
       bubblePath = segments;
       let node = folderTree;
       for (const seg of segments) {
-        if (node.children && node.children[seg]) node = node.children[seg];
+        if (node.children && Object.prototype.hasOwnProperty.call(node.children, seg)) node = node.children[seg];
       }
       bubbleCurrentNode = node;
     } else {
@@ -1308,7 +1308,7 @@
     bubblePath = pathSegments;
     let node = folderTree;
     for (const seg of pathSegments) {
-      if (node.children && node.children[seg]) {
+      if (node.children && Object.prototype.hasOwnProperty.call(node.children, seg)) {
         node = node.children[seg];
       }
     }
@@ -1856,7 +1856,7 @@
   // Build a folder tree from duplicate file paths with dup group counts
   function buildDupFolderTree() {
     if (!duplicateResults || !duplicateResults.length) return null;
-    const root = { name: folderTree ? folderTree.name : '(root)', path: '', dupGroups: 0, dupFiles: 0, wasted: 0, children: {} };
+    const root = { name: folderTree ? folderTree.name : '(root)', path: '', dupGroups: 0, dupFiles: 0, wasted: 0, children: Object.create(null) };
 
     for (const group of duplicateResults) {
       // Track which folders this group touches
@@ -1869,7 +1869,7 @@
           const seg = parts[i];
           const nodePath = parts.slice(0, i + 1).join('/');
           if (!node.children[seg]) {
-            node.children[seg] = { name: seg, path: nodePath, dupGroups: 0, dupFiles: 0, wasted: 0, children: {} };
+            node.children[seg] = { name: seg, path: nodePath, dupGroups: 0, dupFiles: 0, wasted: 0, children: Object.create(null) };
           }
           node = node.children[seg];
           node.dupFiles++;
@@ -2432,7 +2432,8 @@
     const sizeEl = document.getElementById('collector-size');
     const listEl = document.getElementById('collector-list');
 
-    if (collectorItems.length === 0) {
+    const resultShown = !document.getElementById('collector-result').classList.contains('hidden');
+    if (collectorItems.length === 0 && !resultShown) {
       panel.classList.add('hidden');
       return;
     }
@@ -2472,27 +2473,35 @@
   }
 
   function clearCollector() {
+    const cr = document.getElementById('collector-result'); if (cr) { cr.classList.add('hidden'); cr.textContent = ''; }
     collectorItems = [];
     updateCollectorUI();
   }
 
   async function deleteCollectorItems() {
     if (collectorItems.length === 0) return;
-    const totalSize = collectorItems.reduce((s, f) => s + f.size, 0);
-    const count = collectorItems.length;
-
-    // Confirmation is handled by main process
-    const paths = collectorItems.map(f => f.path);
-    const result = await window.api.deleteFiles(paths, 'collector');
-    if (result && result.error) alert(result.error);
-    if (result && result.deleted > 0) {
-      // Remove deleted files from allFiles and displayFiles
-      const deletedSet = new Set(result.deletedPaths || paths);
-      allFiles = allFiles.filter(f => !deletedSet.has(f.path));
-      collectorItems = collectorItems.filter(f => !deletedSet.has(f.path));
-      applyFilters();
+    const btn = document.getElementById('collector-delete');
+    if (btn.disabled) return;
+    btn.disabled = true;
+    const resultEl = document.getElementById('collector-result');
+    try {
+      // Confirmation is handled by main process
+      const paths = collectorItems.map(f => f.path);
+      const result = await window.api.deleteFiles(paths, 'collector');
+      let msg = result && result.error ? result.error : cleanupSummary(result, 'file');
+      if (result && result.logError) msg += (msg ? '\n' : '') + result.logError;
+      const gone = new Set(((result && result.deletedPaths) || []).concat((result && result.removedPaths) || [], (result && result.alreadyGonePaths) || []));
+      if (gone.size) {
+        allFiles = allFiles.filter(f => !gone.has(f.path));
+        collectorItems = collectorItems.filter(f => !gone.has(f.path));
+        removeFilesFromTree(result && result.goneInfo);
+        applyFilters();
+      }
+      resultEl.innerHTML = escHtml(msg || '').replace(/\n/g, '<br>');
+      resultEl.classList.toggle('hidden', !msg);
+      resultEl.classList.toggle('cleanup-result-error', !!(result && (result.error || (result.failures && result.failures.length))));
       updateCollectorUI();
-    }
+    } finally { btn.disabled = false; }
   }
 
   // === Feature: File Tagging ===
@@ -3656,8 +3665,117 @@
 
   // === Feature: Smart Cleanup Wizard ===
 
-  async function openCleanupWizard() {
-    if (!allFiles.length) { alert('Please scan a folder first.'); return; }
+  function formatAge(ageDays) {
+    if (ageDays === null || ageDays === undefined) return 'unknown';
+    if (ageDays < 1) return 'today';
+    if (ageDays < 60) return ageDays + ' day' + (ageDays === 1 ? '' : 's') + ' ago';
+    if (ageDays < 700) return Math.round(ageDays / 30) + ' months ago';
+    return (ageDays / 365).toFixed(1) + ' years ago';
+  }
+
+  const CLEANUP_FOLDER_RENDER_CAP = 500;
+  // Only these loose-file presets start ticked; everything else is the user's explicit choice.
+  const CLEANUP_PRETICKED = new Set(['dsstore', 'thumbs']);
+
+  function removeFoldersFromTree(relPaths) {
+    if (!folderTree) return;
+    for (const rel of relPaths) {
+      const segs = String(rel).split('/').filter(Boolean);
+      if (!segs.length) continue;
+      const chain = [folderTree];
+      let node = folderTree;
+      for (const sg of segs) {
+        if (!node.children || !Object.prototype.hasOwnProperty.call(node.children, sg)) { node = null; break; }
+        node = node.children[sg]; chain.push(node);
+      }
+      if (!node) continue;
+      for (const anc of chain.slice(0, -1)) {
+        anc.size -= node.size; anc.logicalSize -= node.logicalSize; anc.fileCount -= node.fileCount;
+      }
+      totalFiles = Math.max(0, totalFiles - node.fileCount);
+      totalSize = Math.max(0, totalSize - node.size);
+      delete chain[chain.length - 2].children[segs[segs.length - 1]];
+    }
+    bubblePath = []; bubbleCurrentNode = folderTree; selectedFolderPath = null;
+    renderFolderTree();
+    renderVisualization();
+    updateStats();
+  }
+
+  // Loose files removed by a cleanup or the Collector: keep the folder tree, totals and map in step.
+  function removeFilesFromTree(infos) {
+    if (!folderTree || !infos || !infos.length) return;
+    for (const f of infos) {
+      const segs = String(f.rel || '').split('/').filter(Boolean);
+      if (!segs.length) continue;
+      const chain = [folderTree];
+      let node = folderTree;
+      for (const sg of segs.slice(0, -1)) {
+        if (!node.children || !Object.prototype.hasOwnProperty.call(node.children, sg)) { node = null; break; }
+        node = node.children[sg]; chain.push(node);
+      }
+      if (!node) continue;
+      for (const n of chain) { n.size = Math.max(0, n.size - (f.size || 0)); n.logicalSize = Math.max(0, n.logicalSize - (f.logicalSize || f.size || 0)); n.fileCount = Math.max(0, n.fileCount - 1); }
+      totalFiles = Math.max(0, totalFiles - 1);
+      totalSize = Math.max(0, totalSize - (f.size || 0));
+    }
+    bubblePath = []; bubbleCurrentNode = folderTree; selectedFolderPath = null;
+    renderFolderTree();
+    renderVisualization();
+    updateStats();
+  }
+
+  let wizardUseQ = false;
+  window.api.onFolderDeleteProgress(function(d) {
+    const el = document.getElementById('cleanup-progress');
+    if (!el) return;
+    const name = String(d.path || '').split(/[\\/]/).slice(-2).join('/');
+    el.textContent = (d.phase === 'trash' ? (wizardUseQ ? 'Moving to quarantine' : 'Moving to Trash') : 'Verifying') + ' ' + Math.min(d.done + 1, d.total) + ' of ' + d.total + ': ' + name;
+  });
+
+  // One plain-language summary for every cleanup run (folders or files): nothing is hidden in an alert.
+  function cleanupSummary(result, noun) {
+    const failures = (result && result.failures) || [];
+    const moved = (result && result.deleted) || 0;
+    const skipped = failures.filter(function(f) { return f.state === 'skipped'; }).length + ((result && !result.failures && result.skipped) || 0);
+    const failed = failures.length - failures.filter(function(f) { return f.state === 'skipped'; }).length;
+    const removed = (result && result.removed) || 0;
+    const gone0 = (result && result.alreadyGone) || 0;
+    if (!moved && !failures.length && !skipped && !removed && !gone0) return '';
+    const q = (result && result.quarantined) || 0;
+    const head = q
+      ? 'Moved ' + q + ' ' + noun + (q === 1 ? '' : 's') + ' to quarantine (' + formatSize(result.quarantinedBytes || 0) + '; still using disk space until the quarantine is emptied)' + (moved > q ? ', ' + (moved - q) + ' went to the Trash instead' + (result.trashedInsteadReason ? ' (' + result.trashedInsteadReason + ')' : '') : '') + (result.trashedInsteadItems && result.trashedInsteadItems.length ? ':\n' + result.trashedInsteadItems.slice(0, 5).map(function(i) { return '- ' + i.path + ': ' + i.reason; }).join('\n') + (result.trashedInsteadItems.length > 5 ? '\n(+' + (result.trashedInsteadItems.length - 5) + ' more, see the Deletion Log)' : '') : '')
+      : 'Moved ' + moved + ' ' + noun + (moved === 1 ? '' : 's') + ' to the Trash' + (result.trashedInstead ? ' (quarantine could not be used)' : '') + (result.trashedInsteadItems && result.trashedInsteadItems.length ? ':\n' + result.trashedInsteadItems.slice(0, 5).map(function(i) { return '- ' + i.path + ': ' + i.reason; }).join('\n') + (result.trashedInsteadItems.length > 5 ? '\n(+' + (result.trashedInsteadItems.length - 5) + ' more, see the Deletion Log)' : '') + '\n' : '') + (moved && result.freedBytes ? ' (up to ' + formatSize(result.freedBytes) + ' freed; shared files may free less)' : '');
+    let msg = (result && result.cancelled ? 'Cancelled. ' : '') + head + (removed ? ', removed ' + removed + ' (gone, but not confirmed to be in the Trash: the system reported an error although the ' + noun + (removed === 1 ? ' is' : 's are') + ' gone)' : '') + (gone0 ? ', already gone ' + gone0 + ' (missing before this run, nothing was moved)' : '') + ', failed ' + failed + ', skipped ' + skipped + '.';
+    if (failures.length) {
+      msg += '\n' + failures.slice(0, 8).map(function(f) {
+        return '- ' + (f.state === 'skipped' ? 'skipped' : 'failed') + ': ' + f.path + ' (' + f.reason + ')' + (f.finalState === 'gone' ? ' - the system reported an error but the item is already gone' : '');
+      }).join('\n');
+      if (failures.length > 8) msg += '\n(+' + (failures.length - 8) + ' more, see the Deletion Log)';
+      msg += '\nFailed and skipped items were not changed' + (failures.some(function(f) { return f.finalState === 'gone'; }) ? ', except those marked "already gone"' : '') + '. Items that were moved can be restored from ' + (q ? 'Tools > Quarantine' + (moved > q ? ' or the Trash' : '') : 'the Trash or Recycle Bin') + '. This is not all-or-nothing once moving has started.';
+    } else if (moved) msg += q ? ' You can put them back with Restore this run or from Tools > Quarantine.' + (moved > q ? ' The ones sent to the Trash can be restored from the Trash or Recycle Bin.' : '') : ' You can restore them from the Trash or Recycle Bin.';
+    return msg;
+  }
+
+  // Large selections go to the main process in chunks (each chunk is verified and confirmed on its own), and results are merged.
+  async function deleteFilesChunked(paths, source, chunk) {
+    const total = { deleted: 0, deletedPaths: [], removed: 0, removedPaths: [], alreadyGone: 0, alreadyGonePaths: [], goneInfo: [], failures: [], chunks: 0 };
+    for (let i = 0; i < paths.length; i += chunk) {
+      const res = await window.api.deleteFiles(paths.slice(i, i + chunk), source);
+      total.chunks++;
+      if (res && res.error) { total.error = res.error; break; }
+      if (!res || (!res.deleted && !res.removed && !res.alreadyGone && !(res.failures && res.failures.length))) { total.stopped = true; break; }   // dialog cancelled
+      total.deleted += res.deleted || 0; total.removed += res.removed || 0; total.alreadyGone += res.alreadyGone || 0;
+      total.deletedPaths.push(...(res.deletedPaths || [])); total.removedPaths.push(...(res.removedPaths || [])); total.alreadyGonePaths.push(...(res.alreadyGonePaths || []));
+      total.failures.push(...(res.failures || []));
+      total.goneInfo.push(...(res.goneInfo || []));
+      if (res.logError) total.logError = res.logError;
+    }
+    return total;
+  }
+
+  async function openCleanupWizard(notice, noticeIsError, restoreRunId) {
+    if (!allFiles.length && !notice) { alert('Please scan a folder first.'); return; }
     const overlay = document.getElementById('cleanup-overlay');
     overlay.classList.remove('hidden');
     const body = document.getElementById('cleanup-body');
@@ -3665,23 +3783,124 @@
 
     // Matching runs in the main process over the full scan, not just the top files.
     let found = [];
+    let folders = { candidates: [], totalFound: 0, shown: 0 };
+    let devOn = false, useQ = true, quarInfo = null;
     try { found = await window.api.cleanupScan(); } catch (e) { found = []; }
+    try { const st = await window.api.loadSettings(); devOn = st.developerFolderCleanup === true; useQ = st.useQuarantine !== false; wizardUseQ = useQ; } catch (e) { devOn = false; }
+    if (devOn) { try { quarInfo = await window.api.listQuarantine(); } catch (e) { quarInfo = null; } }
+    if (devOn) { try { folders = await window.api.cleanupFoldersScan(); } catch (e) { /* none */ } }
+    const cands = folders.candidates || [];
 
-    if (!found.length) {
-      body.innerHTML = '<div class="cleanup-empty">No reclaimable patterns found. Your folder looks clean!</div>';
-      return;
+    let html = '<div class="cleanup-result' + (notice ? '' : ' hidden') + (noticeIsError ? ' cleanup-result-error' : '') + '" id="cleanup-result">' + (notice ? escHtml(notice).replace(/\n/g, '<br>') : '') + (restoreRunId ? ' <button class="quar-btn" id="cleanup-restore-run" data-run="' + escHtml(restoreRunId) + '">Restore this run</button>' : '') + '</div>';
+    // Developer folders: off by default, one sentence on the risk, one switch.
+    html += '<div class="cleanup-section-title">Developer folders (advanced)</div>';
+    html += '<label class="cleanup-dev-toggle"><input type="checkbox" id="cleanup-dev-toggle"' + (devOn ? ' checked' : '') + '> Enable developer folder cleanup</label>';
+    html += '<div class="cleanup-note">' + (devOn
+      ? 'Whole folders such as node_modules or build output are moved as a unit (to quarantine or the Trash); a wrong pick can break a project that cannot simply be reinstalled, so tick each one deliberately.'
+      : 'Off: only loose files are offered. Developer-folder cleanup (node_modules, build caches, virtualenvs) exists, but moving whole folders can break a project that cannot simply be reinstalled, so it is switched off until you enable it.') + '</div>';
+    if (devOn) {
+      html += '<label class="cleanup-dev-toggle"><input type="checkbox" id="cleanup-quar-toggle"' + (useQ ? ' checked' : '') + '> Move folders to a quarantine I can restore from (recommended)</label>';
+      html += '<div class="cleanup-note" id="cleanup-quar-note">' + (useQ ? 'Folders go to a hidden .StuffDiverQuarantine folder on the same disk, and "Restore this run" puts every one back exactly where it was. Nothing is deleted. ' : 'Off: folders go straight to the Trash or Recycle Bin. ')
+        + (quarInfo && quarInfo.runs.length ? 'Quarantine now holds ' + formatSize(quarInfo.totalSize) + ' in ' + quarInfo.runs.length + ' run' + (quarInfo.runs.length === 1 ? '' : 's') + ' and still uses that disk space until emptied. <button class="quar-btn" id="cleanup-open-quar">Open Quarantine</button>' : 'Quarantined items still use disk space until you empty the quarantine.') + '</div>';
     }
-
-    const grandTotal = found.reduce(function(sum, c) { return sum + c.totalSize; }, 0);
-    let html = '<div class="cleanup-total"><span class="cleanup-total-label">Total reclaimable space</span><span class="cleanup-total-size">' + formatSize(grandTotal) + '</span></div>';
-
-    for (const cat of found) {
-      html += '<div class="cleanup-category"><input type="checkbox" class="cleanup-check" data-id="' + escHtml(cat.id) + '" checked><span class="cleanup-icon">' + cat.icon + '</span><div class="cleanup-info"><div class="cleanup-name">' + escHtml(cat.label) + '</div><div class="cleanup-detail">' + cat.count.toLocaleString() + ' files</div></div><span class="cleanup-size">' + formatSize(cat.totalSize) + '</span></div>';
+    if (devOn && !cands.length) html += '<div class="cleanup-note">No developer folders found in this scan.</div>';
+    if (cands.length) {
+      const shown = cands.slice(0, CLEANUP_FOLDER_RENDER_CAP);
+      html += '<div class="cleanup-note" id="cleanup-folder-count">' + folders.totalFound.toLocaleString() + ' folder' + (folders.totalFound === 1 ? '' : 's') + ' found'
+        + (shown.length < folders.totalFound ? ', showing the ' + shown.length.toLocaleString() + ' largest' : '')
+        + '. Each is re-checked just before it is moved. Nothing is pre-selected. Sizes here are space on disk from the scan; the confirmation shows logical sizes.</div>';
+      html += '<div class="cleanup-total"><span class="cleanup-total-label">Selected folders (size on disk)</span><span class="cleanup-total-size" id="cleanup-folder-total"></span></div>';
+      shown.forEach(function(c, i) {
+        const refused = !!c.refused;
+        html += '<div class="cleanup-category cleanup-folder' + (refused ? ' cleanup-refused' : '') + '" data-idx="' + i + '">'
+          + '<input type="checkbox" class="cleanup-folder-check" data-idx="' + i + '"' + (c.defaultChecked ? ' checked' : '') + (refused ? ' disabled' : '') + '>'
+          + '<span class="cleanup-icon">' + escHtml(c.icon) + '</span><div class="cleanup-info">'
+          + '<div class="cleanup-name" title="' + escHtml(c.path) + '">' + escHtml(c.relPath || c.path) + '</div>'
+          + '<div class="cleanup-detail">' + escHtml(c.label) + ': ' + escHtml(c.reason) + '</div>'
+          + '<div class="cleanup-detail">' + Number(c.files).toLocaleString() + ' files in the scan &middot; ' + formatSize(Number(c.size) || 0) + ' on disk &middot; last modified ' + escHtml(formatAge(c.ageDays)) + '</div>'
+          + (refused
+            ? '<div class="cleanup-detail cleanup-refuse-reason">Not offered: ' + escHtml(c.refused) + '</div>'
+            : '<div class="cleanup-detail">If you restore or regenerate: ' + escHtml(c.restore) + '</div>')
+          + c.warnings.map(function(w) { return '<div class="cleanup-detail cleanup-warn">&#9888; ' + escHtml(w) + '</div>'; }).join('')
+          + '</div><span class="cleanup-size">' + formatSize(Number(c.size) || 0) + '</span></div>';
+      });
+      html += '<div class="cleanup-actions"><button class="cleanup-btn-clean" id="cleanup-folders-execute">' + (useQ ? 'Move Selected Folders to Quarantine' : 'Move Selected Folders to Trash') + '</button></div><div class="cleanup-note" id="cleanup-progress"></div>';
     }
-    html += '<div class="cleanup-actions"><button class="cleanup-btn-clean" id="cleanup-execute">Clean Selected</button></div>';
+    if (!found.length && !cands.length) html += '<div class="cleanup-empty">No reclaimable loose files found.' + (devOn ? '' : ' Your folder looks clean!') + '</div>';
+    if (found.length) {
+      const grandTotal = found.reduce(function(sum, c) { return sum + c.totalSize; }, 0);
+      html += '<div class="cleanup-section-title">Loose files</div>';
+      html += '<div class="cleanup-total"><span class="cleanup-total-label">Total reclaimable space (on disk)</span><span class="cleanup-total-size">' + formatSize(grandTotal) + '</span></div>';
+      for (const cat of found) {
+        html += '<div class="cleanup-category"><input type="checkbox" class="cleanup-check" data-id="' + escHtml(cat.id) + '"' + (CLEANUP_PRETICKED.has(cat.id) ? ' checked' : '') + '><span class="cleanup-icon">' + escHtml(cat.icon) + '</span><div class="cleanup-info"><div class="cleanup-name">' + escHtml(cat.label) + '</div><div class="cleanup-detail">' + (Number(cat.count) || 0).toLocaleString() + ' files'
+          + (cat.capped ? ' &middot; <span class="cleanup-warn">this run handles only the first ' + Number(cat.cap).toLocaleString() + ' found; run it again for the rest</span>' : '') + '</div></div><span class="cleanup-size">' + formatSize(Number(cat.totalSize) || 0) + '</span></div>';
+      }
+      html += '<div class="cleanup-actions"><button class="cleanup-btn-clean" id="cleanup-execute">Clean Selected</button></div>';
+    }
     body.innerHTML = html;
 
-    document.getElementById('cleanup-execute').addEventListener('click', async function() {
+    const showNotice = function(text, isError) {
+      const el = document.getElementById('cleanup-result');
+      el.innerHTML = escHtml(text).replace(/\n/g, '<br>');
+      el.classList.remove('hidden');
+      el.classList.toggle('cleanup-result-error', !!isError);
+    };
+    document.getElementById('cleanup-dev-toggle').addEventListener('change', async function(e) {
+      try { await window.api.saveSettings({ developerFolderCleanup: e.target.checked }); } catch (er) { /* ignore */ }
+      openCleanupWizard();
+    });
+
+    const quarToggle = document.getElementById('cleanup-quar-toggle');
+    if (quarToggle) quarToggle.addEventListener('change', async function(e) {
+      try { await window.api.saveSettings({ useQuarantine: e.target.checked }); } catch (er) { /* ignore */ }
+      openCleanupWizard();
+    });
+    const openQ = document.getElementById('cleanup-open-quar');
+    if (openQ) openQ.addEventListener('click', openQuarantine);
+    const restoreRun = document.getElementById('cleanup-restore-run');
+    if (restoreRun) restoreRun.addEventListener('click', async function() {
+      restoreRun.disabled = true;
+      let res; try { res = await window.api.restoreQuarantine(restoreRun.dataset.run, {}); } catch (e) { res = { error: String(e && e.message || e) }; }
+      showNotice(restoreSummary(res), !!(res.error || res.failed));
+    });
+    if (cands.length) {
+      const updateTotal = function() {
+        let n = 0, sz = 0;
+        body.querySelectorAll('.cleanup-folder-check:checked').forEach(function(c) { n++; sz += cands[Number(c.dataset.idx)].size; });
+        document.getElementById('cleanup-folder-total').textContent = n + ' folder' + (n === 1 ? '' : 's') + ', ' + formatSize(sz);
+      };
+      body.querySelectorAll('.cleanup-folder-check').forEach(function(c) { c.addEventListener('change', updateTotal); });
+      updateTotal();
+      document.getElementById('cleanup-folders-execute').addEventListener('click', async function() {
+        const btn = document.getElementById('cleanup-folders-execute');
+        if (btn.dataset.busy) { window.api.cancelFolderDelete(); btn.textContent = 'Cancelling...'; return; }
+        const picked = [...body.querySelectorAll('.cleanup-folder-check:checked')].map(function(c) { return cands[Number(c.dataset.idx)].path; });
+        if (!picked.length) return;
+        btn.dataset.busy = '1'; btn.textContent = 'Cancel';
+        document.getElementById('cleanup-progress').textContent = 'Verifying 1 of ' + picked.length + '...';
+        const result = await window.api.deleteFolders(picked, 'smart-cleanup-folders');
+        delete btn.dataset.busy; btn.textContent = useQ ? 'Move Selected Folders to Quarantine' : 'Move Selected Folders to Trash';
+        document.getElementById('cleanup-progress').textContent = '';
+        const moved = (result && result.deleted) || 0;
+        let msg = cleanupSummary(result, 'folder');
+        if (result && result.logError) msg += (msg ? '\n' : '') + result.logError;
+        if (result && result.error && !moved && !(result.removed > 0)) { showNotice(result.cancelled && msg ? msg : (msg ? result.error + '\n' + msg : result.error), !result.cancelled); return; }
+        if (moved > 0 || (result && result.removed > 0)) {
+          const goneAll = (result.deletedPaths || []).concat(result.removedPaths || []);
+          const movedSet = new Set(goneAll);
+          const prefixes = goneAll.map(function(p) { return p + (p.indexOf('\\') >= 0 ? '\\' : '/'); });
+          allFiles = allFiles.filter(function(f) { return !prefixes.some(function(p) { return f.path.startsWith(p); }); });
+          removeFoldersFromTree(cands.filter(function(c) { return movedSet.has(c.path); }).map(function(c) { return c.relPath; }));
+          applyFilters();
+          openCleanupWizard(msg, !!(result.failures && result.failures.length), result.quarantined ? result.runId : undefined);
+        } else if (msg) {
+          showNotice(msg, true);
+        }
+      });
+    }
+
+    const exec = document.getElementById('cleanup-execute');
+    if (exec) exec.addEventListener('click', async function() {
       const checks = body.querySelectorAll('.cleanup-check:checked');
       const selectedIds = new Set([...checks].map(function(c) { return c.dataset.id; }));
       const filesToDelete = [];
@@ -3689,19 +3908,168 @@
         if (selectedIds.has(cat.id)) filesToDelete.push(...cat.paths);
       }
       if (filesToDelete.length === 0) return;
-      const result = await window.api.deleteFiles(filesToDelete, 'smart-cleanup');
-      if (result && result.error) { alert(result.error); return; }
-      if (result && result.deleted > 0) {
-        const deletedSet = new Set(result.deletedPaths || []);
+      if (exec.disabled) return;   // a second click must not start a second run
+      exec.disabled = true;
+      const chunk = (found[0] && found[0].chunk) || 40000;
+      if (filesToDelete.length > chunk) showNotice('Cleaning ' + filesToDelete.length.toLocaleString() + ' files in chunks of ' + chunk.toLocaleString() + '; each chunk asks for its own confirmation.', false);
+      let result;
+      try { result = await deleteFilesChunked(filesToDelete, 'smart-cleanup', chunk); } finally { exec.disabled = false; }
+      if (result && result.error && !result.deleted && !result.removed && !result.alreadyGone) { showNotice(result.error, true); return; }
+      let msg = cleanupSummary(result, 'file');
+      if (result && result.error) msg += (msg ? '\n' : '') + result.error;
+      if (result && result.logError) msg += (msg ? '\n' : '') + result.logError;
+      if (result && (result.deleted > 0 || result.removed > 0 || result.alreadyGone > 0)) {
+        const deletedSet = new Set((result.deletedPaths || []).concat(result.removedPaths || [], result.alreadyGonePaths || []));
         allFiles = allFiles.filter(function(f) { return !deletedSet.has(f.path); });
+        removeFilesFromTree(result.goneInfo);
         applyFilters();
-        openCleanupWizard();
-      }
+        openCleanupWizard(msg, !!((result.failures && result.failures.length) || result.removed || result.alreadyGone || result.error));
+      } else if (msg) showNotice(msg, true);
     });
   }
 
   function closeCleanupWizard() {
     document.getElementById('cleanup-overlay').classList.add('hidden');
+  }
+
+  // === Feature: Quarantine ===
+
+  function restoreSummary(res) {
+    if (!res || res.error) return (res && res.error) || 'Restore failed.';
+    const rs = res.results || [];
+    const ok = rs.filter(function(r) { return r.ok; });
+    let msg = 'Restored ' + ok.length + ' of ' + rs.length + ' folder' + (rs.length === 1 ? '' : 's') + (ok.length ? ' (rescan to see them in the chart)' : '') + '.';
+    rs.filter(function(r) { return r.ok && r.warning; }).forEach(function(r) { msg += '\n- ' + r.originalPath + ': ' + r.warning; });
+    rs.filter(function(r) { return !r.ok; }).slice(0, 8).forEach(function(r) { msg += '\n- not restored: ' + r.originalPath + ' ' + r.reason; });
+    if (rs.some(function(r) { return !r.ok; })) msg += '\nFolders that were not restored were left exactly where they are.';
+    if (res.logError) msg += '\n' + res.logError;
+    return msg;
+  }
+
+  const quarState = { data: null, failures: {} };
+  function openQuarantine() {
+    document.getElementById('quar-overlay').classList.remove('hidden');
+    loadQuarantine();
+  }
+  function closeQuarantine() { document.getElementById('quar-overlay').classList.add('hidden'); }
+  function quarNotice(text, isError) {
+    const el = document.getElementById('quar-notice');
+    el.textContent = text;
+    el.classList.toggle('hidden', !text);
+    el.classList.toggle('cleanup-result-error', !!isError);
+    el.style.whiteSpace = 'pre-wrap';
+  }
+  async function loadQuarantine() {
+    let d;
+    try { d = await window.api.listQuarantine(); } catch (e) { d = { runs: [], totalSize: 0 }; }
+    quarState.data = d;
+    const runs = d.runs || [];
+    document.getElementById('quar-summary').textContent = (runs.length || (d.unreadableRuns || []).length)
+      ? 'Quarantine holds ' + formatSize(d.totalSize) + ' in ' + (runs.length + (d.unreadable || 0)) + ' run' + (runs.length + (d.unreadable || 0) === 1 ? '' : 's') + '. Quarantined items still use disk space until emptied. Runs older than ' + d.retentionDays + ' days are marked expired (you can still restore them); nothing is removed automatically.'
+      : '';
+    const unread = d.unreadableRuns || [];
+    document.getElementById('quar-empty').classList.toggle('hidden', runs.length > 0 || unread.length > 0);
+    document.getElementById('quar-empty-btn').classList.toggle('hidden', !runs.length);
+    const unreadHtml = unread.map(function(u) {
+      return '<div class="quar-run quar-expired quar-unreadable" data-path="' + escHtml(u.path) + '"><div class="quar-run-head"><div><div class="quar-run-title">Unreadable quarantine run</div><div class="dellog-meta">' + escHtml(u.path) + ' &middot; ' + formatSize(u.size) + (u.capped ? '+' : '') + ' &middot; ' + escHtml(u.error || '') + '. It still uses disk space; Stuff Diver cannot put its folders back.</div></div><div><button class="quar-btn quar-reveal-broken" data-path="' + escHtml(u.path) + '">Reveal in file manager</button> <button class="quar-btn quar-trash-broken" data-path="' + escHtml(u.path) + '">Move to Trash</button></div></div></div>';
+    }).join('');
+    document.getElementById('quar-list').innerHTML = unreadHtml + runs.map(function(run) {
+      const when = formatLogTime(run.t);
+      const fb = quarState.failures[run.runId] || {};
+      const items = run.items.map(function(it) {
+        const f = fb[it.id];
+        const held = (it.status === 'quarantined' || it.status === 'planned') && it.present;
+        let state = it.status === 'restored' ? 'restored' : (held ? 'in quarantine' : (it.status === 'quarantined' && !it.present ? 'missing from quarantine' : escHtml(it.status)));
+        let btns = '';
+        if (held) btns += '<button class="quar-btn quar-restore-item" data-run="' + run.runId + '" data-id="' + it.id + '">Restore this folder</button>';
+        if (f && f.canRestoreBeside) btns += ' <button class="quar-btn quar-restore-beside" data-run="' + run.runId + '" data-id="' + it.id + '">Restore beside it as "' + escHtml(it.name) + ' (restored)"</button>';
+        if (f && f.canConfirmDestination) btns += ' <button class="quar-btn quar-restore-dest" data-run="' + run.runId + '" data-id="' + it.id + '">Restore to ' + escHtml(f.destination) + '</button>';
+        if (f && f.canRestoreAnyway) btns += ' <button class="quar-btn quar-restore-anyway" data-run="' + run.runId + '" data-id="' + it.id + '">Restore anyway</button>';
+        if (f && f.canRecreateParent) btns += ' <button class="quar-btn quar-restore-recreate" data-run="' + run.runId + '" data-id="' + it.id + '">Recreate the parent folder and restore</button>';
+        return '<div class="quar-item" data-id="' + it.id + '"><div class="quar-item-main"><div>' + escHtml(it.originalPath) + '</div><div class="dellog-meta">' + escHtml(state) + ' &middot; ' + formatSize(Number(it.size) || 0) + ' &middot; ' + (Number(it.files) || 0).toLocaleString() + ' files' + (f && f.reason ? ' &middot; <span class="cleanup-warn">' + escHtml(f.reason) + '</span>' : '') + (it.restoredTo ? ' &middot; now at ' + escHtml(it.restoredTo) : '') + '</div></div>' + btns + '</div>';
+      }).join('');
+      const head = '<div class="quar-run-head"><div><div class="quar-run-title">' + escHtml(when) + (run.expired ? ' &middot; expired' : '') + (run.ownerChanged ? ' &middot; <span class="cleanup-warn">owner changed</span>' : '') + '</div><div class="dellog-meta">' + run.heldCount + ' of ' + run.items.length + ' folder' + (run.items.length === 1 ? '' : 's') + ' in quarantine &middot; ' + formatSize(run.size) + (run.ownerChanged ? ' &middot; recorded for a different account id (the account may have been renamed); restoring asks for a confirmation' : '') + '</div></div><div>'
+        + (run.heldCount ? '<button class="quar-btn quar-restore-run" data-run="' + run.runId + '">Restore this run</button> ' : '')
+        + '<button class="quar-btn quar-trash-run" data-run="' + run.runId + '">' + (run.expired ? 'Expired: tap to move to Trash' : 'Move to Trash') + '</button>'
+        + '</div></div>';
+      return '<div class="quar-run' + (run.expired ? ' quar-expired' : '') + '" data-run="' + run.runId + '">' + head + items + '</div>';
+    }).join('');
+  }
+  async function quarRestore(runId, ids, opts) {
+    let res;
+    try { res = await window.api.restoreQuarantine(runId, Object.assign({}, opts || {}, ids ? { ids: ids } : {})); } catch (e) { res = { error: String(e && e.message || e) }; }
+    const fb = quarState.failures[runId] = quarState.failures[runId] || {};
+    (res.results || []).forEach(function(r) { if (r.ok) delete fb[r.id]; else fb[r.id] = r; });
+    quarNotice(restoreSummary(res), !!(res.error || res.failed));
+    await loadQuarantine();
+  }
+  async function quarTrash(runIds) {
+    let res;
+    try { res = await window.api.trashQuarantine(runIds); } catch (e) { res = { error: String(e && e.message || e) }; }
+    if (res.error) quarNotice(res.error, true);
+    else if (res.cancelled) quarNotice('', false);
+    else quarNotice('Moved ' + res.trashed + ' quarantine run folder' + (res.trashed === 1 ? '' : 's') + ' to the Trash' + (res.removed ? ', ' + res.removed + ' gone but not confirmed to be in the Trash (the system reported an error)' : '') + (res.failed ? ', ' + res.failed + ' failed (left untouched): ' + res.results.filter(function(r) { return !r.ok; }).map(function(r) { return r.reason; }).join('; ') : '') + '. You can still restore them from the Trash.', !!res.failed);
+    await loadQuarantine();
+  }
+
+  // === Feature: Deletion Log Viewer ===
+
+  const DELLOG_PAGE = 200;
+  let dellogState = { offset: 0, status: '', search: '', entries: [], timer: null };
+
+  function formatLogTime(t) {
+    try { return new Date(t).toLocaleString(); } catch (e) { return String(t); }
+  }
+
+  function openDeletionLog() {
+    document.getElementById('dellog-overlay').classList.remove('hidden');
+    document.getElementById('dellog-search').value = '';
+    document.getElementById('dellog-status').value = '';
+    document.getElementById('dellog-file').value = '0';
+    loadDeletionLog(true);
+  }
+
+  function closeDeletionLog() {
+    document.getElementById('dellog-overlay').classList.add('hidden');
+  }
+
+  async function loadDeletionLog(reset) {
+    const st = dellogState;
+    if (reset) { st.offset = 0; st.entries = []; }
+    st.status = document.getElementById('dellog-status').value;
+    st.search = document.getElementById('dellog-search').value;
+    let res;
+    try { res = await window.api.queryDeletionLog({ offset: st.offset, limit: DELLOG_PAGE, status: st.status, search: st.search, file: Number(document.getElementById('dellog-file').value) || 0 }); }
+    catch (e) { res = { entries: [], matched: 0, total: 0, counts: {} }; }
+    st.entries = st.entries.concat(res.entries || []);
+    st.offset = st.entries.length;
+    const fileSel = document.getElementById('dellog-file');
+    const rot = res.rotated || [];
+    fileSel.classList.toggle('hidden', !rot.length);
+    if (fileSel.dataset.n !== String(rot.length)) {
+      fileSel.innerHTML = '<option value="0">Current log</option>' + rot.map(function(n) { return '<option value="' + Number(n) + '">Older log ' + Number(n) + '</option>'; }).join('');
+      fileSel.dataset.n = String(rot.length);
+    }
+    const list = document.getElementById('dellog-list');
+    const empty = document.getElementById('dellog-empty');
+    const c = res.counts || {};
+    document.getElementById('dellog-summary').textContent = res.total
+      ? 'Showing ' + st.entries.length.toLocaleString() + ' of ' + res.matched.toLocaleString() + ' matching (' + res.total.toLocaleString() + ' total: ' + (c.trashed || 0) + ' trashed, ' + (c.quarantined || 0) + ' quarantined, ' + (c.restored || 0) + ' restored, ' + (c.failed || 0) + ' failed, ' + (c.blocked || 0) + ' blocked, ' + (c.skipped || 0) + ' skipped, ' + (c.removed || 0) + ' removed, ' + (c.gone || 0) + ' already gone)'
+      : '';
+    list.innerHTML = st.entries.map(function(e, i) {
+      return '<div class="dellog-row" data-i="' + i + '"><span class="dellog-badge dellog-' + escHtml(e.status) + '">' + escHtml(e.status) + '</span>'
+        + '<div class="dellog-main"><div class="dellog-path">' + (e.path ? escHtml(e.path) : '<i>(no path recorded)</i>') + '</div>'
+        + '<div class="dellog-meta">' + escHtml(formatLogTime(e.t))
+        + (e.size != null ? ' &middot; ' + escHtml(formatSize(Number(e.size) || 0)) : '')
+        + (e.files != null ? ' &middot; ' + (Number(e.files) || 0).toLocaleString() + ' files' : '')
+        + (e.type === 'folder' ? ' &middot; folder' : '')
+        + ' &middot; ' + escHtml(e.source || 'unknown') + '</div>'
+        + (e.reason ? '<div class="dellog-reason">' + escHtml(e.reason) + (e.finalState ? ' (final state: ' + escHtml(e.finalState === 'gone' ? 'already gone' : 'untouched') + ')' : '') + '</div>' : '') + '</div>'
+        + '<button class="dellog-copy" data-i="' + i + '" title="Copy path">Copy path</button></div>';
+    }).join('');
+    empty.classList.toggle('hidden', st.entries.length > 0);
+    empty.textContent = res.total ? 'No entries match the current filter.' : 'No deletions recorded yet.';
+    document.getElementById('dellog-more').classList.toggle('hidden', st.entries.length >= res.matched);
   }
 
   // === Feature: Storage Forecast ===
@@ -3939,7 +4307,7 @@
         { name: 'Cancel a scan', desc: 'Click <strong>Cancel scan</strong> while scanning to stop early. You keep what was found so far, marked as a <em>Partial scan</em>.' },
         { name: 'Scan exclusions', desc: 'In <strong>Settings</strong>, list names (node_modules), patterns (*.tmp) or full paths to skip on every scan. Excluded items are counted in the stats bar.' },
         { name: 'Protected folders', desc: 'When some folders cannot be read, a banner explains why. On Windows it offers <strong>Restart as admin</strong>; on macOS it opens Full Disk Access settings.' },
-        { name: 'Smart Cleanup', desc: 'Click the <strong>&#128736; Tools</strong> icon &rarr; <strong>Smart Cleanup</strong> to scan for reclaimable space: node_modules, .git directories, caches, temp files, build artifacts, logs, .DS_Store, and more. Check categories and clean with one click.' },
+        { name: 'Smart Cleanup', desc: 'Click the <strong>&#128736; Tools</strong> icon &rarr; <strong>Smart Cleanup</strong> to scan for reclaimable space: regenerable folders (node_modules, build caches, virtualenvs), caches, temp files, build artifacts, logs, .DS_Store, and more. Check categories and clean with one click.' },
         { name: 'Storage Forecast', desc: 'Click <strong>&#128736; Tools</strong> &rarr; <strong>Storage Forecast</strong> to see a chart of your disk usage over time with a projected growth line. Shows estimated days until your drive is full.' },
         { name: 'Watch Folder', desc: 'Click <strong>&#128736; Tools</strong> &rarr; <strong>Watch Folder</strong> to monitor a folder for growth. Set a check interval (6h, daily, weekly) and get system notifications when significant growth is detected. A tray icon keeps the app running in the background.' },
         { name: 'Age warnings', desc: 'In the Summary panel, a warning highlights how many files haven\'t been modified in over a year. Click it to filter the view to just those old files.' }
@@ -4780,6 +5148,8 @@
       if (!btn) return;
       closeAllDropdowns();
       if (btn.dataset.tool === 'cleanup') openCleanupWizard();
+      else if (btn.dataset.tool === 'dellog') openDeletionLog();
+      else if (btn.dataset.tool === 'quarantine') openQuarantine();
       else if (btn.dataset.tool === 'forecast') openForecast();
       else if (btn.dataset.tool === 'monitor') openMonitorSetup();
     });
@@ -4793,6 +5163,59 @@
     document.getElementById('cleanup-close').addEventListener('click', closeCleanupWizard);
     document.getElementById('cleanup-overlay').addEventListener('click', (e) => {
       if (e.target.id === 'cleanup-overlay') closeCleanupWizard();
+    });
+
+    // === Quarantine Modal ===
+    document.getElementById('quar-close').addEventListener('click', closeQuarantine);
+    document.getElementById('quar-overlay').addEventListener('click', (e) => {
+      if (e.target.id === 'quar-overlay') closeQuarantine();
+    });
+    document.getElementById('quar-empty-btn').addEventListener('click', () => quarTrash('all'));
+    document.getElementById('quar-list').addEventListener('click', async (e) => {
+      const nb = e.target.closest('button[data-path]');
+      if (nb) {
+        if (nb.classList.contains('quar-reveal-broken')) { window.api.revealQuarantineBroken(nb.dataset.path); return; }
+        let res; try { res = await window.api.trashQuarantineBroken(nb.dataset.path); } catch (er) { res = { error: String(er && er.message || er) }; }
+        quarNotice(res.error ? res.error : res.cancelled ? '' : (res.failed ? 'Could not move it to the Trash: ' + res.reason : res.removed ? 'The system reported an error but the unreadable run is gone; it may not be in the Trash.' : 'Moved the unreadable run to the Trash.'), !!(res.error || res.failed));
+        await loadQuarantine();
+        return;
+      }
+      const b = e.target.closest('button[data-run]');
+      if (!b) return;
+      const run = b.dataset.run, id = Number(b.dataset.id);
+      if (b.classList.contains('quar-restore-run')) quarRestore(run, null, {});
+      else if (b.classList.contains('quar-restore-item')) quarRestore(run, [id], {});
+      else if (b.classList.contains('quar-restore-beside')) quarRestore(run, [id], { beside: true });
+      else if (b.classList.contains('quar-restore-recreate')) quarRestore(run, [id], { recreateParent: true });
+      else if (b.classList.contains('quar-restore-dest')) {
+        const f = (quarState.failures[run] || {})[id];
+        if (f && window.confirm('Put this folder back at exactly:\n\n' + f.destination + '\n\nThat is outside the folder you scanned. Continue?')) quarRestore(run, [id], { confirmDestination: f.destination });
+      }
+      else if (b.classList.contains('quar-restore-anyway')) {
+        const f = (quarState.failures[run] || {})[id];
+        if (window.confirm('Restore this folder anyway?\n\n' + (f && f.reason ? f.reason : 'Its contents could not be verified.') + '\n\nIt is only moved back (never overwriting anything) to ' + (f ? f.originalPath : 'its original place') + '.')) quarRestore(run, [id], { anyway: true });
+      }
+      else if (b.classList.contains('quar-trash-run')) quarTrash([run]);
+    });
+
+    // === Deletion Log Modal ===
+    document.getElementById('dellog-close').addEventListener('click', closeDeletionLog);
+    document.getElementById('dellog-overlay').addEventListener('click', (e) => {
+      if (e.target.id === 'dellog-overlay') closeDeletionLog();
+    });
+    document.getElementById('dellog-status').addEventListener('change', () => loadDeletionLog(true));
+    document.getElementById('dellog-file').addEventListener('change', () => loadDeletionLog(true));
+    document.getElementById('dellog-search').addEventListener('input', () => {
+      clearTimeout(dellogState.timer);
+      dellogState.timer = setTimeout(() => loadDeletionLog(true), 200);
+    });
+    document.getElementById('dellog-more').addEventListener('click', () => loadDeletionLog(false));
+    document.getElementById('dellog-reveal').addEventListener('click', () => window.api.revealDeletionLog());
+    document.getElementById('dellog-list').addEventListener('click', (e) => {
+      const b = e.target.closest('.dellog-copy');
+      if (!b) return;
+      const entry = dellogState.entries[Number(b.dataset.i)];
+      if (entry && entry.path) { try { navigator.clipboard.writeText(entry.path); } catch (er) { /* ignore */ } b.textContent = 'Copied'; setTimeout(() => { b.textContent = 'Copy path'; }, 1200); }
     });
 
     // === Forecast Modal ===
@@ -4856,7 +5279,9 @@
     // Escape closes modals
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') {
-        if (!document.getElementById('help-overlay').classList.contains('hidden')) closeHelpGuide();
+        if (!document.getElementById('quar-overlay').classList.contains('hidden')) closeQuarantine();
+        else if (!document.getElementById('dellog-overlay').classList.contains('hidden')) closeDeletionLog();
+        else if (!document.getElementById('help-overlay').classList.contains('hidden')) closeHelpGuide();
         else if (!document.getElementById('locate-overlay').classList.contains('hidden')) closeLocatePanel();
         else if (!document.getElementById('settings-overlay').classList.contains('hidden')) closeSettings();
         else if (!document.getElementById('cleanup-overlay').classList.contains('hidden')) closeCleanupWizard();

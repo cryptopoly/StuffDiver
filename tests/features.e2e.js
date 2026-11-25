@@ -3,7 +3,7 @@ const { execFileSync } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { makeFixture, launch, scanViaUi } = require('./helpers');
+const { makeFixture, launch, scanViaUi, requireUsableFixtures } = require('./helpers');
 
 async function withApp(fn, { env, prepare } = {}) {
   const fx = makeFixture();
@@ -110,15 +110,19 @@ test('extension panel lists extensions and filters to one extension', async () =
 });
 
 test('smart cleanup scans the full file list (incl. Windows-style separators)', async () => {
+  requireUsableFixtures(test);   // folder candidates need a real user profile (not available under Windows SYSTEM)
   await withApp(async ({ page }) => {
     await scanViaUi(page);
+    // node_modules is now a folder-level candidate (needs package.json next to it), not a per-file preset.
     const cats = await page.evaluate(() => window.api.cleanupScan());
-    const nm = cats.find(c => c.id === 'node_modules');
-    expect(nm.count).toBe(1);
+    expect(cats.find(c => c.id === 'node_modules')).toBeUndefined();
+    const folders = await page.evaluate(() => window.api.cleanupFoldersScan());
+    expect(folders.candidates.map(c => c.relPath)).toEqual(['node_modules']);
+    expect(folders.candidates[0].files).toBe(2);
     await page.locator('#tools-btn').click();
     await page.locator('[data-tool="cleanup"]').click();
     await expect(page.locator('#cleanup-body')).toContainText('node_modules');
-  });
+  }, { prepare: (fx) => { fs.writeFileSync(path.join(fx.root, 'package.json'), '{}'); fs.writeFileSync(path.join(fx.root, 'package-lock.json'), '{}'); fs.writeFileSync(path.join(fx.root, 'node_modules/.package-lock.json'), '{}'); } });
 });
 
 test('duplicate finder reports the exact copy as a gold match', async () => {
@@ -213,7 +217,9 @@ test('delete is logged, and protected paths are refused', async () => {
     // Trash may be unavailable on headless CI; the log must record the attempt either way.
     expect(ok.error).toBeUndefined();
     const log = await page.evaluate(() => window.api.getDeletionLog(10));
-    expect(log[0]).toMatchObject({ path: target, source: 'test' });
+    // The log records the on-disk case, which can differ from os.tmpdir() (C:\WINDOWS\TEMP vs C:\Windows\Temp)
+    expect(log[0].path.toLowerCase()).toBe(target.toLowerCase());
+    expect(log[0].source).toBe('test');
     expect(['trashed', 'failed']).toContain(log[0].status);
 
     for (const bad of [fx.root, os.homedir(), path.join(os.homedir(), '.ssh'), path.parse(fx.root).root]) {
@@ -243,4 +249,37 @@ test('.asar files are scanned as plain files (Electron fs would hide them)', asy
     expect(res.totalFiles).toBe(fx.fileCount + 1);
     expect(res.skippedDirs).toBe(0);
   }, { prepare: (fx) => fs.writeFileSync(path.join(fx.root, 'bundle.asar'), Buffer.alloc(64 * 1024, 'z')) });
+});
+
+test('macOS .icloud placeholders show as cloud-only files with no local size', async () => {
+  test.skip(process.platform !== 'darwin', 'iCloud placeholders only exist on macOS');
+  await withApp(async ({ page, fx }) => {
+    await scanViaUi(page);
+    const res = await page.evaluate((r) => window.api.scanFolder(r, {}), fx.root);
+    const f = res.files.find(x => x.name === 'Report.pdf');
+    expect(f).toBeTruthy();
+    expect(f.cloudStatus).toBe('icloud-only');
+    expect(f.size).toBe(0);
+    expect(res.cloudOnlyCount).toBe(1);
+    expect(res.files.find(x => x.name === '.Report.pdf.icloud')).toBeUndefined();
+  }, { prepare: (fx) => fs.writeFileSync(path.join(fx.root, 'docs', '.Report.pdf.icloud'), 'x') });
+});
+
+test('folders named like Object.prototype members do not break scans', async () => {
+  await withApp(async ({ page, fx }) => {
+    await scanViaUi(page);
+    const res = await page.evaluate((r) => window.api.scanFolder(r, {}), fx.root);
+    expect(res.totalFiles).toBe(fx.fileCount + 4);
+    expect(res.skippedDirs).toBe(0);
+    const names = Object.keys(res.folderTree.children);
+    // '__proto__' files are counted; the cloned tree object may not list a '__proto__' key
+    for (const n of ['constructor', 'toString', 'hasOwnProperty']) expect(names).toContain(n);
+  }, {
+    prepare: (fx) => {
+      for (const n of ['constructor', 'toString', '__proto__', 'hasOwnProperty']) {
+        fs.mkdirSync(path.join(fx.root, n), { recursive: true });
+        fs.writeFileSync(path.join(fx.root, n, 'a.txt'), 'x');
+      }
+    }
+  });
 });

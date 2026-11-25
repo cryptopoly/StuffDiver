@@ -190,7 +190,7 @@ async function runScan(folderPath, options = {}) {
   const darwinZeroBlock = [];
 
   // Folder tree for bubble map — accumulates sizes during walk
-  const folderTree = { name: path.basename(folderPath), size: 0, logicalSize: 0, fileCount: 0, mtime: 0, children: {}, extSizes: {} };
+  const folderTree = { name: path.basename(folderPath), size: 0, logicalSize: 0, fileCount: 0, mtime: 0, children: Object.create(null), extSizes: Object.create(null) };
 
   function addToTree(relativePath, diskSize, logSize, ext, mtime) {
     const parts = relativePath.replace(/\\/g, '/').split('/');
@@ -200,7 +200,7 @@ async function runScan(folderPath, options = {}) {
       const name = parts[i];
       if (!node.children[name]) {
         const nodePath = parts.slice(0, i + 1).join('/');
-        node.children[name] = { name, path: nodePath, size: 0, logicalSize: 0, fileCount: 0, mtime: 0, children: {}, extSizes: {} };
+        node.children[name] = { name, path: nodePath, size: 0, logicalSize: 0, fileCount: 0, mtime: 0, children: Object.create(null), extSizes: Object.create(null) };
       }
       node = node.children[name];
     }
@@ -350,6 +350,7 @@ async function runScan(folderPath, options = {}) {
       const isICloudPlaceholder = process.platform === 'darwin' &&
         entry.name.startsWith('.') && entry.name.endsWith('.icloud') && entry.name.length > 8;
       const fullPath = path.join(dir, entry.name);
+      if (entry.name.toLowerCase() === '.stuffdiverquarantine') continue;   // our own quarantine folder is never scanned
       if (isExcluded && isExcluded(fullPath, entry.name)) { excludedCount++; continue; }
       if (!isICloudPlaceholder && entry.isDirectory() && !entry.isSymbolicLink()) {
         if (isPseudoFilesystemPath(fullPath)) continue;
@@ -447,6 +448,7 @@ async function runScan(folderPath, options = {}) {
       for (let i = 0; i < r.count; i++) {
         // Yield now and then so cancel and IPC stay responsive on multi-million-file volumes.
         if (i % 50000 === 49999) { await new Promise(res => setImmediate(res)); if (scanState.cancelled) break; }
+        if (r.fullPaths[i].toLowerCase().split(/[\\/]/).includes('.stuffdiverquarantine')) continue;   // never scan the quarantine (whole folder names only)
         if (r.cloud[i]) cloudOnlyCount++;
         recordFile(r.fullPaths[i], r.names[i], r.cloud[i] ? 0 : r.diskSize[i], r.logicalSize[i], r.mtimeMs[i], r.cloud[i] ? 'icloud-only' : undefined);
       }

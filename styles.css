@@ -3200,6 +3200,50 @@ body.light .cache-prompt-actions button:first-child {
   font-size: 14px;
 }
 
+/* Folder cleanup + deletion log */
+.cleanup-section-title { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-secondary); margin: 12px 0 6px; }
+.cleanup-result { padding: 10px 14px; border-radius: 8px; background: var(--bg-raised); border: 1px solid var(--border-medium); font-size: 12px; margin-bottom: 10px; color: var(--text-primary); }
+.cleanup-result-error { border-color: #f87171; }
+.cleanup-dev-toggle { display: flex; gap: 8px; align-items: center; font-size: 13px; color: var(--text-primary); margin-bottom: 4px; }
+.cleanup-note { font-size: 11px; color: var(--text-muted); margin-bottom: 8px; }
+.cleanup-refused { opacity: 0.5; }
+.cleanup-refused .cleanup-size { color: var(--text-muted); }
+.cleanup-refuse-reason { color: #f87171; }
+.cleanup-warn { color: #f5a524; }
+.cleanup-folder .cleanup-name { word-break: break-all; }
+.dellog-modal { background: var(--bg-surface); border: 1px solid var(--border-medium); border-radius: 14px; width: 760px; max-width: 94vw; max-height: 85vh; overflow-y: auto; box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4); }
+.dellog-controls { display: flex; gap: 8px; margin-bottom: 8px; }
+.dellog-controls input { flex: 1; }
+.dellog-row { display: flex; gap: 10px; align-items: flex-start; padding: 8px 10px; border-radius: 8px; background: var(--bg-raised); border: 1px solid var(--border-light); margin-bottom: 6px; }
+.dellog-main { flex: 1; min-width: 0; }
+.dellog-path { font-size: 12px; color: var(--text-primary); word-break: break-all; }
+.dellog-meta, .dellog-reason { font-size: 11px; color: var(--text-muted); }
+.dellog-badge { font-size: 10px; font-weight: 700; text-transform: uppercase; padding: 2px 8px; border-radius: 10px; min-width: 56px; text-align: center; }
+.dellog-trashed { background: rgba(52, 211, 153, 0.15); color: #34d399; }
+.dellog-failed { background: rgba(245, 165, 36, 0.15); color: #f5a524; }
+.dellog-gone { background: rgba(148, 163, 184, 0.18); color: #94a3b8; }
+.dellog-removed { background: rgba(245, 165, 36, 0.15); color: #f5a524; }
+.dellog-skipped { background: rgba(148, 163, 184, 0.18); color: #94a3b8; }
+.dellog-quarantined { background: rgba(0, 180, 216, 0.15); color: #00b4d8; }
+.dellog-restored { background: rgba(52, 211, 153, 0.15); color: #34d399; }
+.quar-run { padding: 10px; border-radius: 8px; background: var(--bg-raised); border: 1px solid var(--border-light); margin-bottom: 8px; }
+.quar-run-head { display: flex; gap: 10px; align-items: center; justify-content: space-between; }
+.quar-run-title { font-size: 13px; font-weight: 600; color: var(--text-primary); }
+.quar-item { display: flex; gap: 8px; align-items: center; font-size: 12px; padding: 4px 0; border-top: 1px solid var(--border-light); }
+.quar-item-main { flex: 1; min-width: 0; word-break: break-all; }
+.quar-expired { border-color: #f5a524; }
+.quar-btn { padding: 4px 10px; border-radius: 6px; border: 1px solid var(--border-medium); background: var(--bg-surface); color: var(--text-primary); cursor: pointer; white-space: nowrap; }
+.quar-btn:hover { border-color: #00b4d8; }
+.dellog-blocked { background: rgba(248, 113, 113, 0.15); color: #f87171; }
+.dellog-restore { margin-top: 10px; }
+.dellog-controls select, .dellog-controls input, .dellog-controls button, .dellog-copy, #dellog-more {
+  background: var(--bg-raised); color: var(--text-primary); border: 1px solid var(--border-medium); border-radius: 8px; padding: 6px 10px; font-size: 12px; cursor: pointer;
+}
+.dellog-controls input { cursor: text; }
+.dellog-copy { align-self: center; white-space: nowrap; }
+.dellog-controls select:hover, .dellog-controls button:hover, .dellog-copy:hover, #dellog-more:hover { border-color: #00b4d8; }
+#dellog-more { display: block; margin: 8px auto; }
+
 /* === Forecast Modal === */
 
 .forecast-modal {
