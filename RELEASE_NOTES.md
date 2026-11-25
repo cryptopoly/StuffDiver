@@ -1,4 +1,4 @@
-# Stuff Diver 0.4.6
+# Stuff Diver 0.5.0
 
 Accuracy and safety update. Scans are more accurate on all three platforms, cleaning up is much safer, and there is a new command-line mode.
 
