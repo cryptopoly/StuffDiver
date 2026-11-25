@@ -1,4 +1,8 @@
-# Stuff Diver 0.5.0
+# Stuff Diver 0.5.1
+
+Build fix: the macOS release is built on a pinned macOS 15 runner so signing works again. No app changes since 0.5.0, whose notes follow.
+
+## Stuff Diver 0.5.0
 
 Accuracy and safety update. Scans are more accurate on all three platforms, cleaning up is much safer, and there is a new command-line mode.
 

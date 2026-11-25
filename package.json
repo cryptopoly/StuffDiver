@@ -1,7 +1,7 @@
 {
   "name": "stuff-diver",
-  "version": "0.5.0",
-  "description": "Dive deep into your disk \u2014 treemap, pie chart & duplicate finder",
+  "version": "0.5.1",
+  "description": "Dive deep into your disk — treemap, pie chart & duplicate finder",
   "author": {
     "name": "Stuff Diver",
     "email": "info@stuffdiver.com"
