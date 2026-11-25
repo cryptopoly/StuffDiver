@@ -1192,25 +1192,19 @@ function secureWindowsDir(dir) {
   if (owner !== sid && owner !== 'S-1-5-32-544') throw new Error(`${dir} is owned by ${owner}, not by this account`);
 }
 // Windows: only FIXED local disks are used (mapped network drives, removable drives and anything unknown are not).
-const driveTypeCache = new Map();
+const DRIVE_SCRIPT = "$ErrorActionPreference='SilentlyContinue'; $bus=@{}; Get-Partition | Where-Object { $_.DriveLetter } | ForEach-Object { $bus[[string]$_.DriveLetter]=(Get-Disk -Number $_.DiskNumber).BusType }; [System.IO.DriveInfo]::GetDrives() | ForEach-Object { $l=$_.Name.Substring(0,1); \"$l|$($_.DriveType)|$($bus[$l])\" }";
+const driveProbe = quarantine.createDriveProbe({
+  run: () => new Promise((resolve, reject) => execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', DRIVE_SCRIPT], { encoding: 'utf8', timeout: 10000, windowsHide: true }, (e, so) => (e ? reject(new Error(e.killed ? 'timed out after 10 s' : e.message)) : resolve(String(so)))))
+});
 function quarantineDriveType(letter) {
   if (!/^[A-Z]$/.test(letter)) return null;
   if (E2E && typeof global.__e2eDriveType === 'function') return global.__e2eDriveType(letter);
-  return driveTypeCache.has(letter) ? driveTypeCache.get(letter) : null;   // filled by prefetchDriveTypes(); a miss means "not allowed"
+  return driveProbe.type(letter);   // filled by prefetchDriveTypes(); a miss means "not allowed", with the reason in the fallback text
 }
-// Async (3 s limit per drive) so a slow or failing PowerShell never blocks the main process; failures are cached as "unknown".
-// USB / FireWire / SD buses count as removable even though Windows reports the drive as Fixed.
+const quarantineDriveReason = (letter) => driveProbe.reason(letter);
 async function prefetchDriveTypes(paths) {
   if (process.platform !== 'win32' || (E2E && typeof global.__e2eDriveType === 'function')) return;
-  for (const l of new Set(paths.map(p => (/^([a-zA-Z]):[\\/]/.exec(p) || [])[1]).filter(Boolean).map(x => x.toUpperCase()))) {
-    if (driveTypeCache.has(l)) continue;
-    const script = `$t=(New-Object System.IO.DriveInfo('${l}')).DriveType; $b=''; try { $b=(Get-Partition -DriveLetter ${l} -ErrorAction Stop | Get-Disk -ErrorAction Stop).BusType } catch {}; "$t|$b"`;
-    const out = await new Promise((res) => execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { encoding: 'utf8', timeout: 3000, windowsHide: true }, (e, so) => res(e ? '' : String(so).trim())));
-    const m = /^(Fixed|Removable|Network|CDRom|Ram|NoRootDirectory|Unknown)\|(.*)$/.exec(out);
-    let t = m ? m[1] : 'Unknown';
-    if (m && t === 'Fixed' && /^(USB|1394|SD|MMC|iSCSI)$/i.test(m[2])) t = 'Removable (' + m[2] + ' disk)';
-    driveTypeCache.set(l, t);
-  }
+  await driveProbe.prefetch(paths);
 }
 // macOS/Linux: network, FUSE and removable/external volumes are never used as a quarantine root.
 const BAD_FSTYPES = /^(nfs\d*|cifs|smb3?|smbfs|afpfs|webdav|fuse(\..*)?|fuseblk|macfuse|osxfuse|sshfs|9p|davfs|afs|ceph|glusterfs|vboxsf|vfat|exfat|msdos|ntfs3?)$/i;
@@ -1256,7 +1250,7 @@ const execFileSyncText = (cmd, args) => require('child_process').execFileSync(cm
 function quarantineCtx() {
   const ci = process.platform === 'win32' || process.platform === 'darwin';
   return {
-    owner: quarantineOwner(), legacyOwners: process.platform === 'win32' ? [legacyOwnerHash()] : [], secureDir: (E2E && typeof global.__e2eSecureDir === 'function') ? global.__e2eSecureDir : (process.platform === 'win32' ? secureWindowsDir : null), driveType: quarantineDriveType, volumeProblem: quarantineVolumeProblem,
+    owner: quarantineOwner(), legacyOwners: process.platform === 'win32' ? [legacyOwnerHash()] : [], secureDir: (E2E && typeof global.__e2eSecureDir === 'function') ? global.__e2eSecureDir : (process.platform === 'win32' ? secureWindowsDir : null), driveType: quarantineDriveType, driveTypeReason: quarantineDriveReason, volumeProblem: quarantineVolumeProblem,
     platform: process.platform, home: quarantineHome(), fsx: rawFs, uid: typeof process.getuid === 'function' ? process.getuid() : null,
     mounts: () => mountList(), rootOk: quarantineRootProblem, destReason: restoreDestProblem,
     rename: (E2E && typeof global.__e2eRename === 'function') ? global.__e2eRename : null,
@@ -1534,7 +1528,7 @@ handleTrusted('quarantine-list', async () => {
   return {
     enabled: quarantineOn(), retentionDays: quarantine.RETENTION_DAYS, totalSize: r.totalSize + unreadableRuns.reduce((a, u) => a + u.size, 0), unreadable: r.broken.length, unreadableRuns, busy: folderDeleteBusy,
     runs: r.runs.map(run => ({
-      runId: run.runId, t: run.t, size: run.size, heldCount: run.heldCount, expired: run.expired,
+      runId: run.runId, t: run.t, size: run.size, heldCount: run.heldCount, expired: run.expired, ownerChanged: run.items.some(i => i.ownerChanged),
       items: run.items.map(i => ({ id: i.n, name: i.name, originalPath: i.originalPath, category: i.category, size: i.size, files: i.files, status: i.status, present: i.present, restoredTo: i.restoredTo || null }))
     }))
   };

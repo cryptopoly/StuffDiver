@@ -57,8 +57,9 @@ test.describe('unit: where the quarantine goes', () => {
     expect(q.chooseRoot('C:\\Users\\bob\\proj\\node_modules', ctx).root).toBe('C:\\Users\\bob\\.StuffDiverQuarantine');
     expect(q.chooseRoot('D:\\work\\node_modules', ctx).root).toBe('D:\\.StuffDiverQuarantine\\u-abc123');   // shared drive top: per-user subfolder
     expect(q.chooseRoot('\\\\server\\share\\x\\node_modules', { ...ctx, fsx: fakeFs({ '\\\\server\\share\\x\\node_modules': { dev: 3 } }) }).error).toMatch(/drive letter/);
-    for (const t of ['Network', 'Removable', 'CDRom', null]) expect(q.chooseRoot('D:\\work\\node_modules', { ...ctx, driveType: () => t }).error, String(t)).toMatch(/not a fixed local disk/);
-    expect(q.chooseRoot('C:\\Users\\bob\\proj\\node_modules', { ...ctx, driveType: undefined }).error).toMatch(/not a fixed local disk/);
+    for (const t of ['Network', 'Removable', 'CDRom']) expect(q.chooseRoot('D:\\work\\node_modules', { ...ctx, driveType: () => t }).error, String(t)).toMatch(/not a fixed local disk/);
+    const unknown = q.chooseRoot('C:\\Users\\bob\\proj\\node_modules', { ...ctx, driveType: () => null, driveTypeReason: () => 'timed out after 10 s' }).error;
+    expect(unknown).toMatch(/could not determine the drive type of C:.*timed out after 10 s.*Recycle Bin/);
   });
   test('Windows: a drive that differs in case still counts as the system drive; a cloud-synced or protected root is refused', () => {
     const fsx = fakeFs({ 'c:\\Users\\bob\\p\\node_modules': { dev: 1 }, 'C:\\Users\\bob': { dev: 1 } });
@@ -860,5 +861,74 @@ test('restore only lands inside an approved or recorded scan folder; anything el
       expect(r3.restored).toBe(1);
       expect(fs.existsSync(path.join(dest, 'dep/index.js'))).toBe(true);
     } finally { fs.rmSync(other, { recursive: true, force: true }); }
+  });
+});
+
+// ---------- W1: drive-type probe (pure unit tests, no windows) ----------
+test.describe('unit: drive-type probe', () => {
+  const LIST = 'C|Fixed|NVMe\r\nD|Fixed|USB\r\nE|Network|\r\nF|CDRom|\r\nS|Fixed|SATA\r\n';
+  test('one listing gives every drive; USB-bus disks count as removable', () => {
+    const m = q.parseDriveList(LIST);
+    expect([...m]).toEqual([['C', 'Fixed'], ['D', 'Removable (USB disk)'], ['E', 'Network'], ['F', 'CDRom'], ['S', 'Fixed']]);
+    expect(q.parseDriveList('garbage\n|||\n').size).toBe(0);
+  });
+  test('success: a single probe run answers all drives and is remembered', async () => {
+    let runs = 0;
+    const p = q.createDriveProbe({ run: async () => { runs++; return LIST; } });
+    await p.prefetch(['C:\\a', 'S:\\b', 'D:\\c']);
+    await p.prefetch(['C:\\again']);
+    expect(runs).toBe(1);
+    expect([p.type('C'), p.type('S'), p.type('D'), p.type('E')]).toEqual(['Fixed', 'Fixed', 'Removable (USB disk)', 'Network']);
+  });
+  test('probes never overlap, even when prefetch is called concurrently for different drives', async () => {
+    let active = 0, max = 0, runs = 0;
+    const p = q.createDriveProbe({ run: async () => { runs++; active++; max = Math.max(max, active); await new Promise(r => setTimeout(r, 30)); active--; return LIST; } });
+    await Promise.all([p.prefetch(['C:\\x']), p.prefetch(['S:\\x']), p.prefetch(['D:\\x'])]);
+    expect(max).toBe(1);
+    expect(p.type('S')).toBe('Fixed');
+  });
+  test('a timeout is not remembered for the session: it is retried after 30 s and the first reason is reported meanwhile', async () => {
+    let t = 1000, mode = 'timeout', runs = 0;
+    const p = q.createDriveProbe({ now: () => t, run: async () => { runs++; if (mode === 'timeout') throw new Error('timed out after 10 s'); return LIST; } });
+    await p.prefetch(['S:\\x']);
+    expect(p.type('S')).toBeNull(); expect(p.reason('S')).toMatch(/timed out/);
+    mode = 'ok'; t += 5000;
+    await p.prefetch(['S:\\x']);                        // inside the 30 s window: no new process
+    expect(runs).toBe(1); expect(p.type('S')).toBeNull();
+    t += 31000;
+    await p.prefetch(['S:\\x']);                        // window over: retried and now known
+    expect(runs).toBe(2); expect(p.type('S')).toBe('Fixed'); expect(p.reason('S')).toBeNull();
+  });
+  test('failure and an empty answer give "not allowed" with a reason; an unlisted drive is reported as such', async () => {
+    const p1 = q.createDriveProbe({ run: async () => { throw new Error('powershell.exe not found'); } });
+    await p1.prefetch(['D:\\x']);
+    expect(p1.type('D')).toBeNull(); expect(p1.reason('D')).toMatch(/not found/);
+    const p2 = q.createDriveProbe({ run: async () => '' });
+    await p2.prefetch(['D:\\x']);
+    expect(p2.reason('D')).toMatch(/no drives/);
+    const p3 = q.createDriveProbe({ run: async () => 'C|Fixed|SATA\n' });
+    await p3.prefetch(['Z:\\x']);
+    expect(p3.type('Z')).toBeNull(); expect(p3.reason('Z')).toMatch(/not listed/);
+    expect(p3.type('C')).toBe('Fixed');                 // successes in the same answer are still kept
+  });
+  test('a known drive is never re-probed even after another drive failed to appear', async () => {
+    let runs = 0;
+    const p = q.createDriveProbe({ run: async () => { runs++; return LIST; } });
+    await p.prefetch(['C:\\x']);
+    await p.prefetch(['C:\\y']);
+    expect(runs).toBe(1);
+  });
+});
+
+test('W2: the Quarantine list labels an owner-changed run before any restore attempt', async () => {
+  await withApp((r) => proj(r, 'p'), async ({ page, root, qhome }) => {
+    await del(page, [path.join(root, 'p/node_modules')]);
+    const dir = runDirs(qhome)[0], man = manifestOf(dir);
+    man.owner = 'old-account-id'; fs.writeFileSync(path.join(dir, 'manifest.json'), JSON.stringify(man));
+    expect((await list(page)).runs[0].ownerChanged).toBe(true);
+    await page.locator('#tools-btn').click();
+    await page.locator('[data-tool="quarantine"]').click();
+    await expect(page.locator('.quar-run')).toContainText('owner changed');
+    await expect(page.locator('.quar-run')).toContainText('different account id');
   });
 });

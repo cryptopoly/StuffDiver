@@ -45,10 +45,13 @@ function chooseRoot(itemPath, ctx) {
     if (!d) return { error: 'it is not on a local drive letter (network paths are never quarantined)' };
     // Only fixed local disks: mapped network drives, removable drives and unknown types are never used.
     const kind = ctx.driveType ? ctx.driveType(d[1].toUpperCase()) : null;
-    if (kind !== 'Fixed') return { error: `drive ${d[1].toUpperCase()}: is not a fixed local disk (${kind || 'type unknown'}), so it is never used for quarantine` };
+    if (kind == null) return { error: `could not determine the drive type of ${d[1].toUpperCase()}: (${(ctx.driveTypeReason && ctx.driveTypeReason(d[1].toUpperCase())) || 'no answer'}), so it is moved to the Recycle Bin instead of quarantine` };
+    if (kind !== 'Fixed') return { error: `drive ${d[1].toUpperCase()}: is not a fixed local disk (${kind}), so it is never used for quarantine` };
     const hd = /^([a-zA-Z]):/.exec(ctx.home || '');
-    // System drive: inside the user's own profile. Any other drive: its own top folder, in a per-user subfolder
-    // (every account on the machine shares that top folder).
+    // System drive: inside the user's own profile folder, which keeps the profile's own inherited ACL (by design: no per-user
+    // subfolder or extra ACL; default profiles grant only the user, SYSTEM and Administrators, but a profile with extra
+    // principals would expose the quarantine to them too). Any other drive: its own top folder in a per-user subfolder
+    // (every account on the machine shares that top folder), made private by an explicit ACL when created.
     if (hd && hd[1].toLowerCase() === d[1].toLowerCase()) candidates.push(P.join(ctx.home, QDIR));
     else candidates.push(P.join(d[1].toUpperCase() + ':\\' + QDIR, ctx.owner || ''));
   } else {
@@ -372,4 +375,43 @@ function markRestored(item, restoredTo, ctx) {
   return true;
 }
 
-module.exports = { QDIR, RETENTION_DAYS, MANIFEST, RUN_RE, isQuarantinePath, runDirName, newRunId, chooseRoot, createRun, moveIn, setItemStatus, writeManifest, readRun, listRuns, restoreItem, markRestored, readRegistry, addRegistry, registryPath };
+// ---- Windows drive types: ONE probe that lists every drive, run strictly one at a time ----
+// A success is remembered per drive letter for the session; a failure (timeout, no answer) is remembered for 30 s only,
+// so the next cleanup tries again instead of silently using the Recycle Bin for the rest of the session.
+const DRIVE_FAIL_MS = 30000;
+const REMOVABLE_BUS = /^(USB|1394|SD|MMC|iSCSI)$/i;
+function parseDriveList(text) {
+  const out = new Map();
+  for (const line of String(text).split(/\r?\n/)) {
+    const m = /^([A-Za-z])\|(Fixed|Removable|Network|CDRom|Ram|NoRootDirectory|Unknown)\|(.*)$/.exec(line.trim());
+    if (!m) continue;
+    out.set(m[1].toUpperCase(), m[2] === 'Fixed' && REMOVABLE_BUS.test(m[3].trim()) ? `Removable (${m[3].trim()} disk)` : m[2]);
+  }
+  return out;
+}
+// opts.run(): Promise<string> (the probe's output, rejecting on failure or timeout); opts.now(): ms.
+function createDriveProbe(opts) {
+  const now = opts.now || Date.now;
+  const known = new Map(), failed = new Map();
+  let chain = Promise.resolve();
+  const probe = () => new Promise((resolve) => {
+    chain = chain.then(async () => {   // serial: never two probe processes at once
+      try { resolve({ map: parseDriveList(await opts.run()) }); } catch (e) { resolve({ error: (e && e.message) || String(e) }); }
+    });
+  });
+  return {
+    async prefetch(paths) {
+      const letters = [...new Set(paths.map(p => (/^([a-zA-Z]):[\\/]/.exec(p) || [])[1]).filter(Boolean).map(x => x.toUpperCase()))];
+      const need = letters.filter(l => !known.has(l) && !(failed.has(l) && now() - failed.get(l).t < DRIVE_FAIL_MS));
+      if (!need.length) return;
+      const r = await probe();
+      if (r.error || !r.map.size) { for (const l of need) failed.set(l, { t: now(), reason: r.error || 'the probe returned no drives' }); return; }
+      for (const [l, t] of r.map) { known.set(l, t); failed.delete(l); }
+      for (const l of need) if (!known.has(l)) failed.set(l, { t: now(), reason: 'the drive is not listed by Windows' });
+    },
+    type: (l) => known.get(l) || null,
+    reason: (l) => (failed.get(l) || {}).reason || null
+  };
+}
+
+module.exports = { parseDriveList, createDriveProbe, DRIVE_FAIL_MS, QDIR, RETENTION_DAYS, MANIFEST, RUN_RE, isQuarantinePath, runDirName, newRunId, chooseRoot, createRun, moveIn, setItemStatus, writeManifest, readRun, listRuns, restoreItem, markRestored, readRegistry, addRegistry, registryPath };
