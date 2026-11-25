@@ -43,8 +43,14 @@ function makeFixture() {
   return { root, expected, fileCount: 7 };
 }
 
+// Existing cleanup tests exercise the Trash path, so quarantine is OFF in their profile unless a test asks for it
+// (extraEnv SD_TEST_QUARANTINE=1). Quarantine tests get a private "home" for the quarantine root, on the fixture volume.
 async function launch(folder, extraEnv = {}) {
   const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'sd-userdata-'));
+  const { SD_TEST_QUARANTINE, ...env } = extraEnv;
+  let qhome = null;
+  if (SD_TEST_QUARANTINE === '1') qhome = fs.realpathSync(fs.mkdtempSync(path.join(fixtureParent(), 'sd-qhome-')));
+  else fs.writeFileSync(path.join(userData, 'settings.json'), JSON.stringify({ useQuarantine: false }));
   const start = async () => {
     const app = await electron.launch({
       args: [path.join(__dirname, '..'), ...(process.platform === 'linux' ? ['--no-sandbox'] : [])],
@@ -54,7 +60,8 @@ async function launch(folder, extraEnv = {}) {
         STUFFDIVER_E2E: '1',
         STUFFDIVER_USER_DATA: userData,
         STUFFDIVER_E2E_FOLDER: folder || '',
-        ...extraEnv
+        ...(qhome ? { STUFFDIVER_E2E_QHOME: qhome } : {}),
+        ...env
       }
     });
     try {
@@ -65,7 +72,7 @@ async function launch(folder, extraEnv = {}) {
   };
   let r;
   try { r = await start(); } catch (e) { r = await start(); }   // one retry: first-window start-up can be slow on busy VMs
-  return { app: r.app, page: r.page, userData };
+  return { app: r.app, page: r.page, userData, qhome };
 }
 
 async function scanViaUi(page, { dev = true } = {}) {

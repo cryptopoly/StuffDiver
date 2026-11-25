@@ -24,6 +24,7 @@
           <div id="tools-dropdown" class="toolbar-dropdown hidden">
             <button data-tool="cleanup">&#128230; Smart Cleanup</button>
             <button data-tool="dellog">&#128220; Deletion Log</button>
+            <button data-tool="quarantine">&#128737; Quarantine</button>
             <button data-tool="forecast">&#128200; Storage Forecast</button>
             <button data-tool="monitor">&#128065; Watch Folder</button>
           </div>
@@ -296,6 +297,8 @@
           <select id="dellog-status" aria-label="Filter by status">
             <option value="">All statuses</option>
             <option value="trashed">Trashed</option>
+            <option value="quarantined">Quarantined</option>
+            <option value="restored">Restored</option>
             <option value="failed">Failed</option>
             <option value="blocked">Blocked</option>
             <option value="skipped">Skipped</option>
@@ -310,7 +313,25 @@
         <div id="dellog-list"></div>
         <div id="dellog-empty" class="cleanup-empty hidden"></div>
         <button id="dellog-more" class="hidden">Load more</button>
-        <div class="cleanup-note dellog-restore">To restore something: macOS: open the Trash, right-click the item, then Put Back. Windows: open the Recycle Bin, right-click the item, then Restore. Linux: open Trash in your file manager, then Restore. &ldquo;Blocked&rdquo; means Stuff Diver refused and nothing was moved.</div>
+        <div class="cleanup-note dellog-restore">To put back quarantined folders: Tools &gt; Quarantine. To restore something from the Trash: macOS: open the Trash, right-click the item, then Put Back. Windows: open the Recycle Bin, right-click the item, then Restore. Linux: open Trash in your file manager, then Restore. &ldquo;Blocked&rdquo; means Stuff Diver refused and nothing was moved.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Quarantine modal -->
+  <div id="quar-overlay" class="modal-overlay hidden">
+    <div class="dellog-modal">
+      <div class="settings-header">
+        <h2>&#128737; Quarantine</h2>
+        <button id="quar-close" class="settings-close-btn">&times;</button>
+      </div>
+      <div class="settings-body">
+        <div id="quar-summary" class="cleanup-note"></div>
+        <div id="quar-notice" class="cleanup-result hidden"></div>
+        <div id="quar-list"></div>
+        <div id="quar-empty" class="cleanup-empty hidden">Nothing in quarantine.</div>
+        <div class="cleanup-actions"><button id="quar-empty-btn" class="cleanup-btn-clean hidden">Empty quarantine (moves it to Trash)</button></div>
+        <div class="cleanup-note">Folders cleaned up with developer-folder cleanup are moved here, not deleted. They sit in a hidden <code>.StuffDiverQuarantine</code> folder on the same disk and still use disk space until you empty the quarantine, which moves them to the Trash. Nothing is removed automatically.</div>
       </div>
     </div>
   </div>

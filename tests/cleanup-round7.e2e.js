@@ -140,7 +140,17 @@ test('G5. the Collector shows a results panel on success and failure, and drops 
     const rows = page.locator('.file-table tbody tr');
     await expect(rows.first()).toBeVisible();
     // collect all three via the context menu
-    for (let i = 0; i < 3; i++) { await rows.nth(i).click({ button: 'right' }); await page.locator('#context-menu button[data-action="collect"], .context-menu button[data-action="collect"]').first().click(); }
+    for (let i = 0; i < 3; i++) {
+      const collect = page.locator('#context-menu button[data-action="collect"], .context-menu button[data-action="collect"]').first();
+      // The menu can open late on a busy machine (or be closed by a re-render): retry the right-click before giving up.
+      for (let attempt = 0; attempt < 3 && !(await collect.isVisible()); attempt++) {
+        await page.keyboard.press('Escape');
+        await rows.nth(i).click({ button: 'right' });
+        await collect.waitFor({ state: 'visible', timeout: 20000 }).catch(() => {});
+      }
+      await expect(collect).toBeVisible({ timeout: 30000 });
+      await collect.click();
+    }
     await expect(page.locator('#collector-count')).toContainText('3 items');
     // make one vanish and one fail, one succeed
     const items = ['one.dat', 'two.dat', 'three.dat'].map(n => path.join(scanRoot, 'a', n));

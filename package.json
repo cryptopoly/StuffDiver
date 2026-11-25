@@ -96,6 +96,7 @@
       "main.js",
       "scanner.js",
       "cleanup-folders.js",
+      "quarantine.js",
       "cli.js",
       "mft-scan.js",
       "preload.js",
