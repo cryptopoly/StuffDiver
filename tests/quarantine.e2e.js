@@ -434,7 +434,7 @@ test('the confirmation says nothing is deleted, names the quarantine, and Cancel
     const o = await app.evaluate(() => global.__asked[0]);
     expect(o.buttons).toEqual(['Cancel', 'Move to quarantine']);
     expect(o.message).toMatch(/to quarantine\?/);
-    for (const s of ['Nothing is deleted', 'hidden quarantine folder', 'next to your files', 'Tools > Quarantine', 'still use disk space until you empty the quarantine']) expect(o.detail).toContain(s);
+    for (const s of ['Nothing is deleted', 'hidden quarantine folder', 'next to your files', 'Tools > Quarantine', 'keep using disk space until you empty the quarantine']) expect(o.detail).toContain(s);
     expect(o.detail).not.toMatch(/trashed/);
   });
 });

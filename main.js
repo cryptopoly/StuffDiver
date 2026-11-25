@@ -1157,7 +1157,10 @@ function quarantineCtx() {
     canRecreate: (parent, scanRoot) => {
       if (!scanRoot || !path.isAbsolute(scanRoot) || !cleanupFolders.isInside(parent, scanRoot, ci)) return false;
       try { if (!fs.statSync(scanRoot).isDirectory()) return false; } catch (e) { return false; }
-      return !restoreDestProblem(parent);
+      if (protectedReason(parent) || containsProtected(parent) || cleanupFolders.cloudSyncedReason(parent) || cleanupFolders.trashReason(parent) || cleanupFolders.installedAppReason(parent)) return false;
+      let anc = parent;   // the folders to create do not exist yet: judge the nearest one that does
+      while (!fs.existsSync(anc) && path.dirname(anc) !== anc) anc = path.dirname(anc);
+      return !restoreDestProblem(path.join(anc, '.sd-probe'));
     }
   };
 }
@@ -1413,7 +1416,7 @@ handleTrusted('quarantine-restore', async (event, runId, opts) => {
     const qctx = quarantineCtx();
     const run = quarantine.listRuns(quarantineRoots(), qctx, nowMs()).runs.find(r => r.runId === runId);
     if (!run) return { error: 'That quarantine run no longer exists (it may have been moved to the Trash).' };
-    const held = (i) => i.status === 'quarantined' || i.status === 'planned';
+    const held = (i) => i.status === 'quarantined' || (i.status === 'planned' && i.present);   // planned and absent = never moved (crash or cancel)
     const targets = o.ids ? run.items.filter(i => o.ids.includes(i.n)) : run.items.filter(held);
     if (!targets.length) return { error: 'Nothing to restore in this run.', results: [] };
     const results = [], restoredPaths = [];
