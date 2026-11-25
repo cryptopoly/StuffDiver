@@ -57,14 +57,11 @@ Each group shows how much space is wasted so you can prioritise cleanup.
 
 ### Smart Cleanup
 
-Pattern-based cleanup that detects and categorises:
+Finds files you can usually remove safely and moves them to the system Trash / Recycle Bin (nothing is permanently deleted, and every action is written to the deletion log). Loose-file presets: `.DS_Store` and `Thumbs.db` (the only ones pre-ticked), temp files, clearly-named log files, crash dumps, Windows temp and update downloads, package-manager and app caches, re-downloadable AI model caches, Spotlight indexes and `desktop.ini`. Files inside app bundles, installed-app folders, cloud-synced folders (Dropbox, OneDrive, iCloud, ...) and the Trash are never offered.
 
-- System caches and temp files
-- Log files and thumbnail caches
-- Old downloads and broken shortcuts
-- Duplicate applications
+**Developer folders (advanced)** is off by default. When you switch it on, whole `node_modules`, build output (`target`, `.next`, `.nuxt`), caches (`__pycache__`, `.pytest_cache`, `.mypy_cache`, `.gradle`), Xcode `DerivedData` and Python virtualenvs can be moved to the Trash, nothing pre-ticked. Each folder must carry the marker a real install or build leaves behind, is re-checked right before it moves, and is refused when it holds a repository, user documents, mounts, links, or something in use or not reinstallable.
 
-Preview what will be removed and how much space you'll recover before committing.
+Open **Tools > Deletion Log** to see every item that was trashed, failed, skipped or refused, and how to restore it.
 
 ### Storage Forecast
 

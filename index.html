@@ -213,6 +213,7 @@
         <button id="collector-delete" class="collector-btn-delete">Delete All</button>
       </div>
     </div>
+    <div id="collector-result" class="cleanup-result hidden"></div>
     <div id="collector-list"></div>
   </div>
 
@@ -299,6 +300,7 @@
             <option value="blocked">Blocked</option>
             <option value="skipped">Skipped</option>
             <option value="removed">Removed (not in Trash)</option>
+            <option value="gone">Already gone</option>
           </select>
           <select id="dellog-file" class="hidden" aria-label="Log file"></select>
           <input id="dellog-search" type="search" placeholder="Search path, reason, source...">

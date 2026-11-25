@@ -21,7 +21,7 @@ const VCS_NAMES = new Set(['.git', '.hg', '.jj', '.svn', '.bzr', '.fossil', '_fo
 const USER_DOC_EXT = /\.(docx?|xlsx?|pptx?|odt|ods|odp|pdf|pages|numbers|key|psd|ai|sketch|fig|md|markdown|rtf)$/i;
 const USER_DOC_STRICT = /\.(docx?|xlsx?|pptx?|odt|ods|odp|pages|numbers|key|psd|ai|sketch|fig|rtf)$/i; // node_modules legitimately ships README.md / pdf docs
 const docRe = (mode) => mode === 'strict' ? USER_DOC_STRICT : USER_DOC_EXT;
-const BUNDLE_EXT = /\.(app|framework|bundle|plugin|component|vst|vst3|appex|kext|xpc|prefpane|saver|mdimporter|qlgenerator|wdgt|xcarchive|photoslibrary|musiclibrary|imovielibrary|tvlibrary|band|logicx|fcpbundle|sparsebundle|pkg)$/i;
+const BUNDLE_EXT = /\.(app|framework|bundle|plugin|component|vst|vst3|appex|kext|xpc|prefpane|saver|mdimporter|qlgenerator|wdgt|xcarchive|photoslibrary|musiclibrary|imovielibrary|tvlibrary|band|logicx|fcpbundle|sparsebundle|pkg|aaxplugin|clap|systemextension|dext|workflow|scptd|xcplugin|xcframework|rtfd|docset|nib|lbaction|mdimporter|osax|service|action)$/i;
 // Files inside signed bundles and installed-app locations: removing even junk-looking files breaks signatures/installs.
 function installedAppReason(p, bundleOnly = false) {
   const norm = String(p).replace(/\\/g, '/').toLowerCase();
@@ -29,6 +29,13 @@ function installedAppReason(p, bundleOnly = false) {
   if (segs.slice(0, -1).some(x => BUNDLE_EXT.test(x))) return 'inside an application bundle';
   if (bundleOnly) return null;
   if (segs.some(x => x === 'windowsapps' || x === 'program files' || x === 'program files (x86)') || /\/programdata\/package cache(\/|$)/.test(norm)) return 'inside an installed Windows application folder';
+  // Installed-app folders in user space (Windows per-user installs, scoop, Steam, user flatpaks).
+  for (let i = 0; i < segs.length - 1; i++) {
+    if (segs[i] === 'appdata' && segs[i + 1] === 'local' && segs[i + 2] === 'programs') return 'inside an installed Windows application folder';
+    if (segs[i] === 'scoop' && segs[i + 1] === 'apps') return 'inside an installed Windows application folder';
+    if (segs[i] === 'steamapps' && segs[i + 1] === 'common') return 'inside an installed game folder';
+    if (segs[i] === '.local' && segs[i + 1] === 'share' && segs[i + 2] === 'flatpak') return 'inside an installed application location';
+  }
   if (/^\/(usr|opt|snap)(\/|$)/.test(norm) || /^\/var\/lib\/flatpak(\/|$)/.test(norm) || /^\/tmp\/\.mount_[^/]+(\/|$)/.test(norm) || /^\/app(\/|$)/.test(norm)) return 'inside an installed application location';
   return null;
 }

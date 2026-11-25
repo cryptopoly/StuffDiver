@@ -159,6 +159,7 @@ let activeScan = null;
 function approveFolderPath(folderPath) {
   const resolved = assertDirectoryPath(folderPath);
   approvedFolderPaths.add(resolved);
+  try { approvedFolderPaths.add(fs.realpathSync.native(resolved)); } catch (e) { /* keep the typed form */ }   // the real location of a symlinked root is protected and checked too
   return resolved;
 }
 
@@ -413,6 +414,8 @@ handleTrusted('cleanup-scan', async () => {
   for (const t of [require('os').tmpdir(), (() => { try { return fs.realpathSync.native(require('os').tmpdir()); } catch (e) { return ''; } })()]) if (t) tmpPrefixes.push(t.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase() + '/');
   const belowTemp = (full) => { const l = full.toLowerCase(); const pre = tmpPrefixes.find(t => l.startsWith(t)); return pre ? '/' + full.slice(pre.length) : full; };
   const ctx = { dbDirs, belowTemp };
+  let realRoot = null;
+  try { const rr = fs.realpathSync.native(lastScanFolder); if (rr !== lastScanFolder) realRoot = rr.replace(/\\/g, '/'); } catch (e) { /* no root */ }
   const pathCap = (E2E && global.__e2ePathCap) || CLEANUP_PATH_CAP; // E2E-only override so tests can exercise the cap cheaply
   for (const f of lastScanAllFiles) {
     if (f.cloudStatus === 'icloud-only') continue;
@@ -422,7 +425,8 @@ handleTrusted('cleanup-scan', async () => {
         const full = f.path.replace(/\\/g, '/');
         if (c.skip && c.skip(full, ctx)) break;
         // Files in cloud-synced folders or already in a Trash are never offered (a delete there is felt everywhere / is meaningless).
-        if (fileLocationReason(f.path, false)) break;
+        if (fileLocationReason(f.path)) break;
+        if (realRoot && fileLocationReason(realRoot + '/' + rp.slice(1))) break;   // a symlinked scan root must not hide a blocked place
         // Never offer paths the delete guard would refuse (a single one refuses the whole request).
         if (protectedReason(f.path, true)) break;
         c.count++;
@@ -432,7 +436,7 @@ handleTrusted('cleanup-scan', async () => {
       }
     }
   }
-  return cats.filter(c => c.count > 0).map(({ re, skip, ...rest }) => ({ ...rest, capped: rest.count > rest.paths.length, cap: pathCap })).sort((a, b) => b.totalSize - a.totalSize);
+  return cats.filter(c => c.count > 0).map(({ re, skip, ...rest }) => ({ ...rest, capped: rest.count > rest.paths.length, cap: pathCap, chunk: (E2E && global.__e2eChunk) || 40000 })).sort((a, b) => b.totalSize - a.totalSize);
 });
 
 handleTrusted('find-duplicates', async (event) => {
@@ -525,7 +529,8 @@ handleTrusted('find-duplicates', async (event) => {
   // --- Silver & Bronze: name-based grouping ---
   const byName = new Map();
   for (const f of candidates) {
-    const key = f.name.toLowerCase();
+    // Case-sensitive file systems (Linux) can hold README and readme as different files: compare exact names there.
+    const key = process.platform === 'linux' ? f.name : f.name.toLowerCase();
     if (!byName.has(key)) byName.set(key, []);
     byName.get(key).push(f);
   }
@@ -817,23 +822,36 @@ handleTrusted('reveal-deletion-log', async () => {
 
 const FILE_REQUEST_CAP = 50000;
 const trashFn = (p) => (E2E && typeof global.__e2eTrash === 'function') ? global.__e2eTrash(p) : shell.trashItem(p); // E2E-only hook can simulate platform quirks
-// Location rules shared by the Smart Cleanup file list and delete-files (one function, no duplicated logic).
-// bundleOnly: delete-files applies only the always-wrong places (bundles); the scan also skips installed-app locations.
-function fileLocationReason(fp, bundleOnly) {
+// Location rules shared by the Smart Cleanup file list and delete-files: ONE function, no flags, so the two can never drift.
+function fileLocationReason(fp) {
   if (cleanupFolders.cloudSyncedReason(fp)) return 'in a cloud-synced folder: deleting here deletes it everywhere';
   if (cleanupFolders.trashReason(fp)) return 'already in a Trash or Recycle Bin (it cannot be moved to the Trash again)';
-  const app = cleanupFolders.installedAppReason(fp, bundleOnly);
-  if (app) return bundleOnly ? app + ' (removing files there breaks the app\'s signature or install)' : app;
+  const app = cleanupFolders.installedAppReason(fp);
+  if (app) return app + ' (removing files there breaks the app\'s signature or install)';
   return null;
+}
+// The same rules applied to where the file REALLY is (a symlinked parent or scan root must not hide a blocked place).
+function realFileLocation(fp, dirCache) {
+  const dir = path.dirname(fp);
+  let rd = dirCache.get(dir);
+  if (rd === undefined) { try { rd = fs.realpathSync.native(dir); } catch (e) { rd = null; } dirCache.set(dir, rd); }
+  return rd ? path.join(rd, path.basename(fp)) : null;
 }
 // Per-file checks shared by the first pass and the re-check after the confirmation dialog.
 function checkFilePaths(paths) {
   const blocked = [];
+  const dirCache = new Map();
   for (const fp of paths) {
     const reason = protectedReason(fp);
     if (reason) { blocked.push({ path: fp, reason }); continue; }
-    const loc = fileLocationReason(fp, true);
+    const loc = fileLocationReason(fp);
     if (loc) { blocked.push({ path: fp, reason: loc }); continue; }
+    const real = realFileLocation(fp, dirCache);
+    if (real && real !== fp) {
+      const pr2 = protectedReason(real, true); if (pr2) { blocked.push({ path: fp, reason: `${pr2} (it resolves to ${real})` }); continue; }
+      const loc2 = fileLocationReason(real);
+      if (loc2) { blocked.push({ path: fp, reason: `${loc2} (it resolves to ${real})` }); continue; }
+    }
     // This handler only trashes files. Folders go through delete-folders and its safeguards.
     try {
       const st = fs.lstatSync(fp);
@@ -849,8 +867,14 @@ function checkFilePaths(paths) {
   return blocked;
 }
 
+let fileDeleteBusy = false;
 handleTrusted('delete-files', async (event, filePaths, source) => {
   if (!Array.isArray(filePaths) || !filePaths.length) return { deleted: 0, deletedPaths: [] };
+  if (fileDeleteBusy) return { deleted: 0, deletedPaths: [], error: 'Another cleanup is already running. Nothing was moved.' };
+  fileDeleteBusy = true;
+  try { return await deleteFilesImpl(filePaths, source); } finally { fileDeleteBusy = false; }
+});
+async function deleteFilesImpl(filePaths, source) {
   // Cheap request-level checks first, before any per-path work.
   if (filePaths.length > FILE_REQUEST_CAP) return { deleted: 0, deletedPaths: [], error: `Refused: ${filePaths.length} files in one request, the limit is ${FILE_REQUEST_CAP}. Nothing was moved.` };
   if (!filePaths.every(p => typeof p === 'string')) return { deleted: 0, deletedPaths: [], error: 'Refused: invalid file path in request. Nothing was moved.' };
@@ -912,11 +936,18 @@ handleTrusted('delete-files', async (event, filePaths, source) => {
     return { deleted: 0, deletedPaths: [], blocked: changed, ...(logError ? { logError } : {}), error: `Refused: ${cleanupFolders.safeText(changed[0].path)} changed before it could be deleted (${changed[0].reason}). Nothing was moved.` };
   }
 
-  const deletedPaths = [], removedPaths = [], failures = [];
+  const deletedPaths = [], removedPaths = [], goneBefore = [], failures = [];
   let logError = null;
   for (const fp of safePaths) {
     const entry = { t: Date.now(), path: fp, size: sizeByPath.get(fp) ?? null, source: source || 'collector' };
     let rec;
+    // A stale list can name files that vanished before this run: say so instead of calling it a removal.
+    let existsNow = true; try { fs.lstatSync(fp); } catch (e) { existsNow = e.code !== 'ENOENT'; }
+    if (!existsNow) {
+      goneBefore.push(fp);
+      logError = (await logDeletion([{ ...entry, status: 'gone', reason: 'already gone before this run (stale list); nothing was moved' }])) || logError;
+      continue;
+    }
     try {
       await trashFn(fp);
       deletedPaths.push(fp);
@@ -935,12 +966,12 @@ handleTrusted('delete-files', async (event, filePaths, source) => {
     }
     logError = (await logDeletion([rec])) || logError; // written per item: a crash mid-batch loses nothing
   }
-  if (deletedPaths.length || removedPaths.length) {
-    const gone = new Set([...deletedPaths, ...removedPaths]);
+  if (deletedPaths.length || removedPaths.length || goneBefore.length) {
+    const gone = new Set([...deletedPaths, ...removedPaths, ...goneBefore]);
     lastScanAllFiles = lastScanAllFiles.filter(f => !gone.has(f.path));
   }
-  return { deleted: deletedPaths.length, deletedPaths, removed: removedPaths.length, removedPaths, failures, ...(logError ? { logError } : {}) };
-});
+  return { deleted: deletedPaths.length, deletedPaths, removed: removedPaths.length, removedPaths, alreadyGone: goneBefore.length, alreadyGonePaths: goneBefore, failures, ...(logError ? { logError } : {}) };
+}
 
 
 // === Folder-level Smart Cleanup ===
@@ -1219,10 +1250,10 @@ handleTrusted('query-deletion-log', async (event, opts) => {
   const limit = Math.max(1, Math.min(Number(o.limit) || 200, 1000));
   const offset = Math.max(0, Number(o.offset) || 0);
   const file = Math.max(0, Math.min(Number(o.file) || 0, LOG_KEEP - 1));
-  const status = ['trashed', 'failed', 'blocked', 'skipped', 'removed'].includes(o.status) ? o.status : null;
+  const status = ['trashed', 'failed', 'blocked', 'skipped', 'removed', 'gone'].includes(o.status) ? o.status : null;
   const q = typeof o.search === 'string' ? o.search.trim().toLowerCase() : '';
   const all = await readLogEntries(file);
-  const counts = { trashed: 0, failed: 0, blocked: 0, skipped: 0, removed: 0 };
+  const counts = { trashed: 0, failed: 0, blocked: 0, skipped: 0, removed: 0, gone: 0 };
   const matched = [];
   for (let i = all.length - 1; i >= 0; i--) {
     const e = all[i];
