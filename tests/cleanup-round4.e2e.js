@@ -105,7 +105,7 @@ test('R9. a capped category says so in the row; summary labels freed space "up t
 test.describe('R3 markers inside the folder', () => {
   let root;
   test.beforeEach(() => { root = tmp(); });
-  test.afterEach(() => fs.rmSync(root, { recursive: true, force: true }));
+  test.afterEach(() => { if (root) fs.rmSync(root, { recursive: true, force: true }); });
   test('node_modules needs an install marker written by the package manager', () => {
     for (const marker of ['.package-lock.json', '.modules.yaml', '.yarn-integrity']) {
       fs.mkdirSync(path.join(root, marker, 'node_modules'), { recursive: true });
@@ -180,7 +180,7 @@ test('R3 (app): document inside target is shown as refused with its exact reason
 test.describe('R5 project signals', () => {
   let root;
   test.beforeEach(() => { root = tmp(); });
-  test.afterEach(() => fs.rmSync(root, { recursive: true, force: true }));
+  test.afterEach(() => { if (root) fs.rmSync(root, { recursive: true, force: true }); });
   const sev = (rel, o = {}) => cf.projectSignals(path.join(root, rel, 'node_modules'), 'node_modules', { home: path.join(root, 'nohome'), ...o });
   const mkp = (rel, files = {}, pkg = '{"name":"x"}') => { fs.mkdirSync(path.join(root, rel, 'node_modules'), { recursive: true }); fs.writeFileSync(path.join(root, rel, 'package.json'), pkg); for (const [k, v] of Object.entries(files)) { fs.mkdirSync(path.dirname(path.join(root, rel, k)), { recursive: true }); fs.writeFileSync(path.join(root, rel, k), v); } };
   test('lockfile registries and non-registry dependencies', () => {

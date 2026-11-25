@@ -25,7 +25,7 @@ function tmp() { requireUsableFixtures(test); return fs.realpathSync(fs.mkdtempS
 test.describe('classifier', () => {
   let root;
   test.beforeEach(() => { root = tmp(); });
-  test.afterEach(() => fs.rmSync(root, { recursive: true, force: true }));
+  test.afterEach(() => { if (root) fs.rmSync(root, { recursive: true, force: true }); });
   const kind = (rel) => { const c = cf.classifyFolder(path.join(root, rel)); return c && (c.kind || ('refused:' + c.refused)); };
 
   test('accepts every allowlisted kind with its structural marker', () => {

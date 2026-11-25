@@ -36,7 +36,7 @@ const cls = (dir) => { const c = cf.classifyFolder(dir); return c && (c.kind || 
 test.describe('1. node_modules of installed tools and apps is never offered', () => {
   let root;
   test.beforeEach(() => { root = tmp(); });
-  test.afterEach(() => fs.rmSync(root, { recursive: true, force: true }));
+  test.afterEach(() => { if (root) fs.rmSync(root, { recursive: true, force: true }); });
   const installed = (rel) => { mk(root, `${rel}/package.json`, '{}'); mk(root, `${rel}/package-lock.json`, '{}'); mk(root, `${rel}/node_modules/x/i.js`); return path.join(root, rel, 'node_modules'); };
 
   test('ancestor node_modules (npm inside nvm, nested deps)', () => {
