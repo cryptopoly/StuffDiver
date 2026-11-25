@@ -216,7 +216,7 @@ function showMainWindow() {
 if (E2E) global.__e2eShowMainWindow = showMainWindow;
 
 app.whenReady().then(async () => {
-  if (!cliOpts && !E2E && process.platform === 'win32') driveProbe.startBusCheck();   // best effort, in the background: learns which disks are USB/SD
+  if (!cliOpts && !E2E && process.platform === 'win32') primeSid(); driveProbe.startBusCheck();   // best effort, in the background: learns which disks are USB/SD
   if (cliOpts) {
     const code = await runCli(cliOpts, { version: app.getVersion() }).catch((e) => {
       process.stderr.write(`Error: ${e.message}\n`);
@@ -1184,14 +1184,14 @@ function quarantineOwner() {
   const sid = currentSid();   // the account's SID survives renames and profile moves
   return sid ? 'sid-' + sid : legacyOwnerHash();
 }
-// Makes a per-user folder on a shared drive private to this account (explicit ACL, no inheritance) and checks who owns it.
-function secureWindowsDir(dir) {
-  const sid = currentSid();
-  if (!sid) throw new Error('the account SID cannot be determined');
-  execFileSyncText('icacls.exe', [dir, '/inheritance:r', '/grant:r', `*${sid}:(OI)(CI)F`, '*S-1-5-18:(OI)(CI)F', '*S-1-5-32-544:(OI)(CI)F']);
-  const owner = execFileSyncText('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `(Get-Acl -LiteralPath '${dir.replace(/'/g, "''")}').GetOwner([System.Security.Principal.SecurityIdentifier]).Value`]).trim();
-  if (owner !== sid && owner !== 'S-1-5-32-544') throw new Error(`${dir} is owned by ${owner}, not by this account`);
-}
+async function primeSid() { if (!sidCache) { try { const m = /"(S-1-[0-9-]+)"/.exec(await runTool('whoami.exe', ['/user', '/fo', 'csv', '/nh'], 5000)); if (m) sidCache = m[1]; } catch (e) { /* retried later */ } } return sidCache; }
+// Per-user folder on a shared drive: created exclusively, ACL set with icacls and verified from `icacls /save` (SDDL). Async, serial, no PowerShell.
+const dirSecurer = quarantine.createDirSecurer({
+  run: (cmd, args, ms) => runTool(cmd, args, ms),
+  getSid: primeSid,
+  getUserName: async () => (await runTool('whoami.exe', [], 5000)).trim(),
+  get scratch() { return path.join(app.getPath('userData'), 'quarantine-acl-check.txt'); }
+});
 // Windows: only FIXED local disks are used (mapped network drives, removable drives and anything unknown are not).
 const runTool = (cmd, args, ms) => new Promise((resolve, reject) => execFile(cmd, args, { encoding: 'utf8', timeout: ms, windowsHide: true }, (e, so) => (e ? reject(new Error(e.killed ? `timed out after ${ms / 1000} s` : (e.code ? `${cmd} exited with ${e.code}` : 'failed to start'))) : resolve(String(so)))));
 const DRIVE_SCRIPT = "[System.IO.DriveInfo]::GetDrives() | ForEach-Object { \"$($_.Name.Substring(0,1))|$($_.DriveType)|\" }";
@@ -1256,7 +1256,7 @@ const execFileSyncText = (cmd, args) => require('child_process').execFileSync(cm
 function quarantineCtx() {
   const ci = process.platform === 'win32' || process.platform === 'darwin';
   return {
-    owner: quarantineOwner(), legacyOwners: process.platform === 'win32' ? [legacyOwnerHash()] : [], secureDir: (E2E && typeof global.__e2eSecureDir === 'function') ? global.__e2eSecureDir : (process.platform === 'win32' ? secureWindowsDir : null), driveType: quarantineDriveType, driveTypeReason: quarantineDriveReason, volumeProblem: quarantineVolumeProblem,
+    owner: quarantineOwner(), legacyOwners: process.platform === 'win32' ? [legacyOwnerHash()] : [], secureDir: (E2E && typeof global.__e2eSecureDir === 'function') ? global.__e2eSecureDir : (process.platform === 'win32' ? ((dir) => { if (!dirSecurer.isVerified(dir)) throw new Error('the quarantine folder was not secured first'); }) : null), driveType: quarantineDriveType, driveTypeReason: quarantineDriveReason, volumeProblem: quarantineVolumeProblem,
     platform: process.platform, home: quarantineHome(), fsx: rawFs, uid: typeof process.getuid === 'function' ? process.getuid() : null,
     mounts: () => mountList(), rootOk: quarantineRootProblem, destReason: restoreDestProblem,
     rename: (E2E && typeof global.__e2eRename === 'function') ? global.__e2eRename : null,
@@ -1418,6 +1418,7 @@ handleTrusted('delete-folders', async (event, folderPaths, source) => {
       const scanRootOf = (p) => [...approvedFolderPaths].find(r => cleanupFolders.isInside(p, r, ci)) || lastScanFolder || null;
       for (const [root, list] of groups) {
         try {
+          if (process.platform === 'win32' && !(E2E && typeof global.__e2eSecureDir === 'function') && path.basename(root) === qctx.owner) await dirSecurer.ensure(root);   // async: never blocks the UI
           const items = list.map(c => {
             let dev = ''; try { dev = fs.lstatSync(c.path, { bigint: true }).dev; } catch (e) { throw new Error('cannot read ' + c.path); }
             return { n: ++n, originalPath: c.path, originalRealPath: c.logPath || c.path, dev, size: c.size, files: c.files, category: c.kind };
@@ -1426,7 +1427,7 @@ handleTrusted('delete-folders', async (event, folderPaths, source) => {
           const manifest = quarantine.createRun({ root, runId, t: runT, appVersion: app.getVersion(), scanRoot: scanRootOf(list[0].path), source: src, items, expectDev }, qctx);
           quarantine.addRegistry(app.getPath('userData'), root);
           manifest.items.forEach((item, i) => qItem.set(list[i].path, { manifest, item }));
-        } catch (e) { for (const c of list) fallbackWhy.set(c.path, 'could not create the quarantine folder (' + osErrorReason(e) + ')'); }
+        } catch (e) { for (const c of list) fallbackWhy.set(c.path, e && e.secure ? e.message : 'could not create the quarantine folder (' + osErrorReason(e) + ')'); }
       }
     }
     const setQ = (c, status, extra) => { const q = qItem.get(c.path); if (q) { try { quarantine.setItemStatus(q.manifest, q.item, status, extra, qctx); } catch (e) { /* the log below still records it */ } } };
