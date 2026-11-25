@@ -257,7 +257,9 @@ async function scanNtfsVolume(volumeRoot, opts = {}) {
         const p = parent[n];
         if (p < numRecords && (flags[p] & F_USED) && seq[p] === parentSeq[n]) {
           const pp = p === n ? null : resolveDir(p, depth + 1);
-          if (pp !== null) result = path.win32.join(pp, names[n]);
+          // The walk cannot enter the volume root's System Volume Information (access denied even as admin), so skip it and everything below it.
+          const isSvi = p === ROOT_RECORD && names[n].toLowerCase() === 'system volume information';
+          if (pp !== null && !isSvi) result = path.win32.join(pp, names[n]);
         }
       }
       dirPaths.set(n, result);
