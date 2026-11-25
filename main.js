@@ -202,8 +202,18 @@ function createWindow() {
 
 app.whenReady().then(async () => {
   if (cliOpts) {
+    // Headless mode must never show a GUI error dialog (it would hang scripts and
+    // scheduled tasks): a closed stdout/stderr pipe (e.g. `| head`) or any other
+    // uncaught error just ends the run with a non-zero exit code.
+    const say = (msg) => { try { process.stderr.write(msg + '\n'); } catch (e) { /* pipe closed */ } };
+    for (const s of [process.stdout, process.stderr]) s.on('error', () => { /* EPIPE etc. */ });
+    process.on('uncaughtException', (e) => {
+      if (e && e.code === 'EPIPE') return;
+      say(`Error: ${e && e.message || e}`);
+      app.exit(1);
+    });
     const code = await runCli(cliOpts, { version: app.getVersion() }).catch((e) => {
-      process.stderr.write(`Error: ${e.message}\n`);
+      say(`Error: ${e.message}`);
       return 1;
     });
     app.exit(code);

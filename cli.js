@@ -156,7 +156,8 @@ ${table(['Extension', 'Size on disk', 'Files'], s.byExtension.map(e => [e.ext, f
 
 // Runs the CLI; resolves to the process exit code.
 async function runCli(opts, { version }) {
-  const err = (m) => process.stderr.write(m + '\n');
+  // Writing to a closed pipe (`... | head`) must not crash the run: ignore it.
+  const err = (m) => { try { process.stderr.write(m + '\n'); } catch (e) { /* closed pipe */ } };
   if (opts.help) { process.stdout.write(USAGE); return 0; }
   if (opts.version) { process.stdout.write(version + '\n'); return 0; }
   const folder = path.resolve(opts.scan);
