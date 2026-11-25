@@ -333,6 +333,9 @@ async function restoreItem(item, ctx, opts = {}) {
   }
   const why = ctx.destReason ? ctx.destReason(dest) : null;
   if (why) return fail('refused', `cannot be put back: ${dest} is ${why}`);
+  if (ctx.destAllowed && !ctx.destAllowed(dest, item.scanRoot) && opts.confirmDestination !== dest) {
+    return fail('confirm-destination', `would be put back at ${dest}, which is outside the folder you scanned and any folder approved in this session. Confirm that exact destination to continue`, { canConfirmDestination: true, destination: dest });
+  }
   if (exists(dest)) return fail('exists', `${dest} appeared just now (never overwritten)`, { canRestoreBeside: true });   // last look right before the rename
   try { (ctx.rename || fsx.renameSync.bind(fsx))(q, dest); } catch (e) {
     return fail('failed', `could not be moved back (${e.code || e.message}); nothing was copied and it is still in quarantine`);

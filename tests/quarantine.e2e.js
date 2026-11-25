@@ -713,3 +713,53 @@ test('restoring an item that was never moved says so', async () => {
     expect(r.results[0].reason).toMatch(/never moved/);
   });
 });
+
+// ---------- UX round ----------
+test('U1: every item that goes to the Trash instead is named with its reason, in the confirmation and in the results', async () => {
+  await withApp(two, async ({ app, page, root, trashDir }) => {
+    await FAKE_TRASH(app, trashDir);
+    await app.evaluate(() => { global.__asked = []; global.__e2eConfirm = async (o) => { global.__asked.push(o); return true; }; global.__e2eVolumeProblem = () => 'is on a network or non-local volume (smbfs)'; global.__e2eDriveType = () => 'Network'; });
+    const a = path.join(root, 'a/node_modules'), b = path.join(root, 'b/node_modules');
+    const res = await del(page, [a, b]);
+    const o = await app.evaluate(() => global.__asked[0]);
+    expect(o.detail).toMatch(/go to the Trash instead|Trash instead/);
+    expect(o.detail).toContain(a); expect(o.detail).toContain(b);
+    expect(o.detail).toMatch(/smbfs|not a fixed local disk/);
+    expect(res.trashedInsteadItems.map(i => i.path).sort()).toEqual([a, b].sort());
+    for (const i of res.trashedInsteadItems) expect(i.reason).toMatch(/smbfs|not a fixed local disk|no safe location/);
+  });
+});
+
+test('U2: on Windows a folder with a junction/link inside is greyed out at scan time with the reason', () => {
+  const root = tmp();
+  try {
+    mk(root, 'p/package.json', '{}'); mk(root, 'p/package-lock.json', '{}'); mk(root, 'p/node_modules/d/i.js'); fs.mkdirSync(path.join(root, 'target'));
+    linkOrSkip(test, path.join(root, 'target'), path.join(root, 'p/node_modules/d/lnk'), 'dir');
+    const cf = require('../cleanup-folders');
+    const files = [{ path: path.join(root, 'p/node_modules/d/i.js'), name: 'i.js', size: 5, mtime: 1 }, { path: path.join(root, 'p/node_modules/.package-lock.json'), name: '.package-lock.json', size: 1, mtime: 1 }];
+    const asWin = cf.findCandidates(files, root, false, fs, ['/'], [], true).find(c => c.path.endsWith('node_modules'));
+    expect(asWin.refusedReason).toMatch(/contains .*lnk, a junction or directory link/);
+    const asPosix = cf.findCandidates(files, root, false, fs, ['/'], [], false).find(c => c.path.endsWith('node_modules'));
+    expect(asPosix.refusedReason).toBeNull();
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('restore only lands inside an approved or recorded scan folder; anything else needs the exact destination confirmed', async () => {
+  await withApp((r) => proj(r, 'p'), async ({ page, root, qhome }) => {
+    const other = fs.realpathSync(fs.mkdtempSync(path.join(fixtureParent(), 'sd-other-')));
+    try {
+      const res = await del(page, [path.join(root, 'p/node_modules')]);
+      const dir = runDirs(qhome)[0], man = manifestOf(dir);
+      const dest = path.join(other, 'node_modules');
+      man.items[0].originalPath = dest; man.items[0].originalRealPath = dest; fs.writeFileSync(path.join(dir, 'manifest.json'), JSON.stringify(man));
+      const r1 = await restore(page, res.runId);
+      expect(r1.results[0]).toMatchObject({ ok: false, state: 'confirm-destination', canConfirmDestination: true, destination: dest });
+      expect(fs.existsSync(dest)).toBe(false);
+      const r2 = await restore(page, res.runId, { ids: [1], confirmDestination: path.join(other, 'something-else') });
+      expect(r2.results[0].ok).toBe(false);
+      const r3 = await restore(page, res.runId, { ids: [1], confirmDestination: dest });
+      expect(r3.restored).toBe(1);
+      expect(fs.existsSync(path.join(dest, 'dep/index.js'))).toBe(true);
+    } finally { fs.rmSync(other, { recursive: true, force: true }); }
+  });
+});

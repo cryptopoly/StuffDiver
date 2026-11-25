@@ -1213,6 +1213,11 @@ function quarantineCtx() {
     rename: (E2E && typeof global.__e2eRename === 'function') ? global.__e2eRename : null,
     hide: (root) => { if (process.platform === 'win32') execFile('attrib', ['+h', root], () => {}); },
     inspect: (dir) => cleanupFolders.inspectFolder(dir, rawFs, undefined, null, null),
+    // A restore may only land inside a folder approved in this session or inside the (unprotected) scan root recorded in the manifest.
+    destAllowed: (dest, scanRoot) => {
+      if ([...approvedFolderPaths].some(r => cleanupFolders.isInside(dest, r, ci))) return true;
+      return !!(scanRoot && path.isAbsolute(scanRoot) && cleanupFolders.isInside(dest, scanRoot, ci) && !protectedReason(scanRoot, true) && !containsProtected(scanRoot));
+    },
     canRecreate: (parent, scanRoot) => {
       if (!scanRoot || !path.isAbsolute(scanRoot) || !cleanupFolders.isInside(parent, scanRoot, ci)) return false;
       try { if (!fs.statSync(scanRoot).isDirectory()) return false; } catch (e) { return false; }
@@ -1318,8 +1323,9 @@ handleTrusted('delete-folders', async (event, folderPaths, source) => {
       const warned = checks.filter(c => c.warnings && c.warnings.length);
       const where = nQ
         ? `Nothing is deleted. ${nQ === checks.length ? 'These folders are' : nQ + ' of them are'} moved to a hidden quarantine folder (${quarantine.QDIR}) next to your files, and you can put every one back exactly where it was from Tools > Quarantine. Quarantined folders keep using disk space until you empty the quarantine, which moves them to the Trash.` +
-          (nT ? ` ${nT} cannot be quarantined (${cleanupFolders.safeText([...plans.values()].find(x => x.error).error, 200)}) and go to the Trash instead.` : '')
-        : 'They are moved to the Trash (macOS/Linux) or Recycle Bin (Windows); nothing is permanently deleted, and you can restore them from there.';
+          (nT ? ` ${nT} cannot be quarantined and go to the Trash instead:\n` + checks.filter(c => !(plans.get(c.path) || {}).root).slice(0, 5).map(c => `- ${cleanupFolders.safeText(c.path)}: ${cleanupFolders.safeText((plans.get(c.path) || {}).error || 'quarantine is switched off', 200)}`).join('\n') + (nT > 5 ? `\n(+${nT - 5} more)` : '') + '\n' : '')
+        : 'They are moved to the Trash (macOS/Linux) or Recycle Bin (Windows); nothing is permanently deleted, and you can restore them from there.' +
+          (useQ ? ' Quarantine could not be used, so they go to the Trash instead:\n' + checks.slice(0, 5).map(c => `- ${cleanupFolders.safeText(c.path)}: ${cleanupFolders.safeText((plans.get(c.path) || {}).error || 'unknown', 200)}`).join('\n') + (checks.length > 5 ? `\n(+${checks.length - 5} more)` : '') + '\n' : '');
       const opts = {
         type: 'warning', buttons: ['Cancel', nQ ? 'Move to quarantine' : 'Move to Trash'], defaultId: 0, cancelId: 0,
         title: 'Clean up folders',
@@ -1345,7 +1351,7 @@ handleTrusted('delete-folders', async (event, folderPaths, source) => {
       return { ...nothing, blocked: changed.map(b => ({ path: b.path, reason: b.reason })), error: `Refused: ${changed[0].path} changed before it could be deleted (${changed[0].reason}). Nothing was moved.` };
     }
     const deletedPaths = [], removedPaths = [], failed = [], failures = [];
-    const quarantinedPaths = [], trashedInsteadPaths = [], fallbackReasons = [];
+    const quarantinedPaths = [], trashedInsteadPaths = [], fallbackReasons = [], trashedInsteadItems = [];
     let freedBytes = 0, quarantinedBytes = 0, logError = null;
     // Quarantine runs: one folder + manifest per volume root, all written (status planned) BEFORE the first move.
     const runId = quarantine.newRunId(), runT = Date.now(), qctx = quarantineCtx();
@@ -1415,7 +1421,7 @@ handleTrusted('delete-folders', async (event, folderPaths, source) => {
             await trashFn(c.path);
             deletedPaths.push(c.path); freedBytes += c.size;
             const why = fallbackWhy.get(c.path);
-            if (useQ && why) { trashedInsteadPaths.push(c.path); fallbackReasons.push(why); }
+            if (useQ && why) { trashedInsteadPaths.push(c.path); fallbackReasons.push(why); trashedInsteadItems.push({ path: c.path, reason: why }); }
             rec = { ...entry, status: 'trashed', reason: c.reason + (useQ && why ? ` (sent to the Trash instead of quarantine: ${why})` : '') };
             setQ(c, 'trashed-fallback');
           } catch (e) {
@@ -1448,7 +1454,7 @@ handleTrusted('delete-folders', async (event, folderPaths, source) => {
       const goneL = gone.map(lc);
       lastScanAllFiles = lastScanAllFiles.filter(f => { const fl = lc(f.path); return !goneL.some(g => fl.startsWith(g)); });
     }
-    return { deleted: deletedPaths.length, deletedPaths, quarantined: quarantinedPaths.length, quarantinedPaths, quarantinedBytes, runId: quarantinedPaths.length ? runId : undefined, trashedInstead: trashedInsteadPaths.length, trashedInsteadPaths, trashedInsteadReason: fallbackReasons[0], removed: removedPaths.length, removedPaths, freedBytes, failed, failures, cancelled: folderDeleteCancel || undefined, dedupedNested: dropped, ...(logError ? { logError } : {}) };
+    return { deleted: deletedPaths.length, deletedPaths, quarantined: quarantinedPaths.length, quarantinedPaths, quarantinedBytes, runId: quarantinedPaths.length ? runId : undefined, trashedInstead: trashedInsteadPaths.length, trashedInsteadPaths, trashedInsteadReason: fallbackReasons[0], trashedInsteadItems, removed: removedPaths.length, removedPaths, freedBytes, failed, failures, cancelled: folderDeleteCancel || undefined, dedupedNested: dropped, ...(logError ? { logError } : {}) };
   } finally {
     folderDeleteBusy = false;
   }
@@ -1525,7 +1531,7 @@ handleTrusted('quarantine-restore', async (event, runId, opts) => {
     const results = [], restoredPaths = [];
     let logError = null;
     for (const it of targets) {
-      const res = await quarantine.restoreItem(it, qctx, { beside: o.beside === true, recreateParent: o.recreateParent === true, anyway: o.anyway === true });
+      const res = await quarantine.restoreItem(it, qctx, { beside: o.beside === true, recreateParent: o.recreateParent === true, anyway: o.anyway === true, confirmDestination: typeof o.confirmDestination === 'string' ? o.confirmDestination : null });
       const base = { id: it.n, name: it.name, originalPath: it.originalPath };
       const meta = { t: Date.now(), type: 'folder', runId, size: it.size, files: it.files, category: it.category, source: 'quarantine-restore' };
       if (res.ok) {
@@ -1534,7 +1540,7 @@ handleTrusted('quarantine-restore', async (event, runId, opts) => {
         results.push({ ...base, ok: true, restoredTo: res.restoredTo, beside: res.beside });
         logError = (await logDeletion([{ ...meta, path: res.restoredTo, from: it.quarantinePath, status: 'restored', reason: res.beside ? 'put back next to the folder that already exists there' : 'put back where it was' }])) || logError;
       } else {
-        results.push({ ...base, ok: false, state: res.state, reason: res.reason, canRestoreBeside: !!res.canRestoreBeside, canRecreateParent: !!res.canRecreateParent, canRestoreAnyway: !!res.canRestoreAnyway, recorded: res.recorded, now: res.now });
+        results.push({ ...base, ok: false, state: res.state, reason: res.reason, canRestoreBeside: !!res.canRestoreBeside, canRecreateParent: !!res.canRecreateParent, canRestoreAnyway: !!res.canRestoreAnyway, canConfirmDestination: !!res.canConfirmDestination, destination: res.destination, recorded: res.recorded, now: res.now });
         logError = (await logDeletion([{ ...meta, path: it.originalPath, status: 'blocked', reason: 'restore refused: ' + res.reason }])) || logError;
       }
     }

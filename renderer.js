@@ -3744,7 +3744,7 @@
     if (!moved && !failures.length && !skipped && !removed && !gone0) return '';
     const q = (result && result.quarantined) || 0;
     const head = q
-      ? 'Moved ' + q + ' ' + noun + (q === 1 ? '' : 's') + ' to quarantine (' + formatSize(result.quarantinedBytes || 0) + '; still using disk space until the quarantine is emptied)' + (moved > q ? ', ' + (moved - q) + ' went to the Trash instead' + (result.trashedInsteadReason ? ' (' + result.trashedInsteadReason + ')' : '') : '')
+      ? 'Moved ' + q + ' ' + noun + (q === 1 ? '' : 's') + ' to quarantine (' + formatSize(result.quarantinedBytes || 0) + '; still using disk space until the quarantine is emptied)' + (moved > q ? ', ' + (moved - q) + ' went to the Trash instead' + (result.trashedInsteadReason ? ' (' + result.trashedInsteadReason + ')' : '') : '') + (result.trashedInsteadItems && result.trashedInsteadItems.length ? ':\n' + result.trashedInsteadItems.slice(0, 5).map(function(i) { return '- ' + i.path + ': ' + i.reason; }).join('\n') + (result.trashedInsteadItems.length > 5 ? '\n(+' + (result.trashedInsteadItems.length - 5) + ' more, see the Deletion Log)' : '') : '')
       : 'Moved ' + moved + ' ' + noun + (moved === 1 ? '' : 's') + ' to the Trash' + (moved && result.freedBytes ? ' (up to ' + formatSize(result.freedBytes) + ' freed; shared files may free less)' : '');
     let msg = (result && result.cancelled ? 'Cancelled. ' : '') + head + (removed ? ', removed ' + removed + ' (gone, but not confirmed to be in the Trash: the system reported an error although the ' + noun + (removed === 1 ? ' is' : 's are') + ' gone)' : '') + (gone0 ? ', already gone ' + gone0 + ' (missing before this run, nothing was moved)' : '') + ', failed ' + failed + ', skipped ' + skipped + '.';
     if (failures.length) {
@@ -3982,6 +3982,7 @@
         let btns = '';
         if (held) btns += '<button class="quar-btn quar-restore-item" data-run="' + run.runId + '" data-id="' + it.id + '">Restore this folder</button>';
         if (f && f.canRestoreBeside) btns += ' <button class="quar-btn quar-restore-beside" data-run="' + run.runId + '" data-id="' + it.id + '">Restore beside it as "' + escHtml(it.name) + ' (restored)"</button>';
+        if (f && f.canConfirmDestination) btns += ' <button class="quar-btn quar-restore-dest" data-run="' + run.runId + '" data-id="' + it.id + '">Restore to ' + escHtml(f.destination) + '</button>';
         if (f && f.canRestoreAnyway) btns += ' <button class="quar-btn quar-restore-anyway" data-run="' + run.runId + '" data-id="' + it.id + '">Restore anyway</button>';
         if (f && f.canRecreateParent) btns += ' <button class="quar-btn quar-restore-recreate" data-run="' + run.runId + '" data-id="' + it.id + '">Recreate the parent folder and restore</button>';
         return '<div class="quar-item" data-id="' + it.id + '"><div class="quar-item-main"><div>' + escHtml(it.originalPath) + '</div><div class="dellog-meta">' + escHtml(state) + ' &middot; ' + formatSize(Number(it.size) || 0) + ' &middot; ' + (Number(it.files) || 0).toLocaleString() + ' files' + (f && f.reason ? ' &middot; <span class="cleanup-warn">' + escHtml(f.reason) + '</span>' : '') + (it.restoredTo ? ' &middot; now at ' + escHtml(it.restoredTo) : '') + '</div></div>' + btns + '</div>';
@@ -5185,6 +5186,10 @@
       else if (b.classList.contains('quar-restore-item')) quarRestore(run, [id], {});
       else if (b.classList.contains('quar-restore-beside')) quarRestore(run, [id], { beside: true });
       else if (b.classList.contains('quar-restore-recreate')) quarRestore(run, [id], { recreateParent: true });
+      else if (b.classList.contains('quar-restore-dest')) {
+        const f = (quarState.failures[run] || {})[id];
+        if (f && window.confirm('Put this folder back at exactly:\n\n' + f.destination + '\n\nThat is outside the folder you scanned. Continue?')) quarRestore(run, [id], { confirmDestination: f.destination });
+      }
       else if (b.classList.contains('quar-restore-anyway')) {
         const f = (quarState.failures[run] || {})[id];
         if (window.confirm('Restore this folder anyway?\n\n' + (f && f.reason ? f.reason : 'Its contents could not be verified.') + '\n\nIt is only moved back (never overwriting anything) to ' + (f ? f.originalPath : 'its original place') + '.')) quarRestore(run, [id], { anyway: true });

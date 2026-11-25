@@ -476,7 +476,7 @@ function dedupeNested(paths, ci) {
 // Find candidate folders in the full scan list. `files` entries need
 // {path, size, mtime}. Marker checks hit the real filesystem, but only for
 // folders whose name could qualify, so this stays cheap on huge scans.
-function findCandidates(files, scanRoot, ci, fsx = fs, mounts = getMountPoints(), cwds = runningCwds()) {
+function findCandidates(files, scanRoot, ci, fsx = fs, mounts = getMountPoints(), cwds = runningCwds(), isWin = process.platform === 'win32') {
   files = files.filter(f => !isQuarantinePath(f.path));   // the quarantine is never a candidate
   const root = path.resolve(scanRoot);
   const possible = new Set();
@@ -539,6 +539,16 @@ function findCandidates(files, scanRoot, ci, fsx = fs, mounts = getMountPoints()
     o.signals = sig.warnings;
     if (!o.refusedReason && sig.severe) o.refusedReason = sig.severe;
     if (o.refusedReason) { o.dirs = undefined; continue; }
+    // Windows: a junction or directory link anywhere inside is refused at move time, so grey it out now with the same reason.
+    if (isWin) {
+      const dirs = new Set([o.path, ...o.dirs]);
+      for (const d of dirs) {
+        let ents; try { ents = fsx.readdirSync(d, { withFileTypes: true }); } catch (e) { continue; }
+        const link = ents.find(e => { if (!e.isSymbolicLink()) return false; try { return fsx.statSync(path.join(d, e.name)).isDirectory(); } catch (er) { return true; } });
+        if (link) { o.refusedReason = `contains ${path.join(d, link.name)}, a junction or directory link`; break; }
+      }
+      if (o.refusedReason) { o.dirs = undefined; continue; }
+    }
     let rootDev;
     try { rootDev = fsx.lstatSync(o.path, { bigint: true }).dev; fsx.readdirSync(o.path); } catch (e) { o.refusedReason = 'cannot be read (' + (e.code || e.message) + ')'; continue; }
     for (const d of o.dirs) {
