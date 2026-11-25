@@ -375,43 +375,86 @@ function markRestored(item, restoredTo, ctx) {
   return true;
 }
 
-// ---- Windows drive types: ONE probe that lists every drive, run strictly one at a time ----
-// A success is remembered per drive letter for the session; a failure (timeout, no answer) is remembered for 30 s only,
-// so the next cleanup tries again instead of silently using the Recycle Bin for the rest of the session.
+// ---- Windows drive types ----
+// 1. `fsutil fsinfo drivetype X:` answers in milliseconds without PowerShell (5 s limit, one process at a time).
+// 2. If its output is not understood (localized Windows) or it fails, ONE .NET DriveInfo listing is used instead (10 s limit).
+// 3. USB/SD/FireWire disks report as "Fixed"; the bus type is learned by a best-effort background check (15 s limit). It never
+//    blocks the SYSTEM drive (Fixed there is enough); other drives stay "not allowed" until the bus type is known.
+// A success is remembered per drive for the session; a failure only for 30 s, then the next cleanup retries.
 const DRIVE_FAIL_MS = 30000;
 const REMOVABLE_BUS = /^(USB|1394|SD|MMC|iSCSI)$/i;
 function parseDriveList(text) {
   const out = new Map();
   for (const line of String(text).split(/\r?\n/)) {
     const m = /^([A-Za-z])\|(Fixed|Removable|Network|CDRom|Ram|NoRootDirectory|Unknown)\|(.*)$/.exec(line.trim());
-    if (!m) continue;
-    out.set(m[1].toUpperCase(), m[2] === 'Fixed' && REMOVABLE_BUS.test(m[3].trim()) ? `Removable (${m[3].trim()} disk)` : m[2]);
+    if (m) out.set(m[1].toUpperCase(), m[2] === 'Fixed' && REMOVABLE_BUS.test(m[3].trim()) ? `Removable (${m[3].trim()} disk)` : m[2]);
   }
   return out;
 }
-// opts.run(): Promise<string> (the probe's output, rejecting on failure or timeout); opts.now(): ms.
+// "C: - Fixed Drive", "D: - CD-ROM Drive", "E: - Removable Drive", "Z: - Remote/Network Drive", "RAM Disk"; anything else is not understood.
+function parseFsutilDriveType(text) {
+  const t = String(text);
+  if (/-\s*Fixed\b/i.test(t)) return 'Fixed';
+  if (/-\s*Removable\b/i.test(t)) return 'Removable';
+  if (/-\s*Remote|Network/i.test(t)) return 'Network';
+  if (/-\s*CD-?ROM/i.test(t)) return 'CDRom';
+  if (/-\s*RAM/i.test(t)) return 'Ram';
+  return null;
+}
+function parseBusList(text) {
+  const out = new Map();
+  for (const line of String(text).split(/\r?\n/)) { const m = /^([A-Za-z])\|(.*)$/.exec(line.trim()); if (m) out.set(m[1].toUpperCase(), m[2].trim()); }
+  return out;
+}
+// opts: runFsutil(letter), runDotnet(), runBus() -> Promise<string> (reject on failure/timeout); systemDrive: 'C'; now().
 function createDriveProbe(opts) {
   const now = opts.now || Date.now;
+  const sys = (opts.systemDrive || 'C').toUpperCase();
   const known = new Map(), failed = new Map();
+  let bus = null, busFailedAt = null, busRunning = false, busPromise = Promise.resolve();
   let chain = Promise.resolve();
-  const probe = () => new Promise((resolve) => {
-    chain = chain.then(async () => {   // serial: never two probe processes at once
-      try { resolve({ map: parseDriveList(await opts.run()) }); } catch (e) { resolve({ error: (e && e.message) || String(e) }); }
-    });
-  });
-  return {
+  const serial = (fn) => { const p = chain.then(fn, fn); chain = p.then(() => {}, () => {}); return p; };   // never two probe processes at once
+  const short = (e) => String((e && e.message) || e).split('\n')[0].slice(0, 80);
+  async function probeLetter(l) {
+    let why = null;
+    try { const t = parseFsutilDriveType(await opts.runFsutil(l)); if (t) return { type: t }; why = 'fsutil output not understood'; } catch (e) { why = short(e); }
+    try { const t = parseDriveList(await opts.runDotnet()).get(l); if (t) return { type: t }; return { error: 'the drive is not listed by Windows' }; } catch (e) { return { error: `${why}; then ${short(e)}` }; }
+  }
+  const api = {
     async prefetch(paths) {
       const letters = [...new Set(paths.map(p => (/^([a-zA-Z]):[\\/]/.exec(p) || [])[1]).filter(Boolean).map(x => x.toUpperCase()))];
-      const need = letters.filter(l => !known.has(l) && !(failed.has(l) && now() - failed.get(l).t < DRIVE_FAIL_MS));
-      if (!need.length) return;
-      const r = await probe();
-      if (r.error || !r.map.size) { for (const l of need) failed.set(l, { t: now(), reason: r.error || 'the probe returned no drives' }); return; }
-      for (const [l, t] of r.map) { known.set(l, t); failed.delete(l); }
-      for (const l of need) if (!known.has(l)) failed.set(l, { t: now(), reason: 'the drive is not listed by Windows' });
+      for (const l of letters) {
+        if (known.has(l) || (failed.has(l) && now() - failed.get(l).t < DRIVE_FAIL_MS)) continue;
+        const r = await serial(() => probeLetter(l));
+        if (r.type) { known.set(l, r.type); failed.delete(l); } else failed.set(l, { t: now(), reason: r.error });
+      }
+      if (letters.some(l => l !== sys && known.get(l) === 'Fixed')) api.startBusCheck();   // needed for non-system disks only
     },
-    type: (l) => known.get(l) || null,
-    reason: (l) => (failed.get(l) || {}).reason || null
+    // Best effort, in the background (also called once at app start). Retried after a failure once 30 s have passed.
+    startBusCheck() {
+      if (busRunning) return busPromise;
+      if (bus || (busFailedAt !== null && now() - busFailedAt < DRIVE_FAIL_MS) || !opts.runBus) return Promise.resolve();
+      busRunning = true;
+      busPromise = serial(async () => {
+        try { bus = parseBusList(await opts.runBus()); busFailedAt = null; } catch (e) { busFailedAt = now(); }
+        busRunning = false;
+      });
+      return busPromise;
+    },
+    type(l) {
+      const t = known.get(l);
+      if (!t) return null;
+      if (t !== 'Fixed' || l === sys) return t;          // the system drive is never held up by the bus check
+      if (!bus) return null;                              // other disks: not allowed until the bus type is known
+      const b = bus.get(l) || '';
+      return REMOVABLE_BUS.test(b) ? `Removable (${b} disk)` : 'Fixed';
+    },
+    reason(l) {
+      if (known.get(l) === 'Fixed' && l !== sys && !bus) return busRunning ? 'the check for USB/SD media is still running' : 'the check for USB/SD media has not completed' + (busFailedAt !== null ? ' (it failed; retried automatically)' : '');
+      return (failed.get(l) || {}).reason || null;
+    }
   };
+  return api;
 }
 
-module.exports = { parseDriveList, createDriveProbe, DRIVE_FAIL_MS, QDIR, RETENTION_DAYS, MANIFEST, RUN_RE, isQuarantinePath, runDirName, newRunId, chooseRoot, createRun, moveIn, setItemStatus, writeManifest, readRun, listRuns, restoreItem, markRestored, readRegistry, addRegistry, registryPath };
+module.exports = { parseDriveList, parseFsutilDriveType, parseBusList, createDriveProbe, DRIVE_FAIL_MS, QDIR, RETENTION_DAYS, MANIFEST, RUN_RE, isQuarantinePath, runDirName, newRunId, chooseRoot, createRun, moveIn, setItemStatus, writeManifest, readRun, listRuns, restoreItem, markRestored, readRegistry, addRegistry, registryPath };
