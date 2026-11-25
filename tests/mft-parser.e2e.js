@@ -42,6 +42,9 @@ function specs() {
     { rec: 45, attrs: [S.stdInfo(MT), S.fileName(11, 1, '$UsnJrnl'), data(4096, 10)] },
     // corrupt attribute: FILE_NAME claims a 200-char name but the attribute is shorter; must be skipped, not read past
     { rec: 47, attrs: [S.stdInfo(MT), (() => { const c = Buffer.alloc(0x44); c[0x40] = 200; c[0x41] = 1; return S.attrResident(0x30, c); })(), data(4096, 10)] },
+    // System Volume Information: the walk cannot enter it, so its contents must not appear
+    { rec: 49, dir: true, attrs: [S.stdInfo(MT), S.fileName(5, 1, 'System Volume Information')] },
+    { rec: 51, attrs: [S.stdInfo(MT), S.fileName(49, 1, 'restore.bin'), data(4096, 10)] },
     // deleted record
     { rec: 46, inUse: false, attrs: [S.stdInfo(MT), S.fileName(5, 1, 'deleted.txt'), data(4096, 10)] }
   ];
@@ -80,7 +83,7 @@ for (const fragmentMft of [false, true]) {
     expect(byPath['C:\\ext.bin']).toMatchObject({ disk: 65536, logical: 60000 });
     expect(r.stats.torn).toBe(1);
     expect(r.stats.badAttrs).toBe(1);
-    expect(r.stats.orphans).toBe(4); // orphan, stale parent seq, inside junction, under $Extend
+    expect(r.stats.orphans).toBe(5); // orphan, stale parent seq, inside junction, under $Extend, under System Volume Information
   });
 }
 
