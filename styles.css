@@ -3224,6 +3224,16 @@ body.light .cache-prompt-actions button:first-child {
 .dellog-gone { background: rgba(148, 163, 184, 0.18); color: #94a3b8; }
 .dellog-removed { background: rgba(245, 165, 36, 0.15); color: #f5a524; }
 .dellog-skipped { background: rgba(148, 163, 184, 0.18); color: #94a3b8; }
+.dellog-quarantined { background: rgba(0, 180, 216, 0.15); color: #00b4d8; }
+.dellog-restored { background: rgba(52, 211, 153, 0.15); color: #34d399; }
+.quar-run { padding: 10px; border-radius: 8px; background: var(--bg-raised); border: 1px solid var(--border-light); margin-bottom: 8px; }
+.quar-run-head { display: flex; gap: 10px; align-items: center; justify-content: space-between; }
+.quar-run-title { font-size: 13px; font-weight: 600; color: var(--text-primary); }
+.quar-item { display: flex; gap: 8px; align-items: center; font-size: 12px; padding: 4px 0; border-top: 1px solid var(--border-light); }
+.quar-item-main { flex: 1; min-width: 0; word-break: break-all; }
+.quar-expired { border-color: #f5a524; }
+.quar-btn { padding: 4px 10px; border-radius: 6px; border: 1px solid var(--border-medium); background: var(--bg-surface); color: var(--text-primary); cursor: pointer; white-space: nowrap; }
+.quar-btn:hover { border-color: #00b4d8; }
 .dellog-blocked { background: rgba(248, 113, 113, 0.15); color: #f87171; }
 .dellog-restore { margin-top: 10px; }
 .dellog-controls select, .dellog-controls input, .dellog-controls button, .dellog-copy, #dellog-more {

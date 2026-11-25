@@ -3725,11 +3725,12 @@
     updateStats();
   }
 
+  let wizardUseQ = false;
   window.api.onFolderDeleteProgress(function(d) {
     const el = document.getElementById('cleanup-progress');
     if (!el) return;
     const name = String(d.path || '').split(/[\\/]/).slice(-2).join('/');
-    el.textContent = (d.phase === 'trash' ? 'Moving to Trash' : 'Verifying') + ' ' + Math.min(d.done + 1, d.total) + ' of ' + d.total + ': ' + name;
+    el.textContent = (d.phase === 'trash' ? (wizardUseQ ? 'Moving to quarantine' : 'Moving to Trash') : 'Verifying') + ' ' + Math.min(d.done + 1, d.total) + ' of ' + d.total + ': ' + name;
   });
 
   // One plain-language summary for every cleanup run (folders or files): nothing is hidden in an alert.
@@ -3741,14 +3742,18 @@
     const removed = (result && result.removed) || 0;
     const gone0 = (result && result.alreadyGone) || 0;
     if (!moved && !failures.length && !skipped && !removed && !gone0) return '';
-    let msg = (result && result.cancelled ? 'Cancelled. ' : '') + 'Moved ' + moved + ' ' + noun + (moved === 1 ? '' : 's') + ' to the Trash' + (moved && result.freedBytes ? ' (up to ' + formatSize(result.freedBytes) + ' freed; shared files may free less)' : '') + (removed ? ', removed ' + removed + ' (gone, but not confirmed to be in the Trash: the system reported an error although the ' + noun + (removed === 1 ? ' is' : 's are') + ' gone)' : '') + (gone0 ? ', already gone ' + gone0 + ' (missing before this run, nothing was moved)' : '') + ', failed ' + failed + ', skipped ' + skipped + '.';
+    const q = (result && result.quarantined) || 0;
+    const head = q
+      ? 'Moved ' + q + ' ' + noun + (q === 1 ? '' : 's') + ' to quarantine (' + formatSize(result.quarantinedBytes || 0) + '; still using disk space until the quarantine is emptied)' + (moved > q ? ', ' + (moved - q) + ' went to the Trash instead' + (result.trashedInsteadReason ? ' (' + result.trashedInsteadReason + ')' : '') : '')
+      : 'Moved ' + moved + ' ' + noun + (moved === 1 ? '' : 's') + ' to the Trash' + (moved && result.freedBytes ? ' (up to ' + formatSize(result.freedBytes) + ' freed; shared files may free less)' : '');
+    let msg = (result && result.cancelled ? 'Cancelled. ' : '') + head + (removed ? ', removed ' + removed + ' (gone, but not confirmed to be in the Trash: the system reported an error although the ' + noun + (removed === 1 ? ' is' : 's are') + ' gone)' : '') + (gone0 ? ', already gone ' + gone0 + ' (missing before this run, nothing was moved)' : '') + ', failed ' + failed + ', skipped ' + skipped + '.';
     if (failures.length) {
       msg += '\n' + failures.slice(0, 8).map(function(f) {
         return '- ' + (f.state === 'skipped' ? 'skipped' : 'failed') + ': ' + f.path + ' (' + f.reason + ')' + (f.finalState === 'gone' ? ' - the system reported an error but the item is already gone' : '');
       }).join('\n');
       if (failures.length > 8) msg += '\n(+' + (failures.length - 8) + ' more, see the Deletion Log)';
-      msg += '\nFailed and skipped items were not changed' + (failures.some(function(f) { return f.finalState === 'gone'; }) ? ', except those marked "already gone"' : '') + '. Items that were moved can be restored from the Trash or Recycle Bin. This is not all-or-nothing once moving has started.';
-    } else if (moved) msg += ' You can restore them from the Trash or Recycle Bin.';
+      msg += '\nFailed and skipped items were not changed' + (failures.some(function(f) { return f.finalState === 'gone'; }) ? ', except those marked "already gone"' : '') + '. Items that were moved can be restored from ' + (q ? 'Tools > Quarantine' + (moved > q ? ' or the Trash' : '') : 'the Trash or Recycle Bin') + '. This is not all-or-nothing once moving has started.';
+    } else if (moved) msg += q ? ' You can put them back with Restore this run or from Tools > Quarantine.' + (moved > q ? ' The ones sent to the Trash can be restored from the Trash or Recycle Bin.' : '') : ' You can restore them from the Trash or Recycle Bin.';
     return msg;
   }
 
@@ -3769,7 +3774,7 @@
     return total;
   }
 
-  async function openCleanupWizard(notice, noticeIsError) {
+  async function openCleanupWizard(notice, noticeIsError, restoreRunId) {
     if (!allFiles.length && !notice) { alert('Please scan a folder first.'); return; }
     const overlay = document.getElementById('cleanup-overlay');
     overlay.classList.remove('hidden');
@@ -3779,19 +3784,25 @@
     // Matching runs in the main process over the full scan, not just the top files.
     let found = [];
     let folders = { candidates: [], totalFound: 0, shown: 0 };
-    let devOn = false;
+    let devOn = false, useQ = true, quarInfo = null;
     try { found = await window.api.cleanupScan(); } catch (e) { found = []; }
-    try { devOn = (await window.api.loadSettings()).developerFolderCleanup === true; } catch (e) { devOn = false; }
+    try { const st = await window.api.loadSettings(); devOn = st.developerFolderCleanup === true; useQ = st.useQuarantine !== false; wizardUseQ = useQ; } catch (e) { devOn = false; }
+    if (devOn) { try { quarInfo = await window.api.listQuarantine(); } catch (e) { quarInfo = null; } }
     if (devOn) { try { folders = await window.api.cleanupFoldersScan(); } catch (e) { /* none */ } }
     const cands = folders.candidates || [];
 
-    let html = '<div class="cleanup-result' + (notice ? '' : ' hidden') + (noticeIsError ? ' cleanup-result-error' : '') + '" id="cleanup-result">' + (notice ? escHtml(notice).replace(/\n/g, '<br>') : '') + '</div>';
+    let html = '<div class="cleanup-result' + (notice ? '' : ' hidden') + (noticeIsError ? ' cleanup-result-error' : '') + '" id="cleanup-result">' + (notice ? escHtml(notice).replace(/\n/g, '<br>') : '') + (restoreRunId ? ' <button class="quar-btn" id="cleanup-restore-run" data-run="' + escHtml(restoreRunId) + '">Restore this run</button>' : '') + '</div>';
     // Developer folders: off by default, one sentence on the risk, one switch.
     html += '<div class="cleanup-section-title">Developer folders (advanced)</div>';
     html += '<label class="cleanup-dev-toggle"><input type="checkbox" id="cleanup-dev-toggle"' + (devOn ? ' checked' : '') + '> Enable developer folder cleanup</label>';
     html += '<div class="cleanup-note">' + (devOn
-      ? 'Whole folders such as node_modules or build output are moved to the Trash as a unit; a wrong pick can break a project that cannot simply be reinstalled, so tick each one deliberately.'
+      ? 'Whole folders such as node_modules or build output are moved as a unit (to quarantine or the Trash); a wrong pick can break a project that cannot simply be reinstalled, so tick each one deliberately.'
       : 'Off: only loose files are offered. Developer-folder cleanup (node_modules, build caches, virtualenvs) exists, but moving whole folders can break a project that cannot simply be reinstalled, so it is switched off until you enable it.') + '</div>';
+    if (devOn) {
+      html += '<label class="cleanup-dev-toggle"><input type="checkbox" id="cleanup-quar-toggle"' + (useQ ? ' checked' : '') + '> Move folders to a quarantine I can restore from (recommended)</label>';
+      html += '<div class="cleanup-note" id="cleanup-quar-note">' + (useQ ? 'Folders go to a hidden .StuffDiverQuarantine folder on the same disk, and "Restore this run" puts every one back exactly where it was. Nothing is deleted. ' : 'Off: folders go straight to the Trash or Recycle Bin. ')
+        + (quarInfo && quarInfo.runs.length ? 'Quarantine now holds ' + formatSize(quarInfo.totalSize) + ' in ' + quarInfo.runs.length + ' run' + (quarInfo.runs.length === 1 ? '' : 's') + ' and still uses that disk space until emptied. <button class="quar-btn" id="cleanup-open-quar">Open Quarantine</button>' : 'Quarantined items still use disk space until you empty the quarantine.') + '</div>';
+    }
     if (devOn && !cands.length) html += '<div class="cleanup-note">No developer folders found in this scan.</div>';
     if (cands.length) {
       const shown = cands.slice(0, CLEANUP_FOLDER_RENDER_CAP);
@@ -3813,7 +3824,7 @@
           + c.warnings.map(function(w) { return '<div class="cleanup-detail cleanup-warn">&#9888; ' + escHtml(w) + '</div>'; }).join('')
           + '</div><span class="cleanup-size">' + formatSize(Number(c.size) || 0) + '</span></div>';
       });
-      html += '<div class="cleanup-actions"><button class="cleanup-btn-clean" id="cleanup-folders-execute">Move Selected Folders to Trash</button></div><div class="cleanup-note" id="cleanup-progress"></div>';
+      html += '<div class="cleanup-actions"><button class="cleanup-btn-clean" id="cleanup-folders-execute">' + (useQ ? 'Move Selected Folders to Quarantine' : 'Move Selected Folders to Trash') + '</button></div><div class="cleanup-note" id="cleanup-progress"></div>';
     }
     if (!found.length && !cands.length) html += '<div class="cleanup-empty">No reclaimable loose files found.' + (devOn ? '' : ' Your folder looks clean!') + '</div>';
     if (found.length) {
@@ -3839,6 +3850,19 @@
       openCleanupWizard();
     });
 
+    const quarToggle = document.getElementById('cleanup-quar-toggle');
+    if (quarToggle) quarToggle.addEventListener('change', async function(e) {
+      try { await window.api.saveSettings({ useQuarantine: e.target.checked }); } catch (er) { /* ignore */ }
+      openCleanupWizard();
+    });
+    const openQ = document.getElementById('cleanup-open-quar');
+    if (openQ) openQ.addEventListener('click', openQuarantine);
+    const restoreRun = document.getElementById('cleanup-restore-run');
+    if (restoreRun) restoreRun.addEventListener('click', async function() {
+      restoreRun.disabled = true;
+      let res; try { res = await window.api.restoreQuarantine(restoreRun.dataset.run, {}); } catch (e) { res = { error: String(e && e.message || e) }; }
+      showNotice(restoreSummary(res), !!(res.error || res.failed));
+    });
     if (cands.length) {
       const updateTotal = function() {
         let n = 0, sz = 0;
@@ -3855,7 +3879,7 @@
         btn.dataset.busy = '1'; btn.textContent = 'Cancel';
         document.getElementById('cleanup-progress').textContent = 'Verifying 1 of ' + picked.length + '...';
         const result = await window.api.deleteFolders(picked, 'smart-cleanup-folders');
-        delete btn.dataset.busy; btn.textContent = 'Move Selected Folders to Trash';
+        delete btn.dataset.busy; btn.textContent = useQ ? 'Move Selected Folders to Quarantine' : 'Move Selected Folders to Trash';
         document.getElementById('cleanup-progress').textContent = '';
         const moved = (result && result.deleted) || 0;
         let msg = cleanupSummary(result, 'folder');
@@ -3868,7 +3892,7 @@
           allFiles = allFiles.filter(function(f) { return !prefixes.some(function(p) { return f.path.startsWith(p); }); });
           removeFoldersFromTree(cands.filter(function(c) { return movedSet.has(c.path); }).map(function(c) { return c.relPath; }));
           applyFilters();
-          openCleanupWizard(msg, !!(result.failures && result.failures.length));
+          openCleanupWizard(msg, !!(result.failures && result.failures.length), result.quarantined ? result.runId : undefined);
         } else if (msg) {
           showNotice(msg, true);
         }
@@ -3906,6 +3930,80 @@
 
   function closeCleanupWizard() {
     document.getElementById('cleanup-overlay').classList.add('hidden');
+  }
+
+  // === Feature: Quarantine ===
+
+  function restoreSummary(res) {
+    if (!res || res.error) return (res && res.error) || 'Restore failed.';
+    const rs = res.results || [];
+    const ok = rs.filter(function(r) { return r.ok; });
+    let msg = 'Restored ' + ok.length + ' of ' + rs.length + ' folder' + (rs.length === 1 ? '' : 's') + (ok.length ? ' (rescan to see them in the chart)' : '') + '.';
+    rs.filter(function(r) { return !r.ok; }).slice(0, 8).forEach(function(r) { msg += '\n- not restored: ' + r.originalPath + ' ' + r.reason; });
+    if (rs.some(function(r) { return !r.ok; })) msg += '\nFolders that were not restored were left exactly where they are.';
+    if (res.logError) msg += '\n' + res.logError;
+    return msg;
+  }
+
+  const quarState = { data: null, failures: {} };
+  function openQuarantine() {
+    document.getElementById('quar-overlay').classList.remove('hidden');
+    loadQuarantine();
+  }
+  function closeQuarantine() { document.getElementById('quar-overlay').classList.add('hidden'); }
+  function quarNotice(text, isError) {
+    const el = document.getElementById('quar-notice');
+    el.textContent = text;
+    el.classList.toggle('hidden', !text);
+    el.classList.toggle('cleanup-result-error', !!isError);
+    el.style.whiteSpace = 'pre-wrap';
+  }
+  async function loadQuarantine() {
+    let d;
+    try { d = await window.api.listQuarantine(); } catch (e) { d = { runs: [], totalSize: 0 }; }
+    quarState.data = d;
+    const runs = d.runs || [];
+    document.getElementById('quar-summary').textContent = runs.length
+      ? 'Quarantine holds ' + formatSize(d.totalSize) + ' in ' + runs.length + ' run' + (runs.length === 1 ? '' : 's') + '. Quarantined items still use disk space until emptied. Runs older than ' + d.retentionDays + ' days are marked expired; nothing is removed automatically.'
+      : '';
+    document.getElementById('quar-empty').classList.toggle('hidden', runs.length > 0);
+    document.getElementById('quar-empty-btn').classList.toggle('hidden', !runs.length);
+    document.getElementById('quar-list').innerHTML = runs.map(function(run) {
+      const when = formatLogTime(run.t);
+      const fb = quarState.failures[run.runId] || {};
+      const items = run.items.map(function(it) {
+        const f = fb[it.id];
+        const held = (it.status === 'quarantined' || it.status === 'planned') && it.present;
+        let state = it.status === 'restored' ? 'restored' : (held ? 'in quarantine' : (it.status === 'quarantined' && !it.present ? 'missing from quarantine' : escHtml(it.status)));
+        let btns = '';
+        if (held && !run.expired) btns += '<button class="quar-btn quar-restore-item" data-run="' + run.runId + '" data-id="' + it.id + '">Restore this folder</button>';
+        if (f && f.canRestoreBeside) btns += ' <button class="quar-btn quar-restore-beside" data-run="' + run.runId + '" data-id="' + it.id + '">Restore beside it as "' + escHtml(it.name) + ' (restored)"</button>';
+        if (f && f.canRecreateParent) btns += ' <button class="quar-btn quar-restore-recreate" data-run="' + run.runId + '" data-id="' + it.id + '">Recreate the parent folder and restore</button>';
+        return '<div class="quar-item" data-id="' + it.id + '"><div class="quar-item-main"><div>' + escHtml(it.originalPath) + '</div><div class="dellog-meta">' + escHtml(state) + ' &middot; ' + formatSize(Number(it.size) || 0) + ' &middot; ' + (Number(it.files) || 0).toLocaleString() + ' files' + (f && f.reason ? ' &middot; <span class="cleanup-warn">' + escHtml(f.reason) + '</span>' : '') + (it.restoredTo ? ' &middot; now at ' + escHtml(it.restoredTo) : '') + '</div></div>' + btns + '</div>';
+      }).join('');
+      const head = '<div class="quar-run-head"><div><div class="quar-run-title">' + escHtml(when) + (run.expired ? ' &middot; expired' : '') + '</div><div class="dellog-meta">' + run.heldCount + ' of ' + run.items.length + ' folder' + (run.items.length === 1 ? '' : 's') + ' in quarantine &middot; ' + formatSize(run.size) + '</div></div><div>'
+        + (run.expired
+          ? '<button class="quar-btn quar-trash-run" data-run="' + run.runId + '">Expired: tap to move to Trash</button>'
+          : (run.heldCount ? '<button class="quar-btn quar-restore-run" data-run="' + run.runId + '">Restore this run</button> ' : '') + '<button class="quar-btn quar-trash-run" data-run="' + run.runId + '">Move to Trash</button>')
+        + '</div></div>';
+      return '<div class="quar-run' + (run.expired ? ' quar-expired' : '') + '" data-run="' + run.runId + '">' + head + items + '</div>';
+    }).join('');
+  }
+  async function quarRestore(runId, ids, opts) {
+    let res;
+    try { res = await window.api.restoreQuarantine(runId, Object.assign({}, opts || {}, ids ? { ids: ids } : {})); } catch (e) { res = { error: String(e && e.message || e) }; }
+    const fb = quarState.failures[runId] = quarState.failures[runId] || {};
+    (res.results || []).forEach(function(r) { if (r.ok) delete fb[r.id]; else fb[r.id] = r; });
+    quarNotice(restoreSummary(res), !!(res.error || res.failed));
+    await loadQuarantine();
+  }
+  async function quarTrash(runIds) {
+    let res;
+    try { res = await window.api.trashQuarantine(runIds); } catch (e) { res = { error: String(e && e.message || e) }; }
+    if (res.error) quarNotice(res.error, true);
+    else if (res.cancelled) quarNotice('', false);
+    else quarNotice('Moved ' + res.trashed + ' quarantine run folder' + (res.trashed === 1 ? '' : 's') + ' to the Trash' + (res.failed ? ', ' + res.failed + ' failed (left untouched): ' + res.results.filter(function(r) { return !r.ok; }).map(function(r) { return r.reason; }).join('; ') : '') + '. You can still restore them from the Trash.', !!res.failed);
+    await loadQuarantine();
   }
 
   // === Feature: Deletion Log Viewer ===
@@ -3950,7 +4048,7 @@
     const empty = document.getElementById('dellog-empty');
     const c = res.counts || {};
     document.getElementById('dellog-summary').textContent = res.total
-      ? 'Showing ' + st.entries.length.toLocaleString() + ' of ' + res.matched.toLocaleString() + ' matching (' + res.total.toLocaleString() + ' total: ' + (c.trashed || 0) + ' trashed, ' + (c.failed || 0) + ' failed, ' + (c.blocked || 0) + ' blocked, ' + (c.skipped || 0) + ' skipped, ' + (c.removed || 0) + ' removed, ' + (c.gone || 0) + ' already gone)'
+      ? 'Showing ' + st.entries.length.toLocaleString() + ' of ' + res.matched.toLocaleString() + ' matching (' + res.total.toLocaleString() + ' total: ' + (c.trashed || 0) + ' trashed, ' + (c.quarantined || 0) + ' quarantined, ' + (c.restored || 0) + ' restored, ' + (c.failed || 0) + ' failed, ' + (c.blocked || 0) + ' blocked, ' + (c.skipped || 0) + ' skipped, ' + (c.removed || 0) + ' removed, ' + (c.gone || 0) + ' already gone)'
       : '';
     list.innerHTML = st.entries.map(function(e, i) {
       return '<div class="dellog-row" data-i="' + i + '"><span class="dellog-badge dellog-' + escHtml(e.status) + '">' + escHtml(e.status) + '</span>'
@@ -5045,6 +5143,7 @@
       closeAllDropdowns();
       if (btn.dataset.tool === 'cleanup') openCleanupWizard();
       else if (btn.dataset.tool === 'dellog') openDeletionLog();
+      else if (btn.dataset.tool === 'quarantine') openQuarantine();
       else if (btn.dataset.tool === 'forecast') openForecast();
       else if (btn.dataset.tool === 'monitor') openMonitorSetup();
     });
@@ -5058,6 +5157,23 @@
     document.getElementById('cleanup-close').addEventListener('click', closeCleanupWizard);
     document.getElementById('cleanup-overlay').addEventListener('click', (e) => {
       if (e.target.id === 'cleanup-overlay') closeCleanupWizard();
+    });
+
+    // === Quarantine Modal ===
+    document.getElementById('quar-close').addEventListener('click', closeQuarantine);
+    document.getElementById('quar-overlay').addEventListener('click', (e) => {
+      if (e.target.id === 'quar-overlay') closeQuarantine();
+    });
+    document.getElementById('quar-empty-btn').addEventListener('click', () => quarTrash('all'));
+    document.getElementById('quar-list').addEventListener('click', (e) => {
+      const b = e.target.closest('button[data-run]');
+      if (!b) return;
+      const run = b.dataset.run, id = Number(b.dataset.id);
+      if (b.classList.contains('quar-restore-run')) quarRestore(run, null, {});
+      else if (b.classList.contains('quar-restore-item')) quarRestore(run, [id], {});
+      else if (b.classList.contains('quar-restore-beside')) quarRestore(run, [id], { beside: true });
+      else if (b.classList.contains('quar-restore-recreate')) quarRestore(run, [id], { recreateParent: true });
+      else if (b.classList.contains('quar-trash-run')) quarTrash([run]);
     });
 
     // === Deletion Log Modal ===
@@ -5141,7 +5257,8 @@
     // Escape closes modals
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') {
-        if (!document.getElementById('dellog-overlay').classList.contains('hidden')) closeDeletionLog();
+        if (!document.getElementById('quar-overlay').classList.contains('hidden')) closeQuarantine();
+        else if (!document.getElementById('dellog-overlay').classList.contains('hidden')) closeDeletionLog();
         else if (!document.getElementById('help-overlay').classList.contains('hidden')) closeHelpGuide();
         else if (!document.getElementById('locate-overlay').classList.contains('hidden')) closeLocatePanel();
         else if (!document.getElementById('settings-overlay').classList.contains('hidden')) closeSettings();
