@@ -53,13 +53,20 @@ test.describe('unit: where the quarantine goes', () => {
   });
   test('Windows: system drive uses the profile, other drives use their own top folder, UNC is refused', () => {
     const fsx = fakeFs({ 'C:\\Users\\bob\\proj\\node_modules': { dev: 1 }, 'C:\\Users\\bob': { dev: 1 }, 'C:\\Users\\bob\\.StuffDiverQuarantine': { dev: 1 }, 'D:\\work\\node_modules': { dev: 2 }, 'D:\\': { dev: 2 } });
-    const ctx = { platform: 'win32', home: 'C:\\Users\\bob', fsx, rootOk: none, mounts: () => [], driveType: () => 'Fixed', owner: 'u-abc123' };
+    const ctx = { platform: 'win32', home: 'C:\\Users\\bob', fsx, rootOk: none, mounts: () => [], driveType: () => 'Fixed', owner: 'u-abc123', secondaryDrives: true };   // secondary drives are switched off in 0.5.0 (next test)
     expect(q.chooseRoot('C:\\Users\\bob\\proj\\node_modules', ctx).root).toBe('C:\\Users\\bob\\.StuffDiverQuarantine');
     expect(q.chooseRoot('D:\\work\\node_modules', ctx).root).toBe('D:\\.StuffDiverQuarantine\\u-abc123');   // shared drive top: per-user subfolder
     expect(q.chooseRoot('\\\\server\\share\\x\\node_modules', { ...ctx, fsx: fakeFs({ '\\\\server\\share\\x\\node_modules': { dev: 3 } }) }).error).toMatch(/drive letter/);
     for (const t of ['Network', 'Removable', 'CDRom']) expect(q.chooseRoot('D:\\work\\node_modules', { ...ctx, driveType: () => t }).error, String(t)).toMatch(/not a fixed local disk/);
     const unknown = q.chooseRoot('C:\\Users\\bob\\proj\\node_modules', { ...ctx, driveType: () => null, driveTypeReason: () => 'timed out after 10 s' }).error;
     expect(unknown).toMatch(/could not determine the drive type of C:.*timed out after 10 s.*Recycle Bin/);
+  });
+  test('0.5.0: Windows quarantine is limited to the system drive; every other drive uses the Recycle Bin with a short reason', () => {
+    expect(q.WINDOWS_SECONDARY_DRIVE_QUARANTINE).toBe(false);
+    const fsx = fakeFs({ 'D:\\work\\node_modules': { dev: 2 }, 'D:\\': { dev: 2 }, 'C:\\Users\\bob\\p\\node_modules': { dev: 1 }, 'C:\\Users\\bob': { dev: 1 } });
+    const ctx = { platform: 'win32', home: 'C:\\Users\\bob', fsx, rootOk: () => null, mounts: () => [], driveType: () => 'Fixed', owner: 'sid-S-1' };
+    expect(q.chooseRoot('D:\\work\\node_modules', ctx).error).toBe('on this drive undo uses the Recycle Bin (Windows quarantine is limited to the system drive in this version)');
+    expect(q.chooseRoot('C:\\Users\\bob\\p\\node_modules', ctx).root).toBe('C:\\Users\\bob\\.StuffDiverQuarantine');   // the system drive keeps working exactly as before
   });
   test('Windows: a drive that differs in case still counts as the system drive; a cloud-synced or protected root is refused', () => {
     const fsx = fakeFs({ 'c:\\Users\\bob\\p\\node_modules': { dev: 1 }, 'C:\\Users\\bob': { dev: 1 } });
@@ -865,7 +872,11 @@ test('restore only lands inside an approved or recorded scan folder; anything el
 });
 
 // ---------- Windows per-user folder securing (injectable runner, pure unit tests) ----------
-test.describe('unit: per-user folder ACL', () => {
+// DISABLED in 0.5.0 (WINDOWS_SECONDARY_DRIVE_QUARANTINE = false). Known bugs found on real NTFS, to fix before re-enabling:
+//  TODO 1: `icacls /save` writes UTF-16LE WITHOUT a BOM (these mocks wrote one, so the tests passed anyway).
+//  TODO 2: a folder left by a timed-out ACL step keeps inherited Authenticated Users:Modify and is refused forever.
+//  TODO 3: the `dir /q` owner column is truncated to 23 chars and breaks on names with spaces; use the SDDL `O:` field instead.
+test.describe.skip('unit: per-user folder ACL (disabled path, see TODOs)', () => {
   const SID = 'S-1-5-21-111-222-333-1001';
   const GOOD = `D:PAI(A;OICI;FA;;;${SID})(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)`;
   function setup(over = {}) {
