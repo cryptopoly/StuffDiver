@@ -109,11 +109,16 @@ function writeManifest(runDir, manifest, ctx) {
 function createRun(plan, ctx) {
   const fsx = ctx.fsx || fs;
   const P = pathFor(ctx.platform);
+  // A per-user folder on a shared volume top: the shared parent must stay traversable for other accounts (0755),
+  // our own folder is private (0700 / explicit ACL, verified before use).
+  const perUser = !!ctx.owner && P.basename(plan.root) === ctx.owner;
+  if (perUser) fsx.mkdirSync(P.dirname(plan.root), { recursive: true, mode: 0o755 });
   fsx.mkdirSync(plan.root, { recursive: true, mode: 0o700 });
   const st = fsx.lstatSync(plan.root, { bigint: true });
   if (st.isSymbolicLink() || !st.isDirectory()) throw new Error(plan.root + ' is not a plain folder');
   if (plan.expectDev != null && st.dev !== plan.expectDev) throw new Error(plan.root + ' is on a different volume');
-  if (ctx.hide) ctx.hide(plan.root);
+  if (perUser && ctx.secureDir) ctx.secureDir(plan.root);   // throws when the folder cannot be made private to this account
+  if (ctx.hide) { ctx.hide(plan.root); if (perUser) ctx.hide(P.dirname(plan.root)); }
   const dirName = runDirName(new Date(plan.t), plan.runId);
   const runDir = P.join(plan.root, dirName);
   fsx.mkdirSync(runDir, { mode: 0o700 });   // non-recursive: must not already exist
@@ -195,7 +200,13 @@ function readRun(runDir, ctx) {
     catch (e) { err = err || 'manifest unreadable (' + (e.code || e.message) + ')'; }
   }
   if (!m) { out.error = err; return out; }
-  if (m.owner && ctx.owner && m.owner !== ctx.owner) { out.error = 'belongs to another user account'; out.foreign = true; return out; }
+  let ownerChanged = false;
+  if (m.owner && ctx.owner && m.owner !== ctx.owner && !(ctx.legacyOwners || []).includes(m.owner)) {
+    // In this account's OWN folder a different recorded owner means the account id changed (rename, new profile): list it, restore needs a confirmation.
+    const own = P.basename(out.root) === ctx.owner || (ctx.home && same(out.root, P.join(ctx.home, QDIR), isCi(ctx.platform)));
+    if (!own) { out.error = 'belongs to another user account'; out.foreign = true; return out; }
+    ownerChanged = true;
+  }
   const seen = new Set();
   for (const it of m.items) {
     if (!it || typeof it !== 'object' || !Number.isInteger(it.n) || it.n < 1 || seen.has(it.n)) continue;
@@ -203,7 +214,7 @@ function readRun(runDir, ctx) {
     const name = P.basename(it.originalPath);
     if (name !== it.name || !name || name === '.' || name === '..') continue;
     seen.add(it.n);
-    out.items.push({ ...it, name, quarantinePath: P.join(runDir, String(it.n), name) });   // recomputed, never taken from the file
+    out.items.push({ ...it, name, ownerChanged, quarantinePath: P.join(runDir, String(it.n), name) });   // recomputed, never taken from the file
   }
   out.ok = true;
   out.usedBackup = usedBackup;
@@ -233,7 +244,12 @@ function listRuns(roots, ctx, now = Date.now()) {
       let slots = new Set();
       try { slots = new Set(fsx.readdirSync(r.runDir)); } catch (er) { /* unreadable: nothing present */ }   // one readdir instead of one lstat per item
       for (const it of r.items) {
-        const present = slots.has(String(it.n));
+        // present = the item itself is there (an empty slot, e.g. after a crash or a folder dragged out by hand, is not)
+        let present = false;
+        if (slots.has(String(it.n))) {
+          if (it.status === 'quarantined' || it.status === 'planned') { try { present = fsx.lstatSync(it.quarantinePath).isDirectory(); } catch (er) { present = false; } }
+          else present = true;
+        }
         run.items.push({ ...it, runDir: r.runDir, present, scanRoot: r.scanRoot });
       }
     }
@@ -279,6 +295,7 @@ async function restoreItem(item, ctx, opts = {}) {
       if (!same(real(q), expected, ci)) return fail('refused', 'its quarantine location resolves somewhere else than the run folder (a link was found); left untouched');
     } catch (e) { return fail('refused', 'its quarantine location cannot be resolved (' + (e.code || e.message) + ')'); }
   }
+  if (item.ownerChanged && !opts.anyway) return fail('mismatch', 'was recorded for a different account id (the account may have been renamed or recreated); confirm to restore it anyway', { canRestoreAnyway: true });
   const orig = item.originalPath;
   if (isQuarantinePath(orig)) return fail('refused', 'was recorded inside a quarantine folder; restoring there is refused');
   const parent = P.dirname(orig);
@@ -295,8 +312,9 @@ async function restoreItem(item, ctx, opts = {}) {
     while (!(() => { try { fsx.lstatSync(anc); return true; } catch (e) { return false; } })() && P.dirname(anc) !== anc) anc = P.dirname(anc);
     try {
       const realAnc = real(anc);
-      const ok = same(expectedReal, realAnc, ci) || (ci ? expectedReal.toLowerCase() : expectedReal).startsWith((ci ? realAnc.toLowerCase() : realAnc).replace(/[\\/]+$/, '') + P.sep);
-      if (!ok) return fail('refused', `${anc} now resolves to ${realAnc}, which is not on the way to where it was (a link changed); nothing was created`);
+      // Checked BEFORE anything is created: the folders to create, appended to where `anc` really is, must be exactly where the folder was.
+      const wouldBe = P.join(realAnc, P.relative(anc, parent));
+      if (!same(wouldBe, expectedReal, ci)) return fail('refused', `${anc} now resolves to ${realAnc}, so recreating ${parent} would put it at ${wouldBe} instead of ${expectedReal} (a link changed); nothing was created`);
     } catch (e) { return fail('refused', `${anc} cannot be resolved (${e.code || e.message})`); }
     try {
       fsx.mkdirSync(parent, { recursive: true }); recreated = true; pst = fsx.statSync(parent, { bigint: true });

@@ -3939,6 +3939,7 @@
     const rs = res.results || [];
     const ok = rs.filter(function(r) { return r.ok; });
     let msg = 'Restored ' + ok.length + ' of ' + rs.length + ' folder' + (rs.length === 1 ? '' : 's') + (ok.length ? ' (rescan to see them in the chart)' : '') + '.';
+    rs.filter(function(r) { return r.ok && r.warning; }).forEach(function(r) { msg += '\n- ' + r.originalPath + ': ' + r.warning; });
     rs.filter(function(r) { return !r.ok; }).slice(0, 8).forEach(function(r) { msg += '\n- not restored: ' + r.originalPath + ' ' + r.reason; });
     if (rs.some(function(r) { return !r.ok; })) msg += '\nFolders that were not restored were left exactly where they are.';
     if (res.logError) msg += '\n' + res.logError;
@@ -3970,7 +3971,7 @@
     document.getElementById('quar-empty').classList.toggle('hidden', runs.length > 0 || unread.length > 0);
     document.getElementById('quar-empty-btn').classList.toggle('hidden', !runs.length);
     const unreadHtml = unread.map(function(u) {
-      return '<div class="quar-run quar-expired quar-unreadable" data-name="' + escHtml(u.name) + '"><div class="quar-run-head"><div><div class="quar-run-title">Unreadable quarantine run</div><div class="dellog-meta">' + escHtml(u.path) + ' &middot; ' + formatSize(u.size) + (u.capped ? '+' : '') + ' &middot; ' + escHtml(u.error || '') + '. It still uses disk space; Stuff Diver cannot put its folders back.</div></div><div><button class="quar-btn quar-reveal-broken" data-name="' + escHtml(u.name) + '">Reveal in file manager</button> <button class="quar-btn quar-trash-broken" data-name="' + escHtml(u.name) + '">Move to Trash</button></div></div></div>';
+      return '<div class="quar-run quar-expired quar-unreadable" data-path="' + escHtml(u.path) + '"><div class="quar-run-head"><div><div class="quar-run-title">Unreadable quarantine run</div><div class="dellog-meta">' + escHtml(u.path) + ' &middot; ' + formatSize(u.size) + (u.capped ? '+' : '') + ' &middot; ' + escHtml(u.error || '') + '. It still uses disk space; Stuff Diver cannot put its folders back.</div></div><div><button class="quar-btn quar-reveal-broken" data-path="' + escHtml(u.path) + '">Reveal in file manager</button> <button class="quar-btn quar-trash-broken" data-path="' + escHtml(u.path) + '">Move to Trash</button></div></div></div>';
     }).join('');
     document.getElementById('quar-list').innerHTML = unreadHtml + runs.map(function(run) {
       const when = formatLogTime(run.t);
@@ -5171,11 +5172,11 @@
     });
     document.getElementById('quar-empty-btn').addEventListener('click', () => quarTrash('all'));
     document.getElementById('quar-list').addEventListener('click', async (e) => {
-      const nb = e.target.closest('button[data-name]');
+      const nb = e.target.closest('button[data-path]');
       if (nb) {
-        if (nb.classList.contains('quar-reveal-broken')) { window.api.revealQuarantineBroken(nb.dataset.name); return; }
-        let res; try { res = await window.api.trashQuarantineBroken(nb.dataset.name); } catch (er) { res = { error: String(er && er.message || er) }; }
-        quarNotice(res.error ? res.error : res.cancelled ? '' : (res.failed ? 'Could not move it to the Trash: ' + res.reason : 'Moved the unreadable run to the Trash.'), !!(res.error || res.failed));
+        if (nb.classList.contains('quar-reveal-broken')) { window.api.revealQuarantineBroken(nb.dataset.path); return; }
+        let res; try { res = await window.api.trashQuarantineBroken(nb.dataset.path); } catch (er) { res = { error: String(er && er.message || er) }; }
+        quarNotice(res.error ? res.error : res.cancelled ? '' : (res.failed ? 'Could not move it to the Trash: ' + res.reason : res.removed ? 'The system reported an error but the unreadable run is gone; it may not be in the Trash.' : 'Moved the unreadable run to the Trash.'), !!(res.error || res.failed));
         await loadQuarantine();
         return;
       }

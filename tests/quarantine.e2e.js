@@ -565,19 +565,118 @@ test('Q1: a later change shows recorded vs now and offers "Restore anyway" in th
   });
 });
 
-test('Q2: runs owned by another account are neither listed, restored nor emptied', async () => {
-  await withApp(two, async ({ page, root, qhome }) => {
-    const mine = await del(page, [path.join(root, 'a/node_modules')]);
+test('Q2: runs owned by another account (in a shared folder) are neither listed, restored nor emptied', () => {
+  const root = tmp();
+  try {
+    const ctxFor = (owner) => ({ platform: process.platform, fsx: fs, home: path.join(root, 'home'), owner });
+    const shared = path.join(root, q.QDIR, 'uid-1000');   // another account's per-user folder on a shared volume
+    q.createRun({ root: shared, runId: 'ab12cd34', t: Date.now(), appVersion: '0', items: [{ originalPath: path.join(root, 'p', 'node_modules'), dev: 1, size: 5, files: 1, category: 'node_modules' }] }, ctxFor('uid-1000'));
+    const mine = q.listRuns([shared], ctxFor('uid-2000'));
+    expect(mine.runs).toHaveLength(0); expect(mine.broken).toHaveLength(0);
+    expect(q.listRuns([shared], ctxFor('uid-1000')).runs).toHaveLength(1);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('N4: in the account\'s OWN folder a changed owner id is listed ("owner changed") and restore needs a confirmation; the legacy id is accepted', async () => {
+  await withApp((r) => proj(r, 'p'), async ({ page, root, qhome }) => {
+    const nm = path.join(root, 'p/node_modules');
+    const res = await del(page, [nm]);
     const dir = runDirs(qhome)[0], man = manifestOf(dir);
     expect(man.owner).toBeTruthy();
-    man.owner = 'someone-else'; fs.writeFileSync(path.join(dir, 'manifest.json'), JSON.stringify(man));
-    expect((await list(page)).runs).toHaveLength(0);
-    expect((await list(page)).unreadableRuns).toHaveLength(0);
-    expect((await restore(page, mine.runId)).error).toMatch(/no longer exists/);
-    expect((await page.evaluate(() => window.api.trashQuarantine('all'))).error).toBe('Nothing to move.');
-    expect(fs.existsSync(man.items[0].quarantinePath)).toBe(true);
+    man.owner = 'renamed-account-id'; fs.writeFileSync(path.join(dir, 'manifest.json'), JSON.stringify(man));
+    const l = await list(page);
+    expect(l.runs).toHaveLength(1);                                  // not hidden as foreign
+    const r1 = await restore(page, res.runId);
+    expect(r1.results[0]).toMatchObject({ ok: false, state: 'mismatch', canRestoreAnyway: true });
+    expect(r1.results[0].reason).toMatch(/different account id/);
+    expect(fs.existsSync(nm)).toBe(false);
+    expect((await restore(page, res.runId, { anyway: true })).restored).toBe(1);
   });
 });
+
+test('N4: per-user folders on a shared volume are secured and verified before use (failure means no quarantine there)', () => {
+  const root = tmp();
+  try {
+    const calls = [];
+    const ctx = { platform: process.platform, fsx: fs, home: path.join(root, 'home'), owner: 'sid-S-1-5-21-1', secureDir: (d) => { calls.push(d); }, hide: (d) => calls.push('hide:' + d), legacyOwners: ['u-legacy'] };
+    const plan = { root: path.join(root, q.QDIR, 'sid-S-1-5-21-1'), runId: 'ab12cd34', t: Date.now(), appVersion: '0', items: [{ originalPath: path.join(root, 'p', 'node_modules'), dev: 1, size: 5, files: 1, category: 'node_modules' }] };
+    q.createRun(plan, ctx);
+    expect(calls).toEqual([plan.root, 'hide:' + plan.root, 'hide:' + path.dirname(plan.root)]);   // shared top is hidden too
+    const bad = { ...ctx, secureDir: () => { throw new Error('owned by someone else'); } };
+    expect(() => q.createRun({ ...plan, runId: 'ab12cd35', root: path.join(root, q.QDIR, 'sid-S-1-5-21-1') }, bad)).toThrow(/owned by someone else/);
+    // a run written under the legacy hash id is still ours
+    const m = q.createRun({ ...plan, runId: 'ab12cd36', root: path.join(root, q.QDIR, 'sid-S-1-5-21-1') }, { ...ctx, owner: 'u-legacy' });
+    const own = q.listRuns([plan.root], ctx);
+    expect(own.runs.map(r => r.runId)).toContain('ab12cd36');
+    void m;
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('N1: relaunching while only the tray is alive opens a new window instead of failing on a destroyed one', async () => {
+  const root = tmp();
+  const { app } = await launch(root, {});
+  try {
+    const n = await app.evaluate(async ({ BrowserWindow }) => {
+      const keep = new BrowserWindow({ show: false });                 // something keeps the app alive (tray/monitor in real life)
+      BrowserWindow.getAllWindows().filter(w => w !== keep).forEach(w => w.destroy());
+      const before = BrowserWindow.getAllWindows().filter(w => w !== keep).length;
+      global.__e2eShowMainWindow();                                    // what second-instance and the tray menu call
+      await new Promise(r => setTimeout(r, 500));
+      return { before, after: BrowserWindow.getAllWindows().filter(w => w !== keep && !w.isDestroyed()).length };
+    });
+    expect(n).toEqual({ before: 0, after: 1 });
+  } finally { await app.close().catch(() => {}); fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('N2: the single-instance lock is released before an elevated or updater restart starts a new process', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
+  expect(src.indexOf('app.releaseSingleInstanceLock()')).toBeGreaterThan(-1);
+  const el = src.indexOf("-Verb RunAs");
+  expect(src.lastIndexOf('app.releaseSingleInstanceLock()', el)).toBeGreaterThan(src.lastIndexOf("handleTrusted('elevate-access'", el));
+  expect(src.lastIndexOf('app.releaseSingleInstanceLock()', src.indexOf('autoUpdater.quitAndInstall'))).toBeGreaterThan(src.lastIndexOf('function', src.indexOf('autoUpdater.quitAndInstall')));
+});
+
+test('N3: an empty slot (item dragged out, crash between mkdir and rename) is "missing from quarantine", not restorable', async () => {
+  await withApp((r) => proj(r, 'p'), async ({ page, root, qhome, trashDir }) => {
+    const res = await del(page, [path.join(root, 'p/node_modules')]);
+    const dir = runDirs(qhome)[0], man = manifestOf(dir);
+    fs.mkdirSync(trashDir, { recursive: true }); fs.renameSync(man.items[0].quarantinePath, path.join(trashDir, 'dragged-out'));   // slot stays, item gone
+    const l = await list(page);
+    expect(l.runs[0].items[0]).toMatchObject({ present: false });
+    expect(l.runs[0].heldCount).toBe(0); expect(l.runs[0].size).toBe(0);
+    await page.locator('#tools-btn').click();
+    await page.locator('[data-tool="quarantine"]').click();
+    await expect(page.locator('.quar-item')).toContainText('missing from quarantine');
+    await expect(page.locator('.quar-restore-item')).toHaveCount(0);
+    void res;
+  });
+});
+
+test('N6/Q8: a parent replaced by a link to an ancestor is refused BEFORE anything is created', async () => {
+  await withApp((r) => { mk(r, 'deep/er/package.json', '{}'); mk(r, 'deep/er/package-lock.json', '{}'); mk(r, 'deep/er/node_modules/d/i.js'); }, async ({ page, root }) => {
+    const res = await del(page, [path.join(root, 'deep/er/node_modules')]);
+    fs.renameSync(path.join(root, 'deep'), path.join(root, 'deep-moved'));
+    linkOrSkip(test, root, path.join(root, 'deep'), 'dir');              // deep -> the scanned root itself (an ancestor)
+    const before = fs.readdirSync(root).sort();
+    const r = await restore(page, res.runId, { recreateParent: true });
+    expect(r.results[0]).toMatchObject({ ok: false });
+    expect(fs.readdirSync(root).sort()).toEqual(before);                 // no stray "er" folder was created
+  });
+});
+
+test('N6: unreadable-run wording says so when the system errored but the folder is gone', async () => {
+  await withApp((r) => proj(r, 'p'), async ({ app, page, root, qhome, trashDir }) => {
+    await del(page, [path.join(root, 'p/node_modules')]);
+    const dir = runDirs(qhome)[0];
+    fs.writeFileSync(path.join(dir, 'manifest.json'), 'x'); fs.writeFileSync(path.join(dir, 'manifest.json.bak'), 'x');
+    await app.evaluate((_e, d) => { const fsx = global.__e2eRequire('fs'); fsx.mkdirSync(d, { recursive: true }); global.__e2eTrash = async (p) => { fsx.renameSync(p, d + '/x'); throw new Error('aborted'); }; }, trashDir);
+    await page.locator('#tools-btn').click();
+    await page.locator('[data-tool="quarantine"]').click();
+    await page.locator('.quar-trash-broken').click();
+    await expect(page.locator('#quar-notice')).toContainText('may not be in the Trash');
+  });
+});
+
 
 test('Q3: network, removable or unknown volumes are never used: the item goes to the Trash and the result says why', async () => {
   await withApp((r) => proj(r, 'p'), async ({ app, page, root, trashDir, qhome }) => {

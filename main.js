@@ -204,8 +204,16 @@ function createWindow() {
 // Two app instances must not run cleanups or empty the quarantine at once (the in-process lock would not see each other).
 if (!cliOpts && !E2E) {
   if (!app.requestSingleInstanceLock()) app.quit();
-  else app.on('second-instance', () => { if (mainWindow) { if (mainWindow.isMinimized()) mainWindow.restore(); mainWindow.focus(); } });
+  else app.on('second-instance', () => showMainWindow());
 }
+// Brings the window forward, or opens a new one when it was closed (the monitor/tray keeps the app alive without a window).
+function showMainWindow() {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show(); mainWindow.focus();
+  } else if (app.isReady()) createWindow();
+}
+if (E2E) global.__e2eShowMainWindow = showMainWindow;
 
 app.whenReady().then(async () => {
   if (cliOpts) {
@@ -349,6 +357,8 @@ handleTrusted('elevate-access', async () => {
     const argList = args.length ? `-ArgumentList '${args[0].replace(/'/g, "''")}'` : '';
     const exe = process.execPath.replace(/'/g, "''");
     try {
+      // The elevated copy must not meet our single-instance lock and quit: release it before it starts.
+      app.releaseSingleInstanceLock();
       await execFileP('powershell.exe', [
         '-NoProfile', '-NonInteractive', '-Command',
         `Start-Process -FilePath '${exe}' ${argList} -Verb RunAs`
@@ -356,6 +366,7 @@ handleTrusted('elevate-access', async () => {
       app.quit();
       return 'relaunching';
     } catch (e) {
+      if (!E2E && !cliOpts) app.requestSingleInstanceLock();   // still running: take the lock back
       return 'cancelled'; // user declined the UAC prompt
     }
   }
@@ -1153,24 +1164,53 @@ function restoreDestProblem(dest) {
   return null;
 }
 // Identifies this account on a shared volume top (every user of the machine shares D:\.StuffDiverQuarantine or /Volumes/X/...).
-function quarantineOwner() {
-  if (typeof process.getuid === 'function') return 'uid-' + process.getuid();
+let sidCache = null;
+function currentSid() {
+  if (sidCache) return sidCache;
+  try {
+    const out = execFileSyncText('whoami.exe', ['/user', '/fo', 'csv', '/nh']);
+    const m = /"(S-1-[0-9-]+)"/.exec(out);
+    if (m) sidCache = m[1];
+  } catch (e) { /* unknown */ }
+  return sidCache;
+}
+function legacyOwnerHash() {
   let name = ''; try { name = require('os').userInfo().username; } catch (e) { /* unknown */ }
   return 'u-' + crypto.createHash('sha256').update(name.toLowerCase() + '|' + require('os').homedir().toLowerCase()).digest('hex').slice(0, 12);
+}
+function quarantineOwner() {
+  if (typeof process.getuid === 'function') return 'uid-' + process.getuid();
+  const sid = currentSid();   // the account's SID survives renames and profile moves
+  return sid ? 'sid-' + sid : legacyOwnerHash();
+}
+// Makes a per-user folder on a shared drive private to this account (explicit ACL, no inheritance) and checks who owns it.
+function secureWindowsDir(dir) {
+  const sid = currentSid();
+  if (!sid) throw new Error('the account SID cannot be determined');
+  execFileSyncText('icacls.exe', [dir, '/inheritance:r', '/grant:r', `*${sid}:(OI)(CI)F`, '*S-1-5-18:(OI)(CI)F', '*S-1-5-32-544:(OI)(CI)F']);
+  const owner = execFileSyncText('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `(Get-Acl -LiteralPath '${dir.replace(/'/g, "''")}').GetOwner([System.Security.Principal.SecurityIdentifier]).Value`]).trim();
+  if (owner !== sid && owner !== 'S-1-5-32-544') throw new Error(`${dir} is owned by ${owner}, not by this account`);
 }
 // Windows: only FIXED local disks are used (mapped network drives, removable drives and anything unknown are not).
 const driveTypeCache = new Map();
 function quarantineDriveType(letter) {
   if (!/^[A-Z]$/.test(letter)) return null;
   if (E2E && typeof global.__e2eDriveType === 'function') return global.__e2eDriveType(letter);
-  if (driveTypeCache.has(letter)) return driveTypeCache.get(letter);
-  let t = null;
-  try {
-    t = require('child_process').execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `(New-Object System.IO.DriveInfo('${letter}')).DriveType`], { encoding: 'utf8', timeout: 15000, windowsHide: true }).trim();
-  } catch (e) { t = null; }
-  if (!/^(Fixed|Removable|Network|CDRom|Ram|NoRootDirectory|Unknown)$/.test(t || '')) t = null;
-  if (t) driveTypeCache.set(letter, t);
-  return t;
+  return driveTypeCache.has(letter) ? driveTypeCache.get(letter) : null;   // filled by prefetchDriveTypes(); a miss means "not allowed"
+}
+// Async (3 s limit per drive) so a slow or failing PowerShell never blocks the main process; failures are cached as "unknown".
+// USB / FireWire / SD buses count as removable even though Windows reports the drive as Fixed.
+async function prefetchDriveTypes(paths) {
+  if (process.platform !== 'win32' || (E2E && typeof global.__e2eDriveType === 'function')) return;
+  for (const l of new Set(paths.map(p => (/^([a-zA-Z]):[\\/]/.exec(p) || [])[1]).filter(Boolean).map(x => x.toUpperCase()))) {
+    if (driveTypeCache.has(l)) continue;
+    const script = `$t=(New-Object System.IO.DriveInfo('${l}')).DriveType; $b=''; try { $b=(Get-Partition -DriveLetter ${l} -ErrorAction Stop | Get-Disk -ErrorAction Stop).BusType } catch {}; "$t|$b"`;
+    const out = await new Promise((res) => execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { encoding: 'utf8', timeout: 3000, windowsHide: true }, (e, so) => res(e ? '' : String(so).trim())));
+    const m = /^(Fixed|Removable|Network|CDRom|Ram|NoRootDirectory|Unknown)\|(.*)$/.exec(out);
+    let t = m ? m[1] : 'Unknown';
+    if (m && t === 'Fixed' && /^(USB|1394|SD|MMC|iSCSI)$/i.test(m[2])) t = 'Removable (' + m[2] + ' disk)';
+    driveTypeCache.set(l, t);
+  }
 }
 // macOS/Linux: network, FUSE and removable/external volumes are never used as a quarantine root.
 const BAD_FSTYPES = /^(nfs\d*|cifs|smb3?|smbfs|afpfs|webdav|fuse(\..*)?|fuseblk|macfuse|osxfuse|sshfs|9p|davfs|afs|ceph|glusterfs|vboxsf|vfat|exfat|msdos|ntfs3?)$/i;
@@ -1184,9 +1224,18 @@ function quarantineVolumeProblem(root) {
         const f = line.split(' '), dash = f.indexOf('-');
         if (f.length < 8 || dash < 0) continue;
         const mp = f[4].replace(/\\([0-7]{3})/g, (m, o) => String.fromCharCode(parseInt(o, 8)));
-        if (inside(mp) && (!best || mp.length > best.mp.length)) best = { mp, fstype: f[dash + 1] };
+        if (inside(mp) && (!best || mp.length > best.mp.length)) best = { mp, fstype: f[dash + 1], majmin: f[2] };
       }
       if (best && BAD_FSTYPES.test(best.fstype)) return `is on a ${best.fstype} volume (network, FUSE or removable-type filesystem)`;
+      if (best && best.majmin) {   // removable media / USB device behind the mount
+        try {
+          const real = fs.realpathSync('/sys/dev/block/' + best.majmin);
+          const seg = real.split('/'), bi = seg.lastIndexOf('block');
+          const disk = bi >= 0 ? seg[bi + 1] : seg[seg.length - 1];
+          let removable = '0'; try { removable = fs.readFileSync(`/sys/block/${disk}/removable`, 'utf8').trim(); } catch (e) { /* not a disk */ }
+          if (removable === '1' || /\/usb\d/.test(real)) return 'is on removable or USB media';
+        } catch (e) { /* virtual device (overlay, tmpfs): not removable media */ }
+      }
     } else if (process.platform === 'darwin') {
       for (const line of execFileSyncText('/sbin/mount', []).split('\n')) {
         const m = /^(.+?) on (\/.*?) \(([^)]*)\)$/.exec(line);
@@ -1207,11 +1256,11 @@ const execFileSyncText = (cmd, args) => require('child_process').execFileSync(cm
 function quarantineCtx() {
   const ci = process.platform === 'win32' || process.platform === 'darwin';
   return {
-    owner: quarantineOwner(), driveType: quarantineDriveType, volumeProblem: quarantineVolumeProblem,
+    owner: quarantineOwner(), legacyOwners: process.platform === 'win32' ? [legacyOwnerHash()] : [], secureDir: (E2E && typeof global.__e2eSecureDir === 'function') ? global.__e2eSecureDir : (process.platform === 'win32' ? secureWindowsDir : null), driveType: quarantineDriveType, volumeProblem: quarantineVolumeProblem,
     platform: process.platform, home: quarantineHome(), fsx: rawFs, uid: typeof process.getuid === 'function' ? process.getuid() : null,
     mounts: () => mountList(), rootOk: quarantineRootProblem, destReason: restoreDestProblem,
     rename: (E2E && typeof global.__e2eRename === 'function') ? global.__e2eRename : null,
-    hide: (root) => { if (process.platform === 'win32') execFile('attrib', ['+h', root], () => {}); },
+    hide: (dir) => { if (process.platform === 'win32') execFile('attrib', ['+h', dir], () => {}); },
     inspect: (dir) => cleanupFolders.inspectFolder(dir, rawFs, undefined, null, null),
     // A restore may only land inside a folder approved in this session or inside the (unprotected) scan root recorded in the manifest.
     destAllowed: (dest, scanRoot) => {
@@ -1314,7 +1363,7 @@ handleTrusted('delete-folders', async (event, folderPaths, source) => {
     const total = checks.reduce((a, c) => a + c.size, 0);
     const useQ = quarantineOn();
     const plans = new Map();
-    if (useQ) { const qc = quarantineCtx(); for (const c of checks) plans.set(c.path, quarantine.chooseRoot(c.path, qc)); }
+    if (useQ) { await prefetchDriveTypes(checks.map(c => c.path)); const qc = quarantineCtx(); for (const c of checks) plans.set(c.path, quarantine.chooseRoot(c.path, qc)); }
     const nQ = [...plans.values()].filter(x => x.root).length;
     const nT = checks.length - nQ;
     {
@@ -1491,7 +1540,7 @@ handleTrusted('quarantine-list', async () => {
   };
 });
 // Run folders whose manifest cannot be read are still listed (they use disk space): reveal them or move them to the Trash.
-const brokenByName = (name) => quarantine.listRuns(quarantineRoots(), quarantineCtx(), nowMs()).broken.find(b => b.name === name);
+const brokenByName = (p) => quarantine.listRuns(quarantineRoots(), quarantineCtx(), nowMs()).broken.find(b => b.runDir === p);   // keyed by full path: a multi-volume run has same-named copies
 handleTrusted('quarantine-reveal-broken', async (event, name) => {
   const b = typeof name === 'string' ? brokenByName(name) : null;
   if (!b) return false;
@@ -1535,9 +1584,10 @@ handleTrusted('quarantine-restore', async (event, runId, opts) => {
       const base = { id: it.n, name: it.name, originalPath: it.originalPath };
       const meta = { t: Date.now(), type: 'folder', runId, size: it.size, files: it.files, category: it.category, source: 'quarantine-restore' };
       if (res.ok) {
-        try { quarantine.markRestored(it, res.restoredTo, qctx); } catch (e) { /* folder is back; the log still says so */ }
+        let warning = null;
+        try { if (!quarantine.markRestored(it, res.restoredTo, qctx)) warning = 'the manifest could not be updated'; } catch (e) { warning = 'the manifest could not be updated (' + osErrorReason(e) + ')'; }
         restoredPaths.push(res.restoredTo);
-        results.push({ ...base, ok: true, restoredTo: res.restoredTo, beside: res.beside });
+        results.push({ ...base, ok: true, restoredTo: res.restoredTo, beside: res.beside, ...(warning ? { warning: warning + '; the folder IS back in place' } : {}) });
         logError = (await logDeletion([{ ...meta, path: res.restoredTo, from: it.quarantinePath, status: 'restored', reason: res.beside ? 'put back next to the folder that already exists there' : 'put back where it was' }])) || logError;
       } else {
         results.push({ ...base, ok: false, state: res.state, reason: res.reason, canRestoreBeside: !!res.canRestoreBeside, canRecreateParent: !!res.canRecreateParent, canRestoreAnyway: !!res.canRestoreAnyway, canConfirmDestination: !!res.canConfirmDestination, destination: res.destination, recorded: res.recorded, now: res.now });
@@ -1973,6 +2023,7 @@ handleTrusted('download-update', async () => {
 });
 
 handleTrusted('install-update', () => {
+  app.releaseSingleInstanceLock();
   autoUpdater.quitAndInstall(false, true);
 });
 
@@ -2080,7 +2131,7 @@ function setupTray() {
     const folderName = settings.monitorFolder ? path.basename(settings.monitorFolder) : 'None';
     tray.setToolTip(`Stuff Diver — Watching: ${folderName}`);
     tray.setContextMenu(Menu.buildFromTemplate([
-      { label: 'Open Stuff Diver', click: () => { if (mainWindow) { mainWindow.show(); mainWindow.focus(); } } },
+      { label: 'Open Stuff Diver', click: () => showMainWindow() },
       { type: 'separator' },
       { label: 'Check Now', click: () => runMonitorCheck() },
       { label: 'Quit', click: () => { stopMonitor(); app.quit(); } }
