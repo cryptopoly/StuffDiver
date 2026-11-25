@@ -95,6 +95,7 @@
     "files": [
       "main.js",
       "scanner.js",
+      "cleanup-folders.js",
       "cli.js",
       "mft-scan.js",
       "preload.js",

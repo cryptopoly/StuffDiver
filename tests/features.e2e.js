@@ -3,7 +3,7 @@ const { execFileSync } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { makeFixture, launch, scanViaUi } = require('./helpers');
+const { makeFixture, launch, scanViaUi, requireUsableFixtures } = require('./helpers');
 
 async function withApp(fn, { env, prepare } = {}) {
   const fx = makeFixture();
@@ -110,15 +110,19 @@ test('extension panel lists extensions and filters to one extension', async () =
 });
 
 test('smart cleanup scans the full file list (incl. Windows-style separators)', async () => {
+  requireUsableFixtures(test);   // folder candidates need a real user profile (not available under Windows SYSTEM)
   await withApp(async ({ page }) => {
     await scanViaUi(page);
+    // node_modules is now a folder-level candidate (needs package.json next to it), not a per-file preset.
     const cats = await page.evaluate(() => window.api.cleanupScan());
-    const nm = cats.find(c => c.id === 'node_modules');
-    expect(nm.count).toBe(1);
+    expect(cats.find(c => c.id === 'node_modules')).toBeUndefined();
+    const folders = await page.evaluate(() => window.api.cleanupFoldersScan());
+    expect(folders.candidates.map(c => c.relPath)).toEqual(['node_modules']);
+    expect(folders.candidates[0].files).toBe(2);
     await page.locator('#tools-btn').click();
     await page.locator('[data-tool="cleanup"]').click();
     await expect(page.locator('#cleanup-body')).toContainText('node_modules');
-  });
+  }, { prepare: (fx) => { fs.writeFileSync(path.join(fx.root, 'package.json'), '{}'); fs.writeFileSync(path.join(fx.root, 'package-lock.json'), '{}'); fs.writeFileSync(path.join(fx.root, 'node_modules/.package-lock.json'), '{}'); } });
 });
 
 test('duplicate finder reports the exact copy as a gold match', async () => {
