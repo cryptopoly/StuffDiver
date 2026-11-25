@@ -28,7 +28,7 @@ function installedAppReason(p, bundleOnly = false) {
   const segs = norm.split('/').filter(Boolean);
   if (segs.slice(0, -1).some(x => BUNDLE_EXT.test(x))) return 'inside an application bundle';
   if (bundleOnly) return null;
-  if (segs.some(x => x === 'windowsapps' || x === 'program files' || x === 'program files (x86)') || /\/programdata\/package cache(\/|$)/.test(norm)) return 'inside an installed Windows application folder';
+  if (segs.some(x => x === 'windowsapps' || x === 'program files' || x === 'program files (x86)') || /\/programdata\/(package cache|microsoft)(\/|$)/.test(norm)) return 'inside an installed Windows application folder';
   // Installed-app folders in user space (Windows per-user installs, scoop, Steam, user flatpaks).
   for (let i = 0; i < segs.length - 1; i++) {
     if (segs[i] === 'appdata' && segs[i + 1] === 'local' && segs[i + 2] === 'programs') return 'inside an installed Windows application folder';
@@ -38,6 +38,12 @@ function installedAppReason(p, bundleOnly = false) {
   }
   if (/^\/(usr|opt|snap)(\/|$)/.test(norm) || /^\/var\/lib\/flatpak(\/|$)/.test(norm) || /^\/tmp\/\.mount_[^/]+(\/|$)/.test(norm) || /^\/app(\/|$)/.test(norm)) return 'inside an installed application location';
   return null;
+}
+// Why a trash call may fail for size reasons: the Windows Recycle Bin has a per-volume size limit (a share of the volume).
+function capacityHint(size, volumeTotal) {
+  if (!(size > 0) || !(volumeTotal > 0)) return null;
+  const pct = size / volumeTotal * 100;
+  return pct >= 5 ? `it is about ${pct < 10 ? pct.toFixed(1) : Math.round(pct)}% of the volume, which may exceed the Recycle Bin size limit` : null;
 }
 // Text safe to put in a native dialog: no control or bidi-override characters, one line, long names shortened in the middle.
 function safeText(v, max = 160) {
@@ -543,4 +549,4 @@ function findCandidates(files, scanRoot, ci, fsx = fs, mounts = getMountPoints()
   return [...owners.values()];
 }
 
-module.exports = { CLOUD_REASON, installedAppReason, safeText, projectSignals, runningCwds, lockfileProblem, npmrcProblem, setElevated, cloudSyncedReason, trashReason, VCS_NAMES, parseMountinfo, parseMacMount, getMountPoints, mountConflict, deviceDiffersFromParent, blockedLocation, KINDS, CANDIDATE_NAMES, RECENT_DAYS, MANY_FILES, classifyFolder, inspectFolder, dedupeNested, findCandidates, isInside };
+module.exports = { capacityHint, CLOUD_REASON, installedAppReason, safeText, projectSignals, runningCwds, lockfileProblem, npmrcProblem, setElevated, cloudSyncedReason, trashReason, VCS_NAMES, parseMountinfo, parseMacMount, getMountPoints, mountConflict, deviceDiffersFromParent, blockedLocation, KINDS, CANDIDATE_NAMES, RECENT_DAYS, MANY_FILES, classifyFolder, inspectFolder, dedupeNested, findCandidates, isInside };

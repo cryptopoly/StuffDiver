@@ -874,6 +874,21 @@ handleTrusted('delete-files', async (event, filePaths, source) => {
   fileDeleteBusy = true;
   try { return await deleteFilesImpl(filePaths, source); } finally { fileDeleteBusy = false; }
 });
+// The path as it is spelled on disk (matters on case-insensitive volumes where the request may be lower-cased).
+function onDiskPath(fp, listCache) {
+  const ciFs = process.platform === 'win32' || process.platform === 'darwin';
+  if (!ciFs) return fp;
+  const real = realFileLocation(fp, listCache.dirs);
+  if (!real) return fp;
+  const dir = path.dirname(real);
+  let names = listCache.names.get(dir);
+  if (!names) { try { names = fs.readdirSync(dir); } catch (e) { names = []; } listCache.names.set(dir, names); }
+  const base = path.basename(real).toLowerCase();
+  const exact = names.find(n => n.toLowerCase() === base);
+  const cand = exact ? path.join(dir, exact) : real;
+  // Only the spelling is corrected: a different real location (symlinked root) keeps the path the user saw.
+  return cand.toLowerCase() === fp.toLowerCase() ? cand : fp;
+}
 async function deleteFilesImpl(filePaths, source) {
   // Cheap request-level checks first, before any per-path work.
   if (filePaths.length > FILE_REQUEST_CAP) return { deleted: 0, deletedPaths: [], error: `Refused: ${filePaths.length} files in one request, the limit is ${FILE_REQUEST_CAP}. Nothing was moved.` };
@@ -909,8 +924,10 @@ async function deleteFilesImpl(filePaths, source) {
   }
 
   const sizeByPath = new Map();
+  const infoByPath = new Map();
   const want = new Set(safePaths);
-  for (const f of lastScanAllFiles) if (want.has(f.path)) sizeByPath.set(f.path, f.size);
+  for (const f of lastScanAllFiles) if (want.has(f.path)) { sizeByPath.set(f.path, f.size); infoByPath.set(f.path, { rel: f.relativePath, size: f.size, logicalSize: f.logicalSize }); }
+  const listCache = { dirs: new Map(), names: new Map() };
 
   const hidden = safePaths.some(p => /(^|[\\/])(\.DS_Store|Thumbs\.db)$/i.test(p));
   const result = E2E ? { response: 1 } : await dialog.showMessageBox(mainWindow, {
@@ -939,7 +956,7 @@ async function deleteFilesImpl(filePaths, source) {
   const deletedPaths = [], removedPaths = [], goneBefore = [], failures = [];
   let logError = null;
   for (const fp of safePaths) {
-    const entry = { t: Date.now(), path: fp, size: sizeByPath.get(fp) ?? null, source: source || 'collector' };
+    const entry = { t: Date.now(), path: onDiskPath(fp, listCache), size: sizeByPath.get(fp) ?? null, source: source || 'collector' };
     let rec;
     // A stale list can name files that vanished before this run: say so instead of calling it a removal.
     let existsNow = true; try { fs.lstatSync(fp); } catch (e) { existsNow = e.code !== 'ENOENT'; }
@@ -960,7 +977,7 @@ async function deleteFilesImpl(filePaths, source) {
         removedPaths.push(fp);
         rec = { ...entry, status: 'removed', reason: 'the system reported an error but the file is gone; it may not be in the Trash (' + osErrorReason(e) + ')' };
       } else {
-        rec = { ...entry, status: 'failed', finalState: 'untouched', reason: await trashFailureReason(e, fp) };
+        rec = { ...entry, status: 'failed', finalState: 'untouched', reason: await trashFailureReason(e, fp, sizeByPath.get(fp)) };
         failures.push({ path: fp, reason: rec.reason, state: 'failed', finalState: 'untouched' });
       }
     }
@@ -970,7 +987,7 @@ async function deleteFilesImpl(filePaths, source) {
     const gone = new Set([...deletedPaths, ...removedPaths, ...goneBefore]);
     lastScanAllFiles = lastScanAllFiles.filter(f => !gone.has(f.path));
   }
-  return { deleted: deletedPaths.length, deletedPaths, removed: removedPaths.length, removedPaths, alreadyGone: goneBefore.length, alreadyGonePaths: goneBefore, failures, ...(logError ? { logError } : {}) };
+  return { deleted: deletedPaths.length, deletedPaths, removed: removedPaths.length, removedPaths, alreadyGone: goneBefore.length, alreadyGonePaths: goneBefore, goneInfo: [...deletedPaths, ...removedPaths, ...goneBefore].map(p => infoByPath.get(p)).filter(Boolean), failures, ...(logError ? { logError } : {}) };
 }
 
 
@@ -1008,9 +1025,11 @@ const osErrorReason = (e) => {
 };
 const devFoldersOn = () => loadSettings().developerFolderCleanup === true;
 // Windows' trash API only says "Operation was aborted": find out cheaply WHY (first file that cannot be opened for writing).
-async function diagnoseTrashFailure(p) {
+async function diagnoseTrashFailure(p, size) {
   const started = Date.now();
-  const generic = 'a file in the folder is open in another program, or you lack permission';
+  let cap = null;
+  try { const sf = fs.statfsSync(p); cap = cleanupFolders.capacityHint(size, Number(sf.blocks) * Number(sf.bsize)); } catch (e) { /* statfs unavailable */ }
+  const generic = (cap ? cap + '; otherwise ' : '') + 'a file in the folder is open in another program, you lack permission, or it is too large for the Recycle Bin';
   try {
     const st = fs.lstatSync(p);
     const stack = [p]; let budget = 5000;
@@ -1031,9 +1050,9 @@ async function diagnoseTrashFailure(p) {
   } catch (e) { /* fall through */ }
   return generic;
 }
-const trashFailureReason = async (e, p) => {
+const trashFailureReason = async (e, p, size) => {
   const base = osErrorReason(e);
-  return (process.platform === 'win32' || !(e && e.code)) ? `${base} (${await diagnoseTrashFailure(p)})` : base;
+  return (process.platform === 'win32' || !(e && e.code)) ? `${base} (${await diagnoseTrashFailure(p, size)})` : base;
 };
 const FOLDER_BATCH_CAP = 500;
 const FOLDER_SCAN_CAP = 2000;
@@ -1224,7 +1243,7 @@ handleTrusted('delete-folders', async (event, folderPaths, source) => {
               rec = { ...entry, status: 'removed', reason: 'the system reported an error but the folder is gone; it may not be in the Trash (' + osErrorReason(e) + ')' };
             } else {
               failed.push(c.path);
-              rec = { ...entry, status: 'failed', finalState: 'untouched', reason: await trashFailureReason(e, c.path) };
+              rec = { ...entry, status: 'failed', finalState: 'untouched', reason: await trashFailureReason(e, c.path, c.size) };
               failures.push({ path: c.path, reason: rec.reason, state: 'failed', finalState: 'untouched' });
             }
           }

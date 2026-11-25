@@ -2494,6 +2494,7 @@
       if (gone.size) {
         allFiles = allFiles.filter(f => !gone.has(f.path));
         collectorItems = collectorItems.filter(f => !gone.has(f.path));
+        removeFilesFromTree(result && result.goneInfo);
         applyFilters();
       }
       resultEl.innerHTML = escHtml(msg || '').replace(/\n/g, '<br>');
@@ -3701,6 +3702,29 @@
     updateStats();
   }
 
+  // Loose files removed by a cleanup or the Collector: keep the folder tree, totals and map in step.
+  function removeFilesFromTree(infos) {
+    if (!folderTree || !infos || !infos.length) return;
+    for (const f of infos) {
+      const segs = String(f.rel || '').split('/').filter(Boolean);
+      if (!segs.length) continue;
+      const chain = [folderTree];
+      let node = folderTree;
+      for (const sg of segs.slice(0, -1)) {
+        if (!node.children || !Object.prototype.hasOwnProperty.call(node.children, sg)) { node = null; break; }
+        node = node.children[sg]; chain.push(node);
+      }
+      if (!node) continue;
+      for (const n of chain) { n.size = Math.max(0, n.size - (f.size || 0)); n.logicalSize = Math.max(0, n.logicalSize - (f.logicalSize || f.size || 0)); n.fileCount = Math.max(0, n.fileCount - 1); }
+      totalFiles = Math.max(0, totalFiles - 1);
+      totalSize = Math.max(0, totalSize - (f.size || 0));
+    }
+    bubblePath = []; bubbleCurrentNode = folderTree; selectedFolderPath = null;
+    renderFolderTree();
+    renderVisualization();
+    updateStats();
+  }
+
   window.api.onFolderDeleteProgress(function(d) {
     const el = document.getElementById('cleanup-progress');
     if (!el) return;
@@ -3730,7 +3754,7 @@
 
   // Large selections go to the main process in chunks (each chunk is verified and confirmed on its own), and results are merged.
   async function deleteFilesChunked(paths, source, chunk) {
-    const total = { deleted: 0, deletedPaths: [], removed: 0, removedPaths: [], alreadyGone: 0, alreadyGonePaths: [], failures: [], chunks: 0 };
+    const total = { deleted: 0, deletedPaths: [], removed: 0, removedPaths: [], alreadyGone: 0, alreadyGonePaths: [], goneInfo: [], failures: [], chunks: 0 };
     for (let i = 0; i < paths.length; i += chunk) {
       const res = await window.api.deleteFiles(paths.slice(i, i + chunk), source);
       total.chunks++;
@@ -3739,6 +3763,7 @@
       total.deleted += res.deleted || 0; total.removed += res.removed || 0; total.alreadyGone += res.alreadyGone || 0;
       total.deletedPaths.push(...(res.deletedPaths || [])); total.removedPaths.push(...(res.removedPaths || [])); total.alreadyGonePaths.push(...(res.alreadyGonePaths || []));
       total.failures.push(...(res.failures || []));
+      total.goneInfo.push(...(res.goneInfo || []));
       if (res.logError) total.logError = res.logError;
     }
     return total;
@@ -3872,6 +3897,7 @@
       if (result && (result.deleted > 0 || result.removed > 0 || result.alreadyGone > 0)) {
         const deletedSet = new Set((result.deletedPaths || []).concat(result.removedPaths || [], result.alreadyGonePaths || []));
         allFiles = allFiles.filter(function(f) { return !deletedSet.has(f.path); });
+        removeFilesFromTree(result.goneInfo);
         applyFilters();
         openCleanupWizard(msg, !!((result.failures && result.failures.length) || result.removed || result.alreadyGone || result.error));
       } else if (msg) showNotice(msg, true);

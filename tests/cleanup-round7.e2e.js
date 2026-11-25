@@ -4,11 +4,11 @@ const { test, expect } = require('@playwright/test');
 const fs = require('fs');
 const path = require('path');
 const cf = require('../cleanup-folders');
-const { launch, scanViaUi, fixtureParent, autoMarkers, linkOrSkip } = require('./helpers');
+const { requireUsableFixtures, launch, scanViaUi, fixtureParent, autoMarkers, linkOrSkip } = require('./helpers');
 const link = (target, p, type) => linkOrSkip(test, target, p, type);
 
 const OLD = new Date(Date.now() - 90 * 86400000);
-const tmp = () => fs.realpathSync(fs.mkdtempSync(path.join(fixtureParent(), 'sd-r7-')));
+const tmp = () => { requireUsableFixtures(test); return fs.realpathSync(fs.mkdtempSync(path.join(fixtureParent(), 'sd-r7-'))); };
 function mk(root, rel, content) {
   const p = path.join(root, rel);
   fs.mkdirSync(path.dirname(p), { recursive: true });

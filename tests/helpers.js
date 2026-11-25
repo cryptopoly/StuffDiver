@@ -6,18 +6,17 @@ const { spawnSync } = require('child_process');
 
 // Folder cleanup refuses locations outside user folders (and outside home folders when running as root),
 // so fixtures must live somewhere a real project could: under the user's profile, never under AppData/Temp.
+const SYSTEM_PROFILE = /[\\/]windows[\\/]|systemprofile/i;
+// False when the folder-cleanup rules cannot be exercised with real fixtures (Windows SYSTEM has no user profile).
+function fixturesUsable() { return !(process.platform === 'win32' && SYSTEM_PROFILE.test(os.homedir())); }
+function requireUsableFixtures(test) { test.skip(!fixturesUsable(), 'running as SYSTEM: no user profile exists for folder-cleanup fixtures (the product refuses other locations)'); }
 function fixtureParent() {
   if (process.platform === 'win32') {
     const base = (dir) => { const d = path.join(dir, 'StuffDiverTestFixtures'); fs.mkdirSync(d, { recursive: true }); return d; };
-    const home = os.homedir();
-    if (!/[\\/]windows[\\/]|systemprofile/i.test(home)) return base(home);
-    // Running as SYSTEM: use the first real user profile (not Public/Default).
-    const usersDir = path.join(process.env.SystemDrive ? process.env.SystemDrive + '\\' : 'C:\\', 'Users');
-    try {
-      const u = fs.readdirSync(usersDir, { withFileTypes: true }).find(e => e.isDirectory() && !/^(public|default.*|all users)$/i.test(e.name));
-      if (u) return base(path.join(usersDir, u.name));
-    } catch (e) { /* fall through */ }
-    return os.tmpdir();   // no suitable profile: fixtures will be refused by the product, which the failures will make obvious
+    // Always the CURRENT account's own profile (elevated runs may only touch their own profile).
+    // Under SYSTEM there is no usable profile: use the temp folder, and folder-cleanup tests skip (see fixturesUsable).
+    if (!SYSTEM_PROFILE.test(os.homedir())) return base(os.homedir());
+    return os.tmpdir();
   }
   // Linux: the desktop trash refuses tmpfs (/tmp), so fixtures must sit on the user's real disk. macOS trashes from the temp folder fine.
   if (process.platform === 'linux' || (process.getuid && process.getuid() === 0)) { const d = path.join(os.homedir(), 'StuffDiverTestFixtures'); fs.mkdirSync(d, { recursive: true }); return d; }
@@ -104,4 +103,4 @@ function linkOrSkip(test, target, linkPath, type) {
   }
 }
 
-module.exports = { autoMarkers, linkOrSkip, fixtureParent, makeFixture, launch, scanViaUi, runCli };
+module.exports = { fixturesUsable, requireUsableFixtures, autoMarkers, linkOrSkip, fixtureParent, makeFixture, launch, scanViaUi, runCli };

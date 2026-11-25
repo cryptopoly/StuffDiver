@@ -3,10 +3,10 @@ const { test, expect } = require('@playwright/test');
 const fs = require('fs');
 const path = require('path');
 const cf = require('../cleanup-folders');
-const { launch, scanViaUi, fixtureParent, autoMarkers } = require('./helpers');
+const { requireUsableFixtures, launch, scanViaUi, fixtureParent, autoMarkers } = require('./helpers');
 
 const OLD = new Date(Date.now() - 90 * 86400000);
-const tmp = () => fs.realpathSync(fs.mkdtempSync(path.join(fixtureParent(), 'sd-r6-')));
+const tmp = () => { requireUsableFixtures(test); return fs.realpathSync(fs.mkdtempSync(path.join(fixtureParent(), 'sd-r6-'))); };
 function mk(root, rel, content) {
   const p = path.join(root, rel);
   fs.mkdirSync(path.dirname(p), { recursive: true });
@@ -94,7 +94,7 @@ test('T4. failures get a best-effort diagnosis (first file that cannot be opened
     expect(res.deleted).toBe(0);
     const byPath = Object.fromEntries(res.failures.map(f => [f.path, f.reason]));
     expect(byPath[b]).toBe(`Operation was aborted (EACCES: ${locked} cannot be opened for writing (in use or no permission))`);
-    expect(byPath[a]).toBe('Operation was aborted (a file in the folder is open in another program, or you lack permission)');
+    expect(byPath[a]).toBe('Operation was aborted (a file in the folder is open in another program, you lack permission, or it is too large for the Recycle Bin)');
     expect(fs.existsSync(locked)).toBe(true);
   });
 });

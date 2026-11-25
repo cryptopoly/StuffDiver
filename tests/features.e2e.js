@@ -3,7 +3,7 @@ const { execFileSync } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { makeFixture, launch, scanViaUi } = require('./helpers');
+const { makeFixture, launch, scanViaUi, requireUsableFixtures } = require('./helpers');
 
 async function withApp(fn, { env, prepare } = {}) {
   const fx = makeFixture();
@@ -110,6 +110,7 @@ test('extension panel lists extensions and filters to one extension', async () =
 });
 
 test('smart cleanup scans the full file list (incl. Windows-style separators)', async () => {
+  requireUsableFixtures(test);   // folder candidates need a real user profile (not available under Windows SYSTEM)
   await withApp(async ({ page }) => {
     await scanViaUi(page);
     // node_modules is now a folder-level candidate (needs package.json next to it), not a per-file preset.
