@@ -216,6 +216,7 @@ function showMainWindow() {
 if (E2E) global.__e2eShowMainWindow = showMainWindow;
 
 app.whenReady().then(async () => {
+  if (!cliOpts && !E2E && process.platform === 'win32') driveProbe.startBusCheck();   // best effort, in the background: learns which disks are USB/SD
   if (cliOpts) {
     // Headless mode must never show a GUI error dialog (it would hang scripts and
     // scheduled tasks): a closed stdout/stderr pipe (e.g. `| head`) or any other
@@ -1202,9 +1203,14 @@ function secureWindowsDir(dir) {
   if (owner !== sid && owner !== 'S-1-5-32-544') throw new Error(`${dir} is owned by ${owner}, not by this account`);
 }
 // Windows: only FIXED local disks are used (mapped network drives, removable drives and anything unknown are not).
-const DRIVE_SCRIPT = "$ErrorActionPreference='SilentlyContinue'; $bus=@{}; Get-Partition | Where-Object { $_.DriveLetter } | ForEach-Object { $bus[[string]$_.DriveLetter]=(Get-Disk -Number $_.DiskNumber).BusType }; [System.IO.DriveInfo]::GetDrives() | ForEach-Object { $l=$_.Name.Substring(0,1); \"$l|$($_.DriveType)|$($bus[$l])\" }";
+const runTool = (cmd, args, ms) => new Promise((resolve, reject) => execFile(cmd, args, { encoding: 'utf8', timeout: ms, windowsHide: true }, (e, so) => (e ? reject(new Error(e.killed ? `timed out after ${ms / 1000} s` : (e.code ? `${cmd} exited with ${e.code}` : 'failed to start'))) : resolve(String(so)))));
+const DRIVE_SCRIPT = "[System.IO.DriveInfo]::GetDrives() | ForEach-Object { \"$($_.Name.Substring(0,1))|$($_.DriveType)|\" }";
+const BUS_SCRIPT = "$ErrorActionPreference='SilentlyContinue'; Get-Partition | Where-Object { $_.DriveLetter } | ForEach-Object { \"$($_.DriveLetter)|$((Get-Disk -Number $_.DiskNumber).BusType)\" }";
 const driveProbe = quarantine.createDriveProbe({
-  run: () => new Promise((resolve, reject) => execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', DRIVE_SCRIPT], { encoding: 'utf8', timeout: 10000, windowsHide: true }, (e, so) => (e ? reject(new Error(e.killed ? 'timed out after 10 s' : e.message)) : resolve(String(so)))))
+  systemDrive: ((process.env.SystemDrive || 'C:')[0] || 'C'),
+  runFsutil: (l) => runTool('fsutil.exe', ['fsinfo', 'drivetype', l + ':'], 5000),
+  runDotnet: () => runTool('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', DRIVE_SCRIPT], 10000),
+  runBus: () => runTool('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', BUS_SCRIPT], 15000)
 });
 function quarantineDriveType(letter) {
   if (!/^[A-Z]$/.test(letter)) return null;

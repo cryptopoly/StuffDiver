@@ -864,59 +864,59 @@ test('restore only lands inside an approved or recorded scan folder; anything el
   });
 });
 
-// ---------- W1: drive-type probe (pure unit tests, no windows) ----------
+// ---------- W1/P1/P2: drive-type probe (pure unit tests, no windows) ----------
 test.describe('unit: drive-type probe', () => {
-  const LIST = 'C|Fixed|NVMe\r\nD|Fixed|USB\r\nE|Network|\r\nF|CDRom|\r\nS|Fixed|SATA\r\n';
-  test('one listing gives every drive; USB-bus disks count as removable', () => {
-    const m = q.parseDriveList(LIST);
-    expect([...m]).toEqual([['C', 'Fixed'], ['D', 'Removable (USB disk)'], ['E', 'Network'], ['F', 'CDRom'], ['S', 'Fixed']]);
-    expect(q.parseDriveList('garbage\n|||\n').size).toBe(0);
+  const mk2 = (o) => q.createDriveProbe({ systemDrive: 'C', runFsutil: async (l) => `${l}: - Fixed Drive`, runDotnet: async () => 'C|Fixed|\nS|Fixed|\n', runBus: async () => 'S|SATA\nD|USB\n', ...o });
+  test('fsutil output is parsed for every drive kind; unknown or localized text is not understood', () => {
+    expect(['C: - Fixed Drive', 'D: - CD-ROM Drive', 'E: - Removable Drive', 'Z: - Remote/Network Drive', 'R: - RAM Disk'].map(q.parseFsutilDriveType)).toEqual(['Fixed', 'CDRom', 'Removable', 'Network', 'Ram']);
+    expect(q.parseFsutilDriveType('C: - Festplatte')).toBeNull();
+    expect(q.parseFsutilDriveType('')).toBeNull();
+    expect([...q.parseBusList('S|SATA\r\nD|USB\r\njunk')]).toEqual([['S', 'SATA'], ['D', 'USB']]);
+    expect([...q.parseDriveList('C|Fixed|NVMe\nD|Fixed|USB\nE|Network|\n')]).toEqual([['C', 'Fixed'], ['D', 'Removable (USB disk)'], ['E', 'Network']]);
   });
-  test('success: a single probe run answers all drives and is remembered', async () => {
-    let runs = 0;
-    const p = q.createDriveProbe({ run: async () => { runs++; return LIST; } });
-    await p.prefetch(['C:\\a', 'S:\\b', 'D:\\c']);
-    await p.prefetch(['C:\\again']);
-    expect(runs).toBe(1);
-    expect([p.type('C'), p.type('S'), p.type('D'), p.type('E')]).toEqual(['Fixed', 'Fixed', 'Removable (USB disk)', 'Network']);
-  });
-  test('probes never overlap, even when prefetch is called concurrently for different drives', async () => {
-    let active = 0, max = 0, runs = 0;
-    const p = q.createDriveProbe({ run: async () => { runs++; active++; max = Math.max(max, active); await new Promise(r => setTimeout(r, 30)); active--; return LIST; } });
-    await Promise.all([p.prefetch(['C:\\x']), p.prefetch(['S:\\x']), p.prefetch(['D:\\x'])]);
-    expect(max).toBe(1);
-    expect(p.type('S')).toBe('Fixed');
-  });
-  test('a timeout is not remembered for the session: it is retried after 30 s and the first reason is reported meanwhile', async () => {
-    let t = 1000, mode = 'timeout', runs = 0;
-    const p = q.createDriveProbe({ now: () => t, run: async () => { runs++; if (mode === 'timeout') throw new Error('timed out after 10 s'); return LIST; } });
-    await p.prefetch(['S:\\x']);
-    expect(p.type('S')).toBeNull(); expect(p.reason('S')).toMatch(/timed out/);
-    mode = 'ok'; t += 5000;
-    await p.prefetch(['S:\\x']);                        // inside the 30 s window: no new process
-    expect(runs).toBe(1); expect(p.type('S')).toBeNull();
-    t += 31000;
-    await p.prefetch(['S:\\x']);                        // window over: retried and now known
-    expect(runs).toBe(2); expect(p.type('S')).toBe('Fixed'); expect(p.reason('S')).toBeNull();
-  });
-  test('failure and an empty answer give "not allowed" with a reason; an unlisted drive is reported as such', async () => {
-    const p1 = q.createDriveProbe({ run: async () => { throw new Error('powershell.exe not found'); } });
-    await p1.prefetch(['D:\\x']);
-    expect(p1.type('D')).toBeNull(); expect(p1.reason('D')).toMatch(/not found/);
-    const p2 = q.createDriveProbe({ run: async () => '' });
-    await p2.prefetch(['D:\\x']);
-    expect(p2.reason('D')).toMatch(/no drives/);
-    const p3 = q.createDriveProbe({ run: async () => 'C|Fixed|SATA\n' });
-    await p3.prefetch(['Z:\\x']);
-    expect(p3.type('Z')).toBeNull(); expect(p3.reason('Z')).toMatch(/not listed/);
-    expect(p3.type('C')).toBe('Fixed');                 // successes in the same answer are still kept
-  });
-  test('a known drive is never re-probed even after another drive failed to appear', async () => {
-    let runs = 0;
-    const p = q.createDriveProbe({ run: async () => { runs++; return LIST; } });
+  test('the system drive is allowed as soon as fsutil says Fixed, without waiting for the bus check', async () => {
+    let busCalls = 0;
+    const p = mk2({ runBus: async () => { busCalls++; return 'S|SATA\n'; } });
     await p.prefetch(['C:\\x']);
-    await p.prefetch(['C:\\y']);
-    expect(runs).toBe(1);
+    expect(p.type('C')).toBe('Fixed');
+    expect(busCalls).toBe(0);                             // not even needed for C:
+  });
+  test('a non-system disk stays "not allowed" until the bus type is known, then follows it (USB is removable)', async () => {
+    let release; const gate = new Promise(r => { release = r; });
+    const p = mk2({ runBus: async () => { await gate; return 'S|SATA\nD|USB\n'; } });
+    await p.prefetch(['S:\\x', 'D:\\x']);   // the bus check runs in the background; prefetch does not wait for it
+    expect(p.type('S')).toBeNull(); expect(p.reason('S')).toMatch(/USB\/SD media/);
+    release(); await p.startBusCheck();
+    expect(p.type('S')).toBe('Fixed'); expect(p.type('D')).toBe('Removable (USB disk)');
+  });
+  test('a failed bus check never blocks the system drive; non-system disks are retried after 30 s', async () => {
+    let t = 0, fail = true, calls = 0;
+    const p = mk2({ now: () => t, runBus: async () => { calls++; if (fail) throw new Error('timed out after 15 s'); return 'S|SATA\n'; } });
+    await p.prefetch(['C:\\a', 'S:\\b']);
+    await p.startBusCheck();                               // let the failing background check finish
+    expect(p.type('C')).toBe('Fixed'); expect(p.type('S')).toBeNull(); expect(p.reason('S')).toMatch(/failed/);
+    t += 5000; await p.startBusCheck(); expect(calls).toBe(1);
+    t += 31000; fail = false; await p.startBusCheck();
+    expect(calls).toBe(2); expect(p.type('S')).toBe('Fixed');
+  });
+  test('an fsutil timeout or unreadable (localized) output falls back to the .NET listing; both failing gives a short reason', async () => {
+    const p1 = mk2({ runFsutil: async () => 'C: - Festplatte', runDotnet: async () => 'C|Fixed|\n' });
+    await p1.prefetch(['C:\\x']); expect(p1.type('C')).toBe('Fixed');
+    const p2 = mk2({ runFsutil: async () => { throw new Error('timed out after 5 s'); }, runDotnet: async () => { throw new Error('timed out after 10 s'); } });
+    await p2.prefetch(['C:\\x']);
+    expect(p2.type('C')).toBeNull();
+    expect(p2.reason('C')).toBe('timed out after 5 s; then timed out after 10 s');
+    const p3 = mk2({ runFsutil: async () => { throw new Error('boom'); }, runDotnet: async () => 'S|Fixed|\n' });
+    await p3.prefetch(['Z:\\x']); expect(p3.reason('Z')).toMatch(/not listed/);
+  });
+  test('probes never overlap and a failure is retried only after 30 s', async () => {
+    let active = 0, max = 0, runs = 0, t = 0, mode = 'fail';
+    const p = mk2({ now: () => t, runFsutil: async (l) => { runs++; active++; max = Math.max(max, active); await new Promise(r => setTimeout(r, 20)); active--; if (mode === 'fail') throw new Error('x'); return l + ': - Fixed Drive'; }, runDotnet: async () => { throw new Error('y'); } });
+    await Promise.all([p.prefetch(['C:\\a']), p.prefetch(['S:\\a']), p.prefetch(['D:\\a'])]);
+    expect(max).toBe(1);
+    const n = runs; await p.prefetch(['C:\\a']); expect(runs).toBe(n);   // inside the 30 s window
+    t += 31000; mode = 'ok'; await p.prefetch(['C:\\a']); expect(p.type('C')).toBe('Fixed');
+    const m = runs; await p.prefetch(['C:\\a']); expect(runs).toBe(m);   // a success is remembered
   });
 });
 
