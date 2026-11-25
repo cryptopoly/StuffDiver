@@ -10,6 +10,16 @@ const path = require('path');
 const crypto = require('crypto');
 
 const QDIR = '.StuffDiverQuarantine';
+// 0.5.0: Windows quarantine is limited to the SYSTEM drive (%USERPROFILE%\.StuffDiverQuarantine, which inherits the profile's ACL).
+// Every other Windows drive uses the Recycle Bin. The per-user folder + icacls/SDDL/owner code below is kept but switched off.
+// Known bugs to fix before re-enabling (found on real NTFS):
+//  1. `icacls /save` writes UTF-16LE WITHOUT a BOM: decode as UTF-16LE when byte[1] === 0, not only on an FF FE BOM.
+//  2. A folder left behind by a timed-out ACL step keeps the inherited "Authenticated Users:Modify": create it with the ACL applied
+//     inherit-safe/atomically, and re-apply the ACL to an existing folder that is ours instead of refusing it forever.
+//  3. The `dir /q` owner column is truncated to 23 characters and breaks on names with spaces (TrustedInstaller, DESKTOP-X\john smith):
+//     read the owner from the SDDL `O:` field of `icacls /save` instead.
+const WINDOWS_SECONDARY_DRIVE_QUARANTINE = false;
+const SECONDARY_DRIVE_REASON = 'on this drive undo uses the Recycle Bin (Windows quarantine is limited to the system drive in this version)';
 const RETENTION_DAYS = 14;
 const MANIFEST = 'manifest.json';
 const RUN_RE = /^\d{4}-\d{2}-\d{2}_\d{6}_[0-9a-f]{8}$/;
@@ -44,6 +54,9 @@ function chooseRoot(itemPath, ctx) {
     const d = /^([a-zA-Z]):[\\/]/.exec(itemPath);
     if (!d) return { error: 'it is not on a local drive letter (network paths are never quarantined)' };
     // Only fixed local disks: mapped network drives, removable drives and unknown types are never used.
+    const hd0 = /^([a-zA-Z]):/.exec(ctx.home || '');
+    const onHomeDrive = !!hd0 && hd0[1].toLowerCase() === d[1].toLowerCase();
+    if (!onHomeDrive && !(ctx.secondaryDrives !== undefined ? ctx.secondaryDrives : WINDOWS_SECONDARY_DRIVE_QUARANTINE)) return { error: SECONDARY_DRIVE_REASON };
     const kind = ctx.driveType ? ctx.driveType(d[1].toUpperCase()) : null;
     if (kind == null) return { error: `could not determine the drive type of ${d[1].toUpperCase()}: (${(ctx.driveTypeReason && ctx.driveTypeReason(d[1].toUpperCase())) || 'no answer'}), so it is moved to the Recycle Bin instead of quarantine` };
     if (kind !== 'Fixed') return { error: `drive ${d[1].toUpperCase()}: is not a fixed local disk (${kind}), so it is never used for quarantine` };
@@ -428,7 +441,7 @@ function createDriveProbe(opts) {
         const r = await serial(() => probeLetter(l));
         if (r.type) { known.set(l, r.type); failed.delete(l); } else failed.set(l, { t: now(), reason: r.error });
       }
-      if (letters.some(l => l !== sys && known.get(l) === 'Fixed')) api.startBusCheck();   // needed for non-system disks only
+      if (opts.busCheck !== false && letters.some(l => l !== sys && known.get(l) === 'Fixed')) api.startBusCheck();   // needed for non-system disks only
     },
     // Best effort, in the background (also called once at app start). Retried after a failure once 30 s have passed.
     startBusCheck() {
@@ -529,4 +542,4 @@ function createDirSecurer(opts) {
   };
 }
 
-module.exports = { parseSddl, createDirSecurer, parseDriveList, parseFsutilDriveType, parseBusList, createDriveProbe, DRIVE_FAIL_MS, QDIR, RETENTION_DAYS, MANIFEST, RUN_RE, isQuarantinePath, runDirName, newRunId, chooseRoot, createRun, moveIn, setItemStatus, writeManifest, readRun, listRuns, restoreItem, markRestored, readRegistry, addRegistry, registryPath };
+module.exports = { WINDOWS_SECONDARY_DRIVE_QUARANTINE, SECONDARY_DRIVE_REASON, parseSddl, createDirSecurer, parseDriveList, parseFsutilDriveType, parseBusList, createDriveProbe, DRIVE_FAIL_MS, QDIR, RETENTION_DAYS, MANIFEST, RUN_RE, isQuarantinePath, runDirName, newRunId, chooseRoot, createRun, moveIn, setItemStatus, writeManifest, readRun, listRuns, restoreItem, markRestored, readRegistry, addRegistry, registryPath };

@@ -216,7 +216,7 @@ function showMainWindow() {
 if (E2E) global.__e2eShowMainWindow = showMainWindow;
 
 app.whenReady().then(async () => {
-  if (!cliOpts && !E2E && process.platform === 'win32') primeSid(); driveProbe.startBusCheck();   // best effort, in the background: learns which disks are USB/SD
+  if (!cliOpts && !E2E && process.platform === 'win32') primeSid(); if (quarantine.WINDOWS_SECONDARY_DRIVE_QUARANTINE) driveProbe.startBusCheck();   // best effort, in the background: learns which disks are USB/SD
   if (cliOpts) {
     const code = await runCli(cliOpts, { version: app.getVersion() }).catch((e) => {
       process.stderr.write(`Error: ${e.message}\n`);
@@ -1197,6 +1197,7 @@ const runTool = (cmd, args, ms) => new Promise((resolve, reject) => execFile(cmd
 const DRIVE_SCRIPT = "[System.IO.DriveInfo]::GetDrives() | ForEach-Object { \"$($_.Name.Substring(0,1))|$($_.DriveType)|\" }";
 const BUS_SCRIPT = "$ErrorActionPreference='SilentlyContinue'; Get-Partition | Where-Object { $_.DriveLetter } | ForEach-Object { \"$($_.DriveLetter)|$((Get-Disk -Number $_.DiskNumber).BusType)\" }";
 const driveProbe = quarantine.createDriveProbe({
+  busCheck: quarantine.WINDOWS_SECONDARY_DRIVE_QUARANTINE,   // the USB/SD check only matters for non-system drives
   systemDrive: ((process.env.SystemDrive || 'C:')[0] || 'C'),
   runFsutil: (l) => runTool('fsutil.exe', ['fsinfo', 'drivetype', l + ':'], 5000),
   runDotnet: () => runTool('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', DRIVE_SCRIPT], 10000),
@@ -1418,7 +1419,7 @@ handleTrusted('delete-folders', async (event, folderPaths, source) => {
       const scanRootOf = (p) => [...approvedFolderPaths].find(r => cleanupFolders.isInside(p, r, ci)) || lastScanFolder || null;
       for (const [root, list] of groups) {
         try {
-          if (process.platform === 'win32' && !(E2E && typeof global.__e2eSecureDir === 'function') && path.basename(root) === qctx.owner) await dirSecurer.ensure(root);   // async: never blocks the UI
+          if (quarantine.WINDOWS_SECONDARY_DRIVE_QUARANTINE && process.platform === 'win32' && !(E2E && typeof global.__e2eSecureDir === 'function') && path.basename(root) === qctx.owner) await dirSecurer.ensure(root);   // async: never blocks the UI
           const items = list.map(c => {
             let dev = ''; try { dev = fs.lstatSync(c.path, { bigint: true }).dev; } catch (e) { throw new Error('cannot read ' + c.path); }
             return { n: ++n, originalPath: c.path, originalRealPath: c.logPath || c.path, dev, size: c.size, files: c.files, category: c.kind };
