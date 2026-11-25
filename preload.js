@@ -20,6 +20,8 @@ contextBridge.exposeInMainWorld('api', {
   deleteFolders: (paths, source) => ipcRenderer.invoke('delete-folders', paths, source),
   listQuarantine: () => ipcRenderer.invoke('quarantine-list'),
   restoreQuarantine: (runId, opts) => ipcRenderer.invoke('quarantine-restore', runId, opts),
+  revealQuarantineBroken: (name) => ipcRenderer.invoke('quarantine-reveal-broken', name),
+  trashQuarantineBroken: (name) => ipcRenderer.invoke('quarantine-trash-broken', name),
   trashQuarantine: (runIds) => ipcRenderer.invoke('quarantine-trash', runIds),
   cancelFolderDelete: () => ipcRenderer.invoke('cancel-folder-delete'),
   onFolderDeleteProgress: (callback) => ipcRenderer.on('folder-delete-progress', (_e, data) => callback(data)),

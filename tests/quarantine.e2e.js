@@ -4,7 +4,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const q = require('../quarantine');
-const { requireUsableFixtures, launch, scanViaUi, fixtureParent, autoMarkers } = require('./helpers');
+const { requireUsableFixtures, launch, scanViaUi, fixtureParent, autoMarkers, linkOrSkip } = require('./helpers');
 
 const OLD = new Date(Date.now() - 90 * 86400000);
 const WIN = process.platform === 'win32';
@@ -53,21 +53,23 @@ test.describe('unit: where the quarantine goes', () => {
   });
   test('Windows: system drive uses the profile, other drives use their own top folder, UNC is refused', () => {
     const fsx = fakeFs({ 'C:\\Users\\bob\\proj\\node_modules': { dev: 1 }, 'C:\\Users\\bob': { dev: 1 }, 'C:\\Users\\bob\\.StuffDiverQuarantine': { dev: 1 }, 'D:\\work\\node_modules': { dev: 2 }, 'D:\\': { dev: 2 } });
-    const ctx = { platform: 'win32', home: 'C:\\Users\\bob', fsx, rootOk: none, mounts: () => [] };
+    const ctx = { platform: 'win32', home: 'C:\\Users\\bob', fsx, rootOk: none, mounts: () => [], driveType: () => 'Fixed', owner: 'u-abc123' };
     expect(q.chooseRoot('C:\\Users\\bob\\proj\\node_modules', ctx).root).toBe('C:\\Users\\bob\\.StuffDiverQuarantine');
-    expect(q.chooseRoot('D:\\work\\node_modules', ctx).root).toBe('D:\\.StuffDiverQuarantine');
+    expect(q.chooseRoot('D:\\work\\node_modules', ctx).root).toBe('D:\\.StuffDiverQuarantine\\u-abc123');   // shared drive top: per-user subfolder
     expect(q.chooseRoot('\\\\server\\share\\x\\node_modules', { ...ctx, fsx: fakeFs({ '\\\\server\\share\\x\\node_modules': { dev: 3 } }) }).error).toMatch(/drive letter/);
+    for (const t of ['Network', 'Removable', 'CDRom', null]) expect(q.chooseRoot('D:\\work\\node_modules', { ...ctx, driveType: () => t }).error, String(t)).toMatch(/not a fixed local disk/);
+    expect(q.chooseRoot('C:\\Users\\bob\\proj\\node_modules', { ...ctx, driveType: undefined }).error).toMatch(/not a fixed local disk/);
   });
   test('Windows: a drive that differs in case still counts as the system drive; a cloud-synced or protected root is refused', () => {
     const fsx = fakeFs({ 'c:\\Users\\bob\\p\\node_modules': { dev: 1 }, 'C:\\Users\\bob': { dev: 1 } });
-    const ctx = { platform: 'win32', home: 'C:\\Users\\bob', fsx, rootOk: none, mounts: () => [] };
+    const ctx = { platform: 'win32', home: 'C:\\Users\\bob', fsx, rootOk: none, mounts: () => [], driveType: () => 'Fixed' };
     expect(q.chooseRoot('c:\\Users\\bob\\p\\node_modules', ctx).root).toBe('C:\\Users\\bob\\.StuffDiverQuarantine');
     const refused = q.chooseRoot('c:\\Users\\bob\\p\\node_modules', { ...ctx, rootOk: () => 'is cloud-synced' });
     expect(refused.error).toMatch(/no safe location.*cloud-synced/);
   });
   test('Windows: same drive letter but a different volume (mounted folder) is refused, not renamed across', () => {
     const fsx = fakeFs({ 'C:\\mnt\\vol\\node_modules': { dev: 9 }, 'C:\\Users\\bob': { dev: 1 } });
-    expect(q.chooseRoot('C:\\mnt\\vol\\node_modules', { platform: 'win32', home: 'C:\\Users\\bob', fsx, rootOk: none, mounts: () => [] }).error).toMatch(/different volume/);
+    expect(q.chooseRoot('C:\\mnt\\vol\\node_modules', { platform: 'win32', home: 'C:\\Users\\bob', fsx, rootOk: none, mounts: () => [], driveType: () => 'Fixed' }).error).toMatch(/different volume/);
   });
   test('POSIX: home first, else the volume top from the mount table, never "/" and never a foreign-owned root', () => {
     const fsx = fakeFs({ '/Volumes/X/p/node_modules': { dev: 7 }, '/Volumes/X': { dev: 7 }, '/Users/a': { dev: 1 } });
@@ -76,6 +78,8 @@ test.describe('unit: where the quarantine goes', () => {
     expect(q.chooseRoot('/Volumes/X/p/node_modules', { ...ctx, mounts: () => ['/'] }).error).toMatch(/different volume/);
     const owned = fakeFs({ '/Volumes/X/p/node_modules': { dev: 7 }, '/Volumes/X/.StuffDiverQuarantine': { dev: 7, uid: 0 }, '/Users/a': { dev: 1 } });
     expect(q.chooseRoot('/Volumes/X/p/node_modules', { ...ctx, fsx: owned }).error).toMatch(/belongs to another user/);
+    expect(q.chooseRoot('/Volumes/X/p/node_modules', { ...ctx, owner: 'uid-501', fsx: fakeFs({ '/Volumes/X/p/node_modules': { dev: 7 }, '/Volumes/X': { dev: 7 }, '/Users/a': { dev: 1 } }) }).root).toBe('/Volumes/X/.StuffDiverQuarantine/uid-501');
+    expect(q.chooseRoot('/Volumes/X/p/node_modules', { ...ctx, volumeProblem: (r) => (r.startsWith('/Volumes/X') ? 'is on a network or non-local volume (smbfs)' : null) }).error).toMatch(/smbfs/);
     const link = fakeFs({ '/Volumes/X/p/node_modules': { dev: 7 }, '/Volumes/X/.StuffDiverQuarantine': { dev: 7, link: true }, '/Users/a': { dev: 1 } });
     expect(q.chooseRoot('/Volumes/X/p/node_modules', { ...ctx, fsx: link }).error).toMatch(/not a plain folder/);
   });
@@ -93,6 +97,9 @@ test.describe('unit: manifests are never trusted blindly', () => {
       const plan = { root: path.join(root, q.QDIR), runId: 'ab12cd34', t: Date.now(), appVersion: '0', scanRoot: root, items: [{ originalPath: path.join(root, 'p', 'node_modules'), dev: 1, size: 5, files: 1, category: 'node_modules' }] };
       const m = q.createRun(plan, ctx);
       expect(m.items[0].status).toBe('planned');
+      q.setItemStatus(m, m.items[0], 'skipped', null, ctx);
+      expect(fs.readdirSync(m.runDir).sort()).toEqual(['manifest.json', 'manifest.json.bak']);   // previous good copy kept, no stray temp files
+      m.items[0].status = 'planned';
       const evil = JSON.parse(fs.readFileSync(path.join(m.runDir, 'manifest.json'), 'utf8'));
       evil.items[0].quarantinePath = path.join(root, 'somewhere-else');
       evil.items.push({ n: 2, name: '..', originalPath: path.join(root, '..'), status: 'quarantined' });
@@ -102,6 +109,8 @@ test.describe('unit: manifests are never trusted blindly', () => {
       expect(r.items).toHaveLength(1);
       expect(r.items[0].quarantinePath).toBe(path.join(m.runDir, '1', 'node_modules'));
       evil.runId = 'ffffffff'; fs.writeFileSync(path.join(m.runDir, 'manifest.json'), JSON.stringify(evil));
+      expect(q.readRun(m.runDir, ctx).usedBackup).toBe(true);   // the mismatching file is ignored, the good .bak is used
+      fs.writeFileSync(path.join(m.runDir, 'manifest.json.bak'), JSON.stringify(evil));
       expect(q.readRun(m.runDir, ctx).ok).toBe(false);
     } finally { fs.rmSync(root, { recursive: true, force: true }); }
   });
@@ -184,7 +193,7 @@ test('the manifest is on disk (all items planned) BEFORE the first move, and a c
       expect(orig !== inQ, `${it.originalPath} must be in exactly one place`).toBe(true);   // never lost, never in both
       expect(inQ).toBe(it.status === 'quarantined');
     }
-    expect(fs.existsSync(path.join(dirs[0], 'manifest.json.tmp'))).toBe(false);
+    expect(fs.readdirSync(dirs[0]).filter(n => n.endsWith('.tmp'))).toEqual([]);
     // The surviving state is restorable after the next start.
     const again = await launch(root, { SD_TEST_QUARANTINE: '1', STUFFDIVER_E2E_QHOME: qhome });
     try {
@@ -289,10 +298,15 @@ test('restore reports a changed quarantine item and a missing one, and still res
     const r = await restore(page, res.runId);
     expect(r.restored).toBe(0);
     expect(r.results.find(v => v.id === x.n)).toMatchObject({ ok: false, state: 'mismatch' });
-    expect(r.results.find(v => v.id === x.n).reason).toMatch(/no longer matches the manifest/);
+    expect(r.results.find(v => v.id === x.n).reason).toMatch(/differs from what was moved in/);
     expect(r.results.find(v => v.id === y.n)).toMatchObject({ ok: false, state: 'missing' });
+    expect(r.results.find(v => v.id === x.n)).toMatchObject({ canRestoreAnyway: true });
     expect(fs.existsSync(path.join(x.quarantinePath, 'dep/extra.txt'))).toBe(true);               // left untouched
     expect(fs.existsSync(x.originalPath)).toBe(false);
+    // A mismatch never makes restore impossible: after explicit confirmation it is put back, extra file included.
+    const forced = await restore(page, res.runId, { ids: [x.n], anyway: true });
+    expect(forced.restored).toBe(1);
+    expect(fs.existsSync(path.join(x.originalPath, 'dep/extra.txt'))).toBe(true);
   });
 });
 
@@ -368,7 +382,7 @@ test('the quarantine folder is never scanned and never offered, whatever it cont
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-test('expired runs (older than 14 days) offer only "move to Trash"; Empty quarantine confirms with the total size and uses the Trash', async () => {
+test('expired runs (older than 14 days) keep Restore and add "move to Trash"; Empty quarantine confirms with the total size and uses the Trash', async () => {
   await withApp(two, async ({ app, page, root, qhome, trashDir, userData }) => {
     await FAKE_TRASH(app, trashDir);
     const res = await del(page, [path.join(root, 'a/node_modules')]);
@@ -385,7 +399,8 @@ test('expired runs (older than 14 days) offer only "move to Trash"; Empty quaran
     await expect(page.locator('#quar-overlay')).toBeVisible();
     const old = page.locator(`.quar-run[data-run="${res.runId}"]`), nw = page.locator(`.quar-run[data-run="${fresh.runId}"]`);
     await expect(old).toContainText('Expired: tap to move to Trash');
-    await expect(old.locator('.quar-restore-run, .quar-restore-item')).toHaveCount(0);
+    await expect(old.locator('.quar-restore-run')).toHaveCount(1);   // expired only adds the move-to-Trash suggestion
+    await expect(old.locator('.quar-restore-item')).toHaveCount(1);
     await expect(nw.locator('.quar-restore-run')).toHaveCount(1);
     await expect(nw.locator('.quar-restore-item')).toHaveCount(1);
     await expect(page.locator('#quar-summary')).toContainText('Quarantined items still use disk space until emptied');
@@ -515,5 +530,186 @@ test('UI: a refused restore shows the reason and offers "Restore beside it"', as
     await expect(page.locator('#quar-notice')).toContainText('Restored 1 of 1');
     expect(fs.existsSync(nm + ' (restored)')).toBe(true);
     expect(fs.readdirSync(nm)).toEqual(['mine.txt']);
+  });
+});
+
+// ---------- adversarial-review fixes ----------
+test('Q1: a file written while the confirmation was open does not make restore impossible', async () => {
+  await withApp((r) => proj(r, 'p'), async ({ app, page, root }) => {
+    const nm = path.join(root, 'p/node_modules');
+    await app.evaluate((_e, d) => { global.__e2eConfirm = async () => { global.__e2eRequire('fs').writeFileSync(d + '/dep/late.txt', 'written while the dialog was open'); return true; }; }, nm);
+    const res = await del(page, [nm]);
+    expect(res.quarantined).toBe(1);
+    const r = await restore(page, res.runId);
+    expect(r).toMatchObject({ restored: 1, failed: 0 });
+    expect(fs.readFileSync(path.join(nm, 'dep/late.txt'), 'utf8')).toMatch(/dialog was open/);
+  });
+});
+
+test('Q1: a later change shows recorded vs now and offers "Restore anyway" in the window (with a confirm)', async () => {
+  await withApp((r) => proj(r, 'p'), async ({ page, root, qhome }) => {
+    const nm = path.join(root, 'p/node_modules');
+    await del(page, [nm]);
+    const man = manifestOf(runDirs(qhome)[0]);
+    fs.writeFileSync(path.join(man.items[0].quarantinePath, 'dep/dev-server.log'), 'wrote through an open file');
+    const dialogs = [];
+    page.on('dialog', d => { dialogs.push(d.message()); d.accept(); });
+    await page.locator('#tools-btn').click();
+    await page.locator('[data-tool="quarantine"]').click();
+    await page.locator('.quar-restore-item').click();
+    await expect(page.locator('.quar-item')).toContainText('differs from what was moved in');
+    await page.locator('.quar-restore-anyway').click();
+    await expect(page.locator('#quar-notice')).toContainText('Restored 1 of 1');
+    expect(dialogs[0]).toMatch(/files .* bytes now/);
+    expect(fs.existsSync(path.join(nm, 'dep/dev-server.log'))).toBe(true);
+  });
+});
+
+test('Q2: runs owned by another account are neither listed, restored nor emptied', async () => {
+  await withApp(two, async ({ page, root, qhome }) => {
+    const mine = await del(page, [path.join(root, 'a/node_modules')]);
+    const dir = runDirs(qhome)[0], man = manifestOf(dir);
+    expect(man.owner).toBeTruthy();
+    man.owner = 'someone-else'; fs.writeFileSync(path.join(dir, 'manifest.json'), JSON.stringify(man));
+    expect((await list(page)).runs).toHaveLength(0);
+    expect((await list(page)).unreadableRuns).toHaveLength(0);
+    expect((await restore(page, mine.runId)).error).toMatch(/no longer exists/);
+    expect((await page.evaluate(() => window.api.trashQuarantine('all'))).error).toBe('Nothing to move.');
+    expect(fs.existsSync(man.items[0].quarantinePath)).toBe(true);
+  });
+});
+
+test('Q3: network, removable or unknown volumes are never used: the item goes to the Trash and the result says why', async () => {
+  await withApp((r) => proj(r, 'p'), async ({ app, page, root, trashDir, qhome }) => {
+    await FAKE_TRASH(app, trashDir);
+    await app.evaluate(() => { global.__e2eDriveType = () => 'Network'; global.__e2eVolumeProblem = () => 'is on a network or non-local volume (smbfs)'; });
+    const res = await del(page, [path.join(root, 'p/node_modules')]);
+    expect(res).toMatchObject({ deleted: 1, quarantined: 0, trashedInstead: 1 });
+    expect(res.trashedInsteadReason).toMatch(/network|not a fixed local disk/);
+    expect(runDirs(qhome)).toEqual([]);
+  });
+});
+
+test('Q4: a run whose manifest is corrupt is still listed (path, size, actions); manifest.json.bak is used when the main file is damaged', async () => {
+  await withApp(two, async ({ app, page, root, qhome, trashDir, userData }) => {
+    await FAKE_TRASH(app, trashDir);
+    const res = await del(page, [path.join(root, 'a/node_modules'), path.join(root, 'b/node_modules')]);
+    const dir = runDirs(qhome)[0];
+    expect(fs.existsSync(path.join(dir, 'manifest.json.bak'))).toBe(true);
+    fs.writeFileSync(path.join(dir, 'manifest.json'), '{ not json');
+    const viaBak = await list(page);
+    expect(viaBak.runs).toHaveLength(1); expect(viaBak.unreadableRuns).toHaveLength(0);
+    fs.writeFileSync(path.join(dir, 'manifest.json.bak'), 'garbage too');
+    const l = await list(page);
+    expect(l.runs).toHaveLength(0);
+    expect(l.unreadableRuns).toHaveLength(1);
+    expect(l.unreadableRuns[0]).toMatchObject({ name: path.basename(dir), path: dir });
+    expect(l.unreadableRuns[0].size).toBeGreaterThan(0);
+    expect(l.totalSize).toBeGreaterThan(0);
+    await page.locator('#tools-btn').click();
+    await page.locator('[data-tool="quarantine"]').click();
+    await expect(page.locator('.quar-unreadable')).toContainText('Unreadable quarantine run');
+    await expect(page.locator('#quar-empty')).toBeHidden();
+    await expect(page.locator('.quar-reveal-broken')).toHaveCount(1);
+    await page.locator('.quar-trash-broken').click();
+    await expect(page.locator('#quar-notice')).toContainText('Moved the unreadable run to the Trash');
+    expect(fs.existsSync(dir)).toBe(false);
+    expect(fs.readdirSync(trashDir)).toHaveLength(1);
+    expect(readLog(userData).find(e => e.source === 'quarantine-unreadable')).toMatchObject({ status: 'trashed', type: 'quarantine-run' });
+    void res;
+  });
+});
+
+test('Q5: an expired run can still be restored (UI and IPC)', async () => {
+  await withApp((r) => proj(r, 'p'), async ({ page, root, qhome }) => {
+    const nm = path.join(root, 'p/node_modules');
+    const res = await del(page, [nm]);
+    const dir = runDirs(qhome)[0], man = manifestOf(dir);
+    man.t = Date.now() - 40 * 86400000; fs.writeFileSync(path.join(dir, 'manifest.json'), JSON.stringify(man));
+    await page.locator('#tools-btn').click();
+    await page.locator('[data-tool="quarantine"]').click();
+    await expect(page.locator('.quar-run')).toContainText('expired');
+    await page.locator('.quar-restore-run').click();
+    await expect(page.locator('#quar-notice')).toContainText('Restored 1 of 1');
+    expect(fs.existsSync(path.join(nm, 'dep/index.js'))).toBe(true);
+    void res;
+  });
+});
+
+test('Q6: a link planted in a run slot cannot redirect what restore moves', async () => {
+  await withApp((r) => { proj(r, 'p'); mk(r, 'elsewhere/node_modules/x.txt', 'precious'); }, async ({ page, root, qhome }) => {
+    const nm = path.join(root, 'p/node_modules');
+    const res = await del(page, [nm]);
+    const dir = runDirs(qhome)[0], slot = path.join(dir, '1');
+    const aside = path.join(root, 'aside-slot');
+    fs.renameSync(slot, aside);
+    linkOrSkip(test, path.join(root, 'elsewhere'), slot, 'dir');
+    const man = manifestOf(dir); delete man.items[0].files; delete man.items[0].size; fs.writeFileSync(path.join(dir, 'manifest.json'), JSON.stringify(man));
+    const r = await restore(page, res.runId, { anyway: true });
+    expect(r.restored).toBe(0);
+    expect(r.results[0]).toMatchObject({ ok: false });
+    expect(r.results[0].state).toMatch(/refused|missing/);
+    expect(fs.existsSync(path.join(root, 'elsewhere/node_modules/x.txt'))).toBe(true);
+    expect(fs.existsSync(nm)).toBe(false);
+  });
+});
+
+test('Q6: missing size/file count in the manifest cannot be verified: refused unless the user confirms "restore anyway"', async () => {
+  await withApp((r) => proj(r, 'p'), async ({ page, root, qhome }) => {
+    const nm = path.join(root, 'p/node_modules');
+    const res = await del(page, [nm]);
+    const dir = runDirs(qhome)[0], man = manifestOf(dir); delete man.items[0].files; delete man.items[0].size;
+    fs.writeFileSync(path.join(dir, 'manifest.json'), JSON.stringify(man));
+    const r1 = await restore(page, res.runId);
+    expect(r1.results[0]).toMatchObject({ ok: false, state: 'mismatch', canRestoreAnyway: true });
+    expect((await restore(page, res.runId, { ids: [1], anyway: true })).restored).toBe(1);
+  });
+});
+
+test('Q7: a planted link at the old fixed temp-file name is never written through', async () => {
+  await withApp((r) => proj(r, 'p'), async ({ page, root, qhome }) => {
+    const res = await del(page, [path.join(root, 'p/node_modules')]);
+    const dir = runDirs(qhome)[0], victim = path.join(root, 'victim.txt');
+    fs.writeFileSync(victim, 'original');
+    linkOrSkip(test, victim, path.join(dir, 'manifest.json.tmp'), 'file');
+    expect((await restore(page, res.runId)).restored).toBe(1);   // rewrites the manifest
+    expect(fs.readFileSync(victim, 'utf8')).toBe('original');
+  });
+});
+
+test('Q8: recreating a missing parent never goes through a link', async () => {
+  await withApp((r) => { mk(r, 'deep/er/package.json', '{}'); mk(r, 'deep/er/package-lock.json', '{}'); mk(r, 'deep/er/node_modules/d/i.js'); fs.mkdirSync(path.join(r, 'outside')); }, async ({ page, root }) => {
+    const a = path.join(root, 'deep/er/node_modules');
+    const res = await del(page, [a]);
+    fs.renameSync(path.join(root, 'deep'), path.join(root, 'deep-moved'));
+    linkOrSkip(test, path.join(root, 'outside'), path.join(root, 'deep'), 'dir');
+    const r = await restore(page, res.runId, { recreateParent: true });
+    expect(r.restored).toBe(0);
+    expect(r.results[0]).toMatchObject({ ok: false });
+    expect(fs.readdirSync(path.join(root, 'outside'))).toEqual([]);   // nothing was created behind the link
+  });
+});
+
+test('Q9: when the Trash call errors but the run folder is gone, the log says "removed", not "trashed"', async () => {
+  await withApp((r) => proj(r, 'p'), async ({ app, page, root, qhome, userData, trashDir }) => {
+    const res = await del(page, [path.join(root, 'p/node_modules')]);
+    await app.evaluate((_e, d) => { const fsx = global.__e2eRequire('fs'); fsx.mkdirSync(d, { recursive: true }); global.__e2eTrash = async (p) => { fsx.renameSync(p, d + '/x'); throw new Error('The operation was aborted'); }; }, trashDir);
+    const r = await page.evaluate(() => window.api.trashQuarantine('all'));
+    expect(r).toMatchObject({ trashed: 0, removed: 1, failed: 0 });
+    expect(readLog(userData).find(e => e.type === 'quarantine-run')).toMatchObject({ status: 'removed' });
+    expect(runDirs(qhome)).toEqual([]);
+    void res;
+  });
+});
+
+test('restoring an item that was never moved says so', async () => {
+  await withApp((r) => proj(r, 'p'), async ({ page, root, qhome, trashDir }) => {
+    const res = await del(page, [path.join(root, 'p/node_modules')]);
+    const dir = runDirs(qhome)[0], man = manifestOf(dir);
+    man.items[0].status = 'planned'; fs.writeFileSync(path.join(dir, 'manifest.json'), JSON.stringify(man));
+    fs.mkdirSync(trashDir, { recursive: true }); fs.renameSync(path.join(dir, '1'), path.join(trashDir, 'slot'));
+    const r = await restore(page, res.runId, { ids: [1] });
+    expect(r.results[0]).toMatchObject({ ok: false, state: 'never-moved' });
+    expect(r.results[0].reason).toMatch(/never moved/);
   });
 });

@@ -43,10 +43,14 @@ function chooseRoot(itemPath, ctx) {
   if (ctx.platform === 'win32') {
     const d = /^([a-zA-Z]):[\\/]/.exec(itemPath);
     if (!d) return { error: 'it is not on a local drive letter (network paths are never quarantined)' };
+    // Only fixed local disks: mapped network drives, removable drives and unknown types are never used.
+    const kind = ctx.driveType ? ctx.driveType(d[1].toUpperCase()) : null;
+    if (kind !== 'Fixed') return { error: `drive ${d[1].toUpperCase()}: is not a fixed local disk (${kind || 'type unknown'}), so it is never used for quarantine` };
     const hd = /^([a-zA-Z]):/.exec(ctx.home || '');
-    // System drive: inside the user's own profile. Any other drive: its own top folder.
+    // System drive: inside the user's own profile. Any other drive: its own top folder, in a per-user subfolder
+    // (every account on the machine shares that top folder).
     if (hd && hd[1].toLowerCase() === d[1].toLowerCase()) candidates.push(P.join(ctx.home, QDIR));
-    else candidates.push(d[1].toUpperCase() + ':\\' + QDIR);
+    else candidates.push(P.join(d[1].toUpperCase() + ':\\' + QDIR, ctx.owner || ''));
   } else {
     candidates.push(P.join(ctx.home, QDIR));
     const mounts = ctx.mounts ? ctx.mounts() : null;
@@ -59,11 +63,11 @@ function chooseRoot(itemPath, ctx) {
         const pre = m.endsWith('/') ? m : m + '/';
         if ((real === m || real.startsWith(pre)) && (!best || m.length > best.length)) best = m;
       }
-      if (best) candidates.push(P.join(best, QDIR));
+      if (best) candidates.push(P.join(best, QDIR, ctx.owner || ''));   // shared volume top: per-user subfolder
     }
   }
   for (const root of candidates) {
-    const why = ctx.rootOk ? ctx.rootOk(root) : null;
+    const why = (ctx.rootOk ? ctx.rootOk(root) : null) || (ctx.platform !== 'win32' && ctx.volumeProblem ? ctx.volumeProblem(root) : null);
     if (why) { notes.push(`${root}: ${why}`); continue; }
     // Nearest existing ancestor decides the volume (the root itself may not exist yet).
     let probe = root, st = null;
@@ -90,10 +94,14 @@ function writeManifest(runDir, manifest, ctx) {
   const fsx = ctx.fsx || fs;
   const P = pathFor(ctx.platform);
   const finalP = P.join(runDir, MANIFEST);
-  const tmp = P.join(runDir, MANIFEST + '.tmp');
-  const fd = fsx.openSync(tmp, 'w', 0o600);
+  const tmp = P.join(runDir, MANIFEST + '.' + crypto.randomBytes(6).toString('hex') + '.tmp');
+  const c = fs.constants;
+  // Unique name, O_EXCL (and no link following where the OS has O_NOFOLLOW): a planted link cannot redirect the write.
+  const fd = fsx.openSync(tmp, c.O_WRONLY | c.O_CREAT | c.O_EXCL | (c.O_NOFOLLOW || 0), 0o600);
   try { fsx.writeSync(fd, JSON.stringify(manifest, null, 1)); try { fsx.fsyncSync(fd); } catch (e) { /* best effort */ } } finally { fsx.closeSync(fd); }
-  fsx.renameSync(tmp, finalP);   // atomic replace: a crash leaves the old or the new manifest, never half of one
+  // Keep the previous good manifest as .bak: a crash between the two renames leaves .bak, which readRun falls back to.
+  try { fsx.renameSync(finalP, P.join(runDir, MANIFEST + '.bak')); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+  fsx.renameSync(tmp, finalP);
 }
 
 // Creates <root>/<run dir> and writes the manifest with every item `planned`. Throws on any problem (caller falls back to the Trash).
@@ -111,7 +119,7 @@ function createRun(plan, ctx) {
   fsx.mkdirSync(runDir, { mode: 0o700 });   // non-recursive: must not already exist
   const manifest = {
     version: 1, runId: plan.runId, t: plan.t, appVersion: plan.appVersion, platform: ctx.platform, source: plan.source || null,
-    scanRoot: plan.scanRoot || null, root: plan.root, runDir,
+    scanRoot: plan.scanRoot || null, root: plan.root, runDir, owner: ctx.owner || null,
     items: plan.items.map((it, i) => {
       const n = it.n != null ? it.n : i + 1;
       const name = P.basename(it.originalPath);
@@ -149,7 +157,7 @@ function registryPath(userData) { return path.join(userData, 'quarantine-roots.j
 function readRegistry(userData, fsx = fs) {
   try {
     const a = JSON.parse(fsx.readFileSync(registryPath(userData), 'utf8'));
-    return Array.isArray(a) ? a.filter(x => typeof x === 'string' && x.replace(/\\/g, '/').split('/').pop() === QDIR) : [];
+    return Array.isArray(a) ? a.filter(x => typeof x === 'string' && x.replace(/\\/g, '/').split('/').some(seg => seg === QDIR)) : [];
   } catch (e) { return []; }
 }
 function addRegistry(userData, root, fsx = fs) {
@@ -162,19 +170,32 @@ function addRegistry(userData, root, fsx = fs) {
 }
 
 // Reads and validates one run folder. Never trusts the manifest: paths are recomputed from the run folder, name and item number.
+// Falls back to manifest.json.bak when the main file is missing or corrupt. Parsed manifests are cached by size+mtime.
+const manifestCache = new Map();
+function loadManifestFile(fsx, mp) {
+  const st = fsx.statSync(mp, { bigint: true });
+  if (st.size > BigInt(MANIFEST_MAX_BYTES)) throw new Error('manifest too large');
+  const key = `${st.size}:${st.mtimeNs}:${st.ctimeNs}:${st.ino}`;
+  const hit = manifestCache.get(mp);
+  if (hit && hit.key === key) return hit.m;
+  const m = JSON.parse(fsx.readFileSync(mp, 'utf8'));
+  if (manifestCache.size > 200) manifestCache.clear();
+  manifestCache.set(mp, { key, m });
+  return m;
+}
 function readRun(runDir, ctx) {
   const fsx = ctx.fsx || fs;
   const P = pathFor(ctx.platform);
   const base = P.basename(runDir);
   const out = { runDir, root: P.dirname(runDir), name: base, ok: false, items: [] };
-  let m;
-  try {
-    const mp = P.join(runDir, MANIFEST);
-    const st = fsx.statSync(mp);
-    if (st.size > MANIFEST_MAX_BYTES) throw new Error('manifest too large');
-    m = JSON.parse(fsx.readFileSync(mp, 'utf8'));
-  } catch (e) { out.error = 'manifest unreadable (' + (e.code || e.message) + ')'; return out; }
-  if (!m || typeof m !== 'object' || !Array.isArray(m.items) || !RUN_RE.test(base) || !base.endsWith('_' + m.runId)) { out.error = 'manifest does not belong to this folder'; return out; }
+  let m = null, usedBackup = false, err = null;
+  const valid = (x) => x && typeof x === 'object' && Array.isArray(x.items) && RUN_RE.test(base) && base.endsWith('_' + x.runId);
+  for (const [file, bak] of [[MANIFEST, false], [MANIFEST + '.bak', true]]) {
+    try { const x = loadManifestFile(fsx, P.join(runDir, file)); if (valid(x)) { m = x; usedBackup = bak; break; } err = err || 'manifest does not belong to this folder'; }
+    catch (e) { err = err || 'manifest unreadable (' + (e.code || e.message) + ')'; }
+  }
+  if (!m) { out.error = err; return out; }
+  if (m.owner && ctx.owner && m.owner !== ctx.owner) { out.error = 'belongs to another user account'; out.foreign = true; return out; }
   const seen = new Set();
   for (const it of m.items) {
     if (!it || typeof it !== 'object' || !Number.isInteger(it.n) || it.n < 1 || seen.has(it.n)) continue;
@@ -185,6 +206,7 @@ function readRun(runDir, ctx) {
     out.items.push({ ...it, name, quarantinePath: P.join(runDir, String(it.n), name) });   // recomputed, never taken from the file
   }
   out.ok = true;
+  out.usedBackup = usedBackup;
   out.manifest = { ...m, root: out.root, runDir, items: out.items };
   out.runId = m.runId;
   out.t = Number(m.t) || 0;
@@ -204,13 +226,14 @@ function listRuns(roots, ctx, now = Date.now()) {
     for (const e of ents) {
       if (!e.isDirectory() || !RUN_RE.test(e.name)) continue;
       const r = readRun(P.join(root, e.name), ctx);
-      if (!r.ok) { broken.push({ runDir: r.runDir, error: r.error }); continue; }
+      if (!r.ok) { if (!r.foreign) broken.push({ runDir: r.runDir, name: e.name, error: r.error }); continue; }
       let run = byRun.get(r.runId);
       if (!run) { run = { runId: r.runId, t: r.t, scanRoot: r.scanRoot, dirs: [], items: [] }; byRun.set(r.runId, run); }
       run.dirs.push(r.runDir);
+      let slots = new Set();
+      try { slots = new Set(fsx.readdirSync(r.runDir)); } catch (er) { /* unreadable: nothing present */ }   // one readdir instead of one lstat per item
       for (const it of r.items) {
-        let present = false;
-        try { fsx.lstatSync(it.quarantinePath); present = true; } catch (er) { /* missing */ }
+        const present = slots.has(String(it.n));
         run.items.push({ ...it, runDir: r.runDir, present, scanRoot: r.scanRoot });
       }
     }
@@ -238,9 +261,24 @@ async function restoreItem(item, ctx, opts = {}) {
   if (item.status !== 'quarantined' && item.status !== 'planned') return fail('refused', `was not moved to quarantine (status: ${item.status})`);
   const q = item.quarantinePath;
   let qst;
-  try { qst = fsx.lstatSync(q, { bigint: true }); } catch (e) { return fail('missing', 'is no longer in the quarantine folder (it was moved or removed outside Stuff Diver)'); }
+  try { qst = fsx.lstatSync(q, { bigint: true }); } catch (e) {
+    return item.status === 'planned' ? fail('never-moved', 'was never moved into quarantine (nothing to restore; it is still in its original place if it exists)')
+      : fail('missing', 'is no longer in the quarantine folder (it was moved or removed outside Stuff Diver)');
+  }
   if (qst.isSymbolicLink() || !qst.isDirectory()) return fail('mismatch', 'in quarantine is no longer a plain folder');
   if (String(qst.dev) !== String(item.dev)) return fail('mismatch', 'in quarantine is on a different volume than it was (cannot be put back by a rename)');
+  // The slot and the item must be real folders at exactly runDir/n/name (a planted link must not redirect what is moved).
+  if (item.runDir) {
+    const slot = P.join(item.runDir, String(item.n));
+    let sst;
+    try { sst = fsx.lstatSync(slot); } catch (e) { return fail('missing', 'is no longer in the quarantine folder'); }
+    if (sst.isSymbolicLink() || !sst.isDirectory()) return fail('refused', 'its quarantine slot is not a plain folder (a link was found); left untouched');
+    try {
+      const real = fsx.realpathSync.native || fsx.realpathSync;
+      const expected = P.join(real(item.runDir), String(item.n), item.name);
+      if (!same(real(q), expected, ci)) return fail('refused', 'its quarantine location resolves somewhere else than the run folder (a link was found); left untouched');
+    } catch (e) { return fail('refused', 'its quarantine location cannot be resolved (' + (e.code || e.message) + ')'); }
+  }
   const orig = item.originalPath;
   if (isQuarantinePath(orig)) return fail('refused', 'was recorded inside a quarantine folder; restoring there is refused');
   const parent = P.dirname(orig);
@@ -251,8 +289,19 @@ async function restoreItem(item, ctx, opts = {}) {
     const can = !!(ctx.canRecreate && ctx.canRecreate(parent, item.scanRoot));
     if (!opts.recreateParent) return fail('parent-missing', `the original parent folder ${parent} no longer exists`, { canRecreateParent: can });
     if (!can) return fail('refused', `the original parent folder ${parent} no longer exists and cannot be recreated safely (it is outside the folder you scanned, or protected)`);
-    try { fsx.mkdirSync(parent, { recursive: true }); recreated = true; pst = fsx.statSync(parent, { bigint: true }); }
-    catch (e) { return fail('failed', `could not recreate ${parent} (${e.code || e.message})`); }
+    const real = fsx.realpathSync.native || fsx.realpathSync;
+    const expectedReal = P.dirname(item.originalRealPath || orig);
+    let anc = parent;
+    while (!(() => { try { fsx.lstatSync(anc); return true; } catch (e) { return false; } })() && P.dirname(anc) !== anc) anc = P.dirname(anc);
+    try {
+      const realAnc = real(anc);
+      const ok = same(expectedReal, realAnc, ci) || (ci ? expectedReal.toLowerCase() : expectedReal).startsWith((ci ? realAnc.toLowerCase() : realAnc).replace(/[\\/]+$/, '') + P.sep);
+      if (!ok) return fail('refused', `${anc} now resolves to ${realAnc}, which is not on the way to where it was (a link changed); nothing was created`);
+    } catch (e) { return fail('refused', `${anc} cannot be resolved (${e.code || e.message})`); }
+    try {
+      fsx.mkdirSync(parent, { recursive: true }); recreated = true; pst = fsx.statSync(parent, { bigint: true });
+      if (!same(real(parent), expectedReal, ci)) return fail('refused', `${parent} was recreated but resolves to ${real(parent)} instead of ${expectedReal}; the folder was NOT put back`);
+    } catch (e) { return fail('failed', `could not recreate ${parent} (${e.code || e.message})`); }
   }
   if (!pst.isDirectory()) return fail('refused', `${parent} is not a folder now`);
   if (!recreated) {
@@ -262,11 +311,14 @@ async function restoreItem(item, ctx, opts = {}) {
     if (!same(realParent, wasParent, ci)) return fail('refused', `${parent} now resolves to ${realParent}, not ${wasParent} where it was (a link or mount changed)`);
   }
   if (String(pst.dev) !== String(item.dev)) return fail('refused', `${parent} is on a different volume than the quarantine (a rename cannot move it there)`);
-  // Contents must still be what was moved in.
-  if (ctx.inspect && Number.isFinite(item.files) && Number.isFinite(item.size)) {
+  // Contents should still be what was moved in. A difference (a file written while the dialog was open, a dev server,
+  // a .DS_Store) never makes restore impossible: the user can confirm "restore anyway". The location checks above and
+  // the destination checks below still apply, and the rename never overwrites.
+  if (!opts.anyway && ctx.inspect) {
+    if (!Number.isFinite(item.files) || !Number.isFinite(item.size)) return fail('mismatch', 'has no size or file count recorded in the manifest, so its contents cannot be verified', { canRestoreAnyway: true });
     const w = await ctx.inspect(q);
-    if (w.error) return fail('mismatch', 'in quarantine could not be verified (' + w.error + ')');
-    if (w.files !== item.files || w.bytes !== item.size) return fail('mismatch', `in quarantine no longer matches the manifest (${w.files} files / ${w.bytes} bytes now, ${item.files} / ${item.size} recorded); left untouched`);
+    if (w.error) return fail('mismatch', 'in quarantine could not be verified (' + w.error + ')', { canRestoreAnyway: true });
+    if (w.files !== item.files || w.bytes !== item.size) return fail('mismatch', `in quarantine differs from what was moved in (${w.files} files / ${w.bytes} bytes now, ${item.files} files / ${item.size} bytes recorded)`, { canRestoreAnyway: true, recorded: { files: item.files, bytes: item.size }, now: { files: w.files, bytes: w.bytes } });
   }
   let dest = orig;
   const exists = (p) => { try { fsx.lstatSync(p); return true; } catch (e) { return e.code !== 'ENOENT'; } };

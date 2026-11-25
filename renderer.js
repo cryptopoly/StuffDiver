@@ -3963,12 +3963,16 @@
     try { d = await window.api.listQuarantine(); } catch (e) { d = { runs: [], totalSize: 0 }; }
     quarState.data = d;
     const runs = d.runs || [];
-    document.getElementById('quar-summary').textContent = runs.length
-      ? 'Quarantine holds ' + formatSize(d.totalSize) + ' in ' + runs.length + ' run' + (runs.length === 1 ? '' : 's') + '. Quarantined items still use disk space until emptied. Runs older than ' + d.retentionDays + ' days are marked expired; nothing is removed automatically.'
+    document.getElementById('quar-summary').textContent = (runs.length || (d.unreadableRuns || []).length)
+      ? 'Quarantine holds ' + formatSize(d.totalSize) + ' in ' + (runs.length + (d.unreadable || 0)) + ' run' + (runs.length + (d.unreadable || 0) === 1 ? '' : 's') + '. Quarantined items still use disk space until emptied. Runs older than ' + d.retentionDays + ' days are marked expired (you can still restore them); nothing is removed automatically.'
       : '';
-    document.getElementById('quar-empty').classList.toggle('hidden', runs.length > 0);
+    const unread = d.unreadableRuns || [];
+    document.getElementById('quar-empty').classList.toggle('hidden', runs.length > 0 || unread.length > 0);
     document.getElementById('quar-empty-btn').classList.toggle('hidden', !runs.length);
-    document.getElementById('quar-list').innerHTML = runs.map(function(run) {
+    const unreadHtml = unread.map(function(u) {
+      return '<div class="quar-run quar-expired quar-unreadable" data-name="' + escHtml(u.name) + '"><div class="quar-run-head"><div><div class="quar-run-title">Unreadable quarantine run</div><div class="dellog-meta">' + escHtml(u.path) + ' &middot; ' + formatSize(u.size) + (u.capped ? '+' : '') + ' &middot; ' + escHtml(u.error || '') + '. It still uses disk space; Stuff Diver cannot put its folders back.</div></div><div><button class="quar-btn quar-reveal-broken" data-name="' + escHtml(u.name) + '">Reveal in file manager</button> <button class="quar-btn quar-trash-broken" data-name="' + escHtml(u.name) + '">Move to Trash</button></div></div></div>';
+    }).join('');
+    document.getElementById('quar-list').innerHTML = unreadHtml + runs.map(function(run) {
       const when = formatLogTime(run.t);
       const fb = quarState.failures[run.runId] || {};
       const items = run.items.map(function(it) {
@@ -3976,15 +3980,15 @@
         const held = (it.status === 'quarantined' || it.status === 'planned') && it.present;
         let state = it.status === 'restored' ? 'restored' : (held ? 'in quarantine' : (it.status === 'quarantined' && !it.present ? 'missing from quarantine' : escHtml(it.status)));
         let btns = '';
-        if (held && !run.expired) btns += '<button class="quar-btn quar-restore-item" data-run="' + run.runId + '" data-id="' + it.id + '">Restore this folder</button>';
+        if (held) btns += '<button class="quar-btn quar-restore-item" data-run="' + run.runId + '" data-id="' + it.id + '">Restore this folder</button>';
         if (f && f.canRestoreBeside) btns += ' <button class="quar-btn quar-restore-beside" data-run="' + run.runId + '" data-id="' + it.id + '">Restore beside it as "' + escHtml(it.name) + ' (restored)"</button>';
+        if (f && f.canRestoreAnyway) btns += ' <button class="quar-btn quar-restore-anyway" data-run="' + run.runId + '" data-id="' + it.id + '">Restore anyway</button>';
         if (f && f.canRecreateParent) btns += ' <button class="quar-btn quar-restore-recreate" data-run="' + run.runId + '" data-id="' + it.id + '">Recreate the parent folder and restore</button>';
         return '<div class="quar-item" data-id="' + it.id + '"><div class="quar-item-main"><div>' + escHtml(it.originalPath) + '</div><div class="dellog-meta">' + escHtml(state) + ' &middot; ' + formatSize(Number(it.size) || 0) + ' &middot; ' + (Number(it.files) || 0).toLocaleString() + ' files' + (f && f.reason ? ' &middot; <span class="cleanup-warn">' + escHtml(f.reason) + '</span>' : '') + (it.restoredTo ? ' &middot; now at ' + escHtml(it.restoredTo) : '') + '</div></div>' + btns + '</div>';
       }).join('');
       const head = '<div class="quar-run-head"><div><div class="quar-run-title">' + escHtml(when) + (run.expired ? ' &middot; expired' : '') + '</div><div class="dellog-meta">' + run.heldCount + ' of ' + run.items.length + ' folder' + (run.items.length === 1 ? '' : 's') + ' in quarantine &middot; ' + formatSize(run.size) + '</div></div><div>'
-        + (run.expired
-          ? '<button class="quar-btn quar-trash-run" data-run="' + run.runId + '">Expired: tap to move to Trash</button>'
-          : (run.heldCount ? '<button class="quar-btn quar-restore-run" data-run="' + run.runId + '">Restore this run</button> ' : '') + '<button class="quar-btn quar-trash-run" data-run="' + run.runId + '">Move to Trash</button>')
+        + (run.heldCount ? '<button class="quar-btn quar-restore-run" data-run="' + run.runId + '">Restore this run</button> ' : '')
+        + '<button class="quar-btn quar-trash-run" data-run="' + run.runId + '">' + (run.expired ? 'Expired: tap to move to Trash' : 'Move to Trash') + '</button>'
         + '</div></div>';
       return '<div class="quar-run' + (run.expired ? ' quar-expired' : '') + '" data-run="' + run.runId + '">' + head + items + '</div>';
     }).join('');
@@ -4002,7 +4006,7 @@
     try { res = await window.api.trashQuarantine(runIds); } catch (e) { res = { error: String(e && e.message || e) }; }
     if (res.error) quarNotice(res.error, true);
     else if (res.cancelled) quarNotice('', false);
-    else quarNotice('Moved ' + res.trashed + ' quarantine run folder' + (res.trashed === 1 ? '' : 's') + ' to the Trash' + (res.failed ? ', ' + res.failed + ' failed (left untouched): ' + res.results.filter(function(r) { return !r.ok; }).map(function(r) { return r.reason; }).join('; ') : '') + '. You can still restore them from the Trash.', !!res.failed);
+    else quarNotice('Moved ' + res.trashed + ' quarantine run folder' + (res.trashed === 1 ? '' : 's') + ' to the Trash' + (res.removed ? ', ' + res.removed + ' gone but not confirmed to be in the Trash (the system reported an error)' : '') + (res.failed ? ', ' + res.failed + ' failed (left untouched): ' + res.results.filter(function(r) { return !r.ok; }).map(function(r) { return r.reason; }).join('; ') : '') + '. You can still restore them from the Trash.', !!res.failed);
     await loadQuarantine();
   }
 
@@ -5165,7 +5169,15 @@
       if (e.target.id === 'quar-overlay') closeQuarantine();
     });
     document.getElementById('quar-empty-btn').addEventListener('click', () => quarTrash('all'));
-    document.getElementById('quar-list').addEventListener('click', (e) => {
+    document.getElementById('quar-list').addEventListener('click', async (e) => {
+      const nb = e.target.closest('button[data-name]');
+      if (nb) {
+        if (nb.classList.contains('quar-reveal-broken')) { window.api.revealQuarantineBroken(nb.dataset.name); return; }
+        let res; try { res = await window.api.trashQuarantineBroken(nb.dataset.name); } catch (er) { res = { error: String(er && er.message || er) }; }
+        quarNotice(res.error ? res.error : res.cancelled ? '' : (res.failed ? 'Could not move it to the Trash: ' + res.reason : 'Moved the unreadable run to the Trash.'), !!(res.error || res.failed));
+        await loadQuarantine();
+        return;
+      }
       const b = e.target.closest('button[data-run]');
       if (!b) return;
       const run = b.dataset.run, id = Number(b.dataset.id);
@@ -5173,6 +5185,10 @@
       else if (b.classList.contains('quar-restore-item')) quarRestore(run, [id], {});
       else if (b.classList.contains('quar-restore-beside')) quarRestore(run, [id], { beside: true });
       else if (b.classList.contains('quar-restore-recreate')) quarRestore(run, [id], { recreateParent: true });
+      else if (b.classList.contains('quar-restore-anyway')) {
+        const f = (quarState.failures[run] || {})[id];
+        if (window.confirm('Restore this folder anyway?\n\n' + (f && f.reason ? f.reason : 'Its contents could not be verified.') + '\n\nIt is only moved back (never overwriting anything) to ' + (f ? f.originalPath : 'its original place') + '.')) quarRestore(run, [id], { anyway: true });
+      }
       else if (b.classList.contains('quar-trash-run')) quarTrash([run]);
     });
 

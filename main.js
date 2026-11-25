@@ -201,6 +201,12 @@ function createWindow() {
   });
 }
 
+// Two app instances must not run cleanups or empty the quarantine at once (the in-process lock would not see each other).
+if (!cliOpts && !E2E) {
+  if (!app.requestSingleInstanceLock()) app.quit();
+  else app.on('second-instance', () => { if (mainWindow) { if (mainWindow.isMinimized()) mainWindow.restore(); mainWindow.focus(); } });
+}
+
 app.whenReady().then(async () => {
   if (cliOpts) {
     const code = await runCli(cliOpts, { version: app.getVersion() }).catch((e) => {
@@ -1146,9 +1152,62 @@ function restoreDestProblem(dest) {
   const mc = cleanupFolders.mountConflict([dest, real], mountList(), ci); if (mc) return mc;
   return null;
 }
+// Identifies this account on a shared volume top (every user of the machine shares D:\.StuffDiverQuarantine or /Volumes/X/...).
+function quarantineOwner() {
+  if (typeof process.getuid === 'function') return 'uid-' + process.getuid();
+  let name = ''; try { name = require('os').userInfo().username; } catch (e) { /* unknown */ }
+  return 'u-' + crypto.createHash('sha256').update(name.toLowerCase() + '|' + require('os').homedir().toLowerCase()).digest('hex').slice(0, 12);
+}
+// Windows: only FIXED local disks are used (mapped network drives, removable drives and anything unknown are not).
+const driveTypeCache = new Map();
+function quarantineDriveType(letter) {
+  if (!/^[A-Z]$/.test(letter)) return null;
+  if (E2E && typeof global.__e2eDriveType === 'function') return global.__e2eDriveType(letter);
+  if (driveTypeCache.has(letter)) return driveTypeCache.get(letter);
+  let t = null;
+  try {
+    t = require('child_process').execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `(New-Object System.IO.DriveInfo('${letter}')).DriveType`], { encoding: 'utf8', timeout: 15000, windowsHide: true }).trim();
+  } catch (e) { t = null; }
+  if (!/^(Fixed|Removable|Network|CDRom|Ram|NoRootDirectory|Unknown)$/.test(t || '')) t = null;
+  if (t) driveTypeCache.set(letter, t);
+  return t;
+}
+// macOS/Linux: network, FUSE and removable/external volumes are never used as a quarantine root.
+const BAD_FSTYPES = /^(nfs\d*|cifs|smb3?|smbfs|afpfs|webdav|fuse(\..*)?|fuseblk|macfuse|osxfuse|sshfs|9p|davfs|afs|ceph|glusterfs|vboxsf|vfat|exfat|msdos|ntfs3?)$/i;
+function quarantineVolumeProblem(root) {
+  if (E2E && typeof global.__e2eVolumeProblem === 'function') { const r = global.__e2eVolumeProblem(root); if (r !== undefined) return r; }
+  const inside = (m) => root === m || root.startsWith(m.endsWith('/') ? m : m + '/');
+  try {
+    let best = null; // longest mount point containing root
+    if (process.platform === 'linux') {
+      for (const line of fs.readFileSync('/proc/self/mountinfo', 'utf8').split('\n')) {
+        const f = line.split(' '), dash = f.indexOf('-');
+        if (f.length < 8 || dash < 0) continue;
+        const mp = f[4].replace(/\\([0-7]{3})/g, (m, o) => String.fromCharCode(parseInt(o, 8)));
+        if (inside(mp) && (!best || mp.length > best.mp.length)) best = { mp, fstype: f[dash + 1] };
+      }
+      if (best && BAD_FSTYPES.test(best.fstype)) return `is on a ${best.fstype} volume (network, FUSE or removable-type filesystem)`;
+    } else if (process.platform === 'darwin') {
+      for (const line of execFileSyncText('/sbin/mount', []).split('\n')) {
+        const m = /^(.+?) on (\/.*?) \(([^)]*)\)$/.exec(line);
+        if (m && inside(m[2]) && (!best || m[2].length > best.mp.length)) best = { mp: m[2], opts: m[3].split(',').map(x => x.trim()) };
+      }
+      if (best) {
+        if (BAD_FSTYPES.test(best.opts[0]) || !best.opts.includes('local')) return `is on a network or non-local volume (${best.opts[0]})`;
+        if (best.mp !== '/' && !best.mp.startsWith('/System/Volumes/')) {
+          const info = execFileSyncText('/usr/sbin/diskutil', ['info', best.mp]);
+          if (/Removable Media:\s+Removable/i.test(info) || /Device Location:\s+External/i.test(info) || /Protocol:\s+USB/i.test(info)) return 'is on a removable or external disk';
+        }
+      }
+    }
+  } catch (e) { return 'the volume type cannot be determined'; }
+  return null;
+}
+const execFileSyncText = (cmd, args) => require('child_process').execFileSync(cmd, args, { encoding: 'utf8', timeout: 8000 });
 function quarantineCtx() {
   const ci = process.platform === 'win32' || process.platform === 'darwin';
   return {
+    owner: quarantineOwner(), driveType: quarantineDriveType, volumeProblem: quarantineVolumeProblem,
     platform: process.platform, home: quarantineHome(), fsx: rawFs, uid: typeof process.getuid === 'function' ? process.getuid() : null,
     mounts: () => mountList(), rootOk: quarantineRootProblem, destReason: restoreDestProblem,
     rename: (E2E && typeof global.__e2eRename === 'function') ? global.__e2eRename : null,
@@ -1334,6 +1393,10 @@ handleTrusted('delete-folders', async (event, folderPaths, source) => {
           let moved = null;
           const q = qItem.get(c.path);
           if (q) {
+            // What restore will compare against is what is in the folder NOW (the first check ran before the dialog).
+            Object.assign(q.item, { size: last.size, files: last.files, originalRealPath: last.logPath || last.path });
+            try { q.item.dev = String(fs.lstatSync(c.path, { bigint: true }).dev); } catch (e) { /* the move will report it */ }
+            entry.size = last.size; entry.files = last.files;
             try {
               quarantine.moveIn(q.manifest, q.item, qctx);
               moved = { ok: true };
@@ -1394,15 +1457,55 @@ handleTrusted('delete-folders', async (event, folderPaths, source) => {
 // === Quarantine: list, restore, move to Trash ===
 const QUARANTINE_ID_RE = /^[0-9a-f]{8}$/;
 const nowMs = () => (E2E && typeof global.__e2eNow === 'function') ? global.__e2eNow() : Date.now();
+// Total bytes in a folder tree (lstat only, capped), for runs whose manifest cannot be read.
+async function folderBytes(dir) {
+  let bytes = 0, seen = 0; const stack = [dir];
+  while (stack.length && seen < 200000) {
+    const cur = stack.pop();
+    let ents; try { ents = fs.readdirSync(cur, { withFileTypes: true }); } catch (e) { continue; }
+    for (const e of ents) {
+      if (++seen > 200000) break;
+      const f = path.join(cur, e.name);
+      try { const st = fs.lstatSync(f); if (e.isDirectory() && !e.isSymbolicLink()) stack.push(f); else bytes += st.size; } catch (er) { /* vanished */ }
+    }
+    await new Promise(r => setImmediate(r));
+  }
+  return { bytes, capped: seen >= 200000 };
+}
 handleTrusted('quarantine-list', async () => {
   const r = quarantine.listRuns(quarantineRoots(), quarantineCtx(), nowMs());
+  const unreadableRuns = [];
+  for (const b of r.broken) { const sz = await folderBytes(b.runDir); unreadableRuns.push({ name: b.name, path: b.runDir, error: b.error, size: sz.bytes, capped: sz.capped }); }
   return {
-    enabled: quarantineOn(), retentionDays: quarantine.RETENTION_DAYS, totalSize: r.totalSize, unreadable: r.broken.length, busy: folderDeleteBusy,
+    enabled: quarantineOn(), retentionDays: quarantine.RETENTION_DAYS, totalSize: r.totalSize + unreadableRuns.reduce((a, u) => a + u.size, 0), unreadable: r.broken.length, unreadableRuns, busy: folderDeleteBusy,
     runs: r.runs.map(run => ({
       runId: run.runId, t: run.t, size: run.size, heldCount: run.heldCount, expired: run.expired,
       items: run.items.map(i => ({ id: i.n, name: i.name, originalPath: i.originalPath, category: i.category, size: i.size, files: i.files, status: i.status, present: i.present, restoredTo: i.restoredTo || null }))
     }))
   };
+});
+// Run folders whose manifest cannot be read are still listed (they use disk space): reveal them or move them to the Trash.
+const brokenByName = (name) => quarantine.listRuns(quarantineRoots(), quarantineCtx(), nowMs()).broken.find(b => b.name === name);
+handleTrusted('quarantine-reveal-broken', async (event, name) => {
+  const b = typeof name === 'string' ? brokenByName(name) : null;
+  if (!b) return false;
+  shell.showItemInFolder(b.runDir);
+  return true;
+});
+handleTrusted('quarantine-trash-broken', async (event, name) => {
+  const b = typeof name === 'string' ? brokenByName(name) : null;
+  if (!b) return { error: 'That folder is no longer listed as unreadable.' };
+  if (folderDeleteBusy) return { error: 'A cleanup or restore is already running. Nothing was moved.' };
+  folderDeleteBusy = true;
+  try {
+    const opts = { type: 'warning', buttons: ['Cancel', 'Move to Trash'], defaultId: 0, cancelId: 0, title: 'Unreadable quarantine run', message: 'Move this unreadable quarantine run to the Trash?', detail: `${b.runDir}\n\nIts manifest cannot be read (${b.error}), so Stuff Diver cannot put its folders back. Nothing is permanently deleted: the folder moves to the Trash and can be restored from there.` };
+    if (E2E) { if (typeof global.__e2eConfirm === 'function' && !(await global.__e2eConfirm(opts))) return { trashed: 0, cancelled: true }; }
+    else { const r = await dialog.showMessageBox(mainWindow, opts); if (r.response !== 1) return { trashed: 0, cancelled: true }; }
+    let ok = true, reason = null, removed = false;
+    try { await trashFn(b.runDir); } catch (e) { let gone = false; try { fs.lstatSync(b.runDir); } catch (er) { gone = er.code === 'ENOENT'; } if (gone) removed = true; else { ok = false; reason = osErrorReason(e); } }
+    const logError = await logDeletion([{ t: Date.now(), path: b.runDir, type: 'quarantine-run', status: ok ? (removed ? 'removed' : 'trashed') : 'failed', source: 'quarantine-unreadable', reason: ok ? (removed ? 'the system reported an error but the folder is gone; it may not be in the Trash' : 'unreadable quarantine run moved to the Trash') : reason, ...(ok ? {} : { finalState: 'untouched' }) }]);
+    return { trashed: ok && !removed ? 1 : 0, removed: removed ? 1 : 0, failed: ok ? 0 : 1, reason, ...(logError ? { logError } : {}) };
+  } finally { folderDeleteBusy = false; }
 });
 
 // opts: { ids?: number[] (default: every item still held), beside?: bool, recreateParent?: bool } applied to the listed ids.
@@ -1422,7 +1525,7 @@ handleTrusted('quarantine-restore', async (event, runId, opts) => {
     const results = [], restoredPaths = [];
     let logError = null;
     for (const it of targets) {
-      const res = await quarantine.restoreItem(it, qctx, { beside: o.beside === true, recreateParent: o.recreateParent === true });
+      const res = await quarantine.restoreItem(it, qctx, { beside: o.beside === true, recreateParent: o.recreateParent === true, anyway: o.anyway === true });
       const base = { id: it.n, name: it.name, originalPath: it.originalPath };
       const meta = { t: Date.now(), type: 'folder', runId, size: it.size, files: it.files, category: it.category, source: 'quarantine-restore' };
       if (res.ok) {
@@ -1431,7 +1534,7 @@ handleTrusted('quarantine-restore', async (event, runId, opts) => {
         results.push({ ...base, ok: true, restoredTo: res.restoredTo, beside: res.beside });
         logError = (await logDeletion([{ ...meta, path: res.restoredTo, from: it.quarantinePath, status: 'restored', reason: res.beside ? 'put back next to the folder that already exists there' : 'put back where it was' }])) || logError;
       } else {
-        results.push({ ...base, ok: false, state: res.state, reason: res.reason, canRestoreBeside: !!res.canRestoreBeside, canRecreateParent: !!res.canRecreateParent });
+        results.push({ ...base, ok: false, state: res.state, reason: res.reason, canRestoreBeside: !!res.canRestoreBeside, canRecreateParent: !!res.canRecreateParent, canRestoreAnyway: !!res.canRestoreAnyway, recorded: res.recorded, now: res.now });
         logError = (await logDeletion([{ ...meta, path: it.originalPath, status: 'blocked', reason: 'restore refused: ' + res.reason }])) || logError;
       }
     }
@@ -1460,16 +1563,16 @@ handleTrusted('quarantine-trash', async (event, runIds) => {
     const results = []; let logError = null;
     for (const run of runs) {
       for (const dir of run.dirs) {
-        let ok = true, reason = null;
+        let ok = true, reason = null, removed = false;
         try { await trashFn(dir); } catch (e) {
           let gone = false; try { fs.lstatSync(dir); } catch (er) { gone = er.code === 'ENOENT'; }
-          if (!gone) { ok = false; reason = osErrorReason(e); }
+          if (gone) { removed = true; reason = osErrorReason(e); } else { ok = false; reason = osErrorReason(e); }
         }
-        results.push({ runId: run.runId, ok, reason });
-        logError = (await logDeletion([{ t: Date.now(), path: dir, type: 'quarantine-run', runId: run.runId, size: run.size, files: run.heldCount, status: ok ? 'trashed' : 'failed', source: 'quarantine-empty', reason: ok ? (run.expired ? 'expired quarantine run moved to the Trash' : 'quarantine run moved to the Trash') : reason, ...(ok ? {} : { finalState: 'untouched' }) }])) || logError;
+        results.push({ runId: run.runId, ok, removed, reason });
+        logError = (await logDeletion([{ t: Date.now(), path: dir, type: 'quarantine-run', runId: run.runId, size: run.size, files: run.heldCount, status: !ok ? 'failed' : removed ? 'removed' : 'trashed', source: 'quarantine-empty', reason: !ok ? reason : removed ? 'the system reported an error but the run folder is gone; it may not be in the Trash (' + reason + ')' : (run.expired ? 'expired quarantine run moved to the Trash' : 'quarantine run moved to the Trash'), ...(ok ? {} : { finalState: 'untouched' }) }])) || logError;
       }
     }
-    return { trashed: results.filter(r => r.ok).length, failed: results.filter(r => !r.ok).length, results, ...(logError ? { logError } : {}) };
+    return { trashed: results.filter(r => r.ok && !r.removed).length, removed: results.filter(r => r.removed).length, failed: results.filter(r => !r.ok).length, results, ...(logError ? { logError } : {}) };
   } finally { folderDeleteBusy = false; }
 });
 
